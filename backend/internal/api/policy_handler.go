@@ -2,7 +2,9 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 	"bkt/internal/config"
 	"bkt/internal/database"
 	"bkt/internal/models"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type PolicyHandler struct {
@@ -323,30 +326,40 @@ func (h *PolicyHandler) AttachPolicyToUser(c *gin.Context) {
 		return
 	}
 
-	// Verify user exists
-	var user models.User
-	if err := database.DB.Where("id = ?", userUUID).First(&user).Error; err != nil {
-		c.JSON(http.StatusNotFound, models.ErrorResponse{
-			Error: "User not found",
-		})
-		return
-	}
+	// Use transaction to ensure atomicity (prevents TOCTOU race)
+	err = database.DB.Transaction(func(tx *gorm.DB) error {
+		// Verify user exists (within transaction)
+		var user models.User
+		if err := tx.Where("id = ?", userUUID).First(&user).Error; err != nil {
+			return fmt.Errorf("user not found")
+		}
 
-	// Verify policy exists
-	var policy models.Policy
-	if err := database.DB.Where("id = ?", policyUUID).First(&policy).Error; err != nil {
-		c.JSON(http.StatusNotFound, models.ErrorResponse{
-			Error: "Policy not found",
-		})
-		return
-	}
+		// Verify policy exists (within transaction)
+		var policy models.Policy
+		if err := tx.Where("id = ?", policyUUID).First(&policy).Error; err != nil {
+			return fmt.Errorf("policy not found")
+		}
 
-	// Attach policy (GORM handles many-to-many)
-	if err := database.DB.Model(&user).Association("Policies").Append(&policy); err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Failed to attach policy",
-			Message: err.Error(),
-		})
+		// Attach policy (GORM handles many-to-many, prevents duplicates)
+		if err := tx.Model(&user).Association("Policies").Append(&policy); err != nil {
+			return fmt.Errorf("failed to attach policy: %w", err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		// Determine appropriate status code based on error
+		if strings.Contains(err.Error(), "not found") {
+			c.JSON(http.StatusNotFound, models.ErrorResponse{
+				Error: err.Error(),
+			})
+		} else {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+				Error:   "Failed to attach policy",
+				Message: err.Error(),
+			})
+		}
 		return
 	}
 
@@ -385,30 +398,40 @@ func (h *PolicyHandler) DetachPolicyFromUser(c *gin.Context) {
 		return
 	}
 
-	// Verify user exists
-	var user models.User
-	if err := database.DB.Where("id = ?", userUUID).First(&user).Error; err != nil {
-		c.JSON(http.StatusNotFound, models.ErrorResponse{
-			Error: "User not found",
-		})
-		return
-	}
+	// Use transaction to ensure atomicity (prevents TOCTOU race)
+	err = database.DB.Transaction(func(tx *gorm.DB) error {
+		// Verify user exists (within transaction)
+		var user models.User
+		if err := tx.Where("id = ?", userUUID).First(&user).Error; err != nil {
+			return fmt.Errorf("user not found")
+		}
 
-	// Verify policy exists
-	var policy models.Policy
-	if err := database.DB.Where("id = ?", policyUUID).First(&policy).Error; err != nil {
-		c.JSON(http.StatusNotFound, models.ErrorResponse{
-			Error: "Policy not found",
-		})
-		return
-	}
+		// Verify policy exists (within transaction)
+		var policy models.Policy
+		if err := tx.Where("id = ?", policyUUID).First(&policy).Error; err != nil {
+			return fmt.Errorf("policy not found")
+		}
 
-	// Detach policy
-	if err := database.DB.Model(&user).Association("Policies").Delete(&policy); err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Failed to detach policy",
-			Message: err.Error(),
-		})
+		// Detach policy (GORM handles many-to-many)
+		if err := tx.Model(&user).Association("Policies").Delete(&policy); err != nil {
+			return fmt.Errorf("failed to detach policy: %w", err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		// Determine appropriate status code based on error
+		if strings.Contains(err.Error(), "not found") {
+			c.JSON(http.StatusNotFound, models.ErrorResponse{
+				Error: err.Error(),
+			})
+		} else {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+				Error:   "Failed to detach policy",
+				Message: err.Error(),
+			})
+		}
 		return
 	}
 

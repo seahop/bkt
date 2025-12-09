@@ -128,7 +128,17 @@ func (h *BucketHandler) getStorageBackend(bucket *models.Bucket) (storage.Storag
 		forcePathStyle,
 	)
 	if err != nil {
-		// Fallback to local storage if initialization fails
+		// Log configuration error - don't silently fallback as this can hide issues
+		fmt.Printf("[BucketHandler] WARNING: Failed to initialize %s storage backend: %v\n", backend, err)
+		fmt.Printf("[BucketHandler] Falling back to local storage (bucket: %s)\n", bucket.Name)
+
+		// Return error if S3 was explicitly configured for this bucket
+		// Silent fallback can lead to data being written to wrong storage
+		if backend == "s3" {
+			return nil, fmt.Errorf("S3 storage backend configuration error: %w", err)
+		}
+
+		// Only fallback to local if backend was "local" or unspecified
 		return storage.NewLocalStorage(h.config.Storage.RootPath), nil
 	}
 

@@ -14,13 +14,16 @@ import (
 func SetupRouter(cfg *config.Config) *gin.Engine {
 	router := gin.Default()
 
+	// Request ID middleware - adds unique ID to each request for tracing
+	router.Use(middleware.RequestIDMiddleware())
+
 	// CORS configuration - loaded from environment for security (CORS_ALLOWED_ORIGINS)
 	// Defaults to development origins if not set. In production, always set explicitly.
 	router.Use(cors.New(cors.Config{
 		AllowOrigins:     cfg.CORS.AllowedOrigins,
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "X-Amz-Date", "X-Amz-Content-Sha256"},
-		ExposeHeaders:    []string{"Content-Length", "ETag", "X-Amz-Request-Id"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "X-Amz-Date", "X-Amz-Content-Sha256", "X-Request-ID"},
+		ExposeHeaders:    []string{"Content-Length", "ETag", "X-Amz-Request-Id", "X-Request-ID"},
 		AllowCredentials: cfg.CORS.AllowCredentials,
 	}))
 

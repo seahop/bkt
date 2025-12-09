@@ -200,16 +200,17 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 	var user models.User
 	if err := database.DB.First(&user, "id = ?", claims.UserID).Error; err != nil {
 		c.JSON(http.StatusUnauthorized, models.ErrorResponse{
-			Error:   "User not found",
+			Error:   "Invalid session",
+			Message: "Please log in again",
 		})
 		return
 	}
 
-	// Check if account is locked
+	// Check if account is locked (use generic message to avoid info disclosure)
 	if user.IsLocked {
-		c.JSON(http.StatusForbidden, models.ErrorResponse{
-			Error:   "Account locked",
-			Message: "This account has been locked. Please contact an administrator.",
+		c.JSON(http.StatusUnauthorized, models.ErrorResponse{
+			Error:   "Authentication failed",
+			Message: "Access denied",
 		})
 		return
 	}

@@ -62,11 +62,11 @@ func S3AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Check if user is locked
+		// Check if user is locked (use same generic message to avoid info disclosure)
 		if key.User.IsLocked {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-				"Code":    "AccessDenied",
-				"Message": "Account is locked",
+				"Code":    "InvalidAccessKeyId",
+				"Message": "The AWS access key ID you provided does not exist in our records",
 			})
 			return
 		}
@@ -74,23 +74,24 @@ func S3AuthMiddleware() gin.HandlerFunc {
 		// Decrypt secret key
 		secretKey, err := security.DecryptSecretKey(key.SecretKeyEncrypted)
 		if err != nil {
+			// Log internal error but don't expose details to client
 			fmt.Printf("[S3Auth] Failed to decrypt secret for access key %s: %v\n", accessKey, err)
 			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
 				"Code":    "InternalError",
-				"Message": fmt.Sprintf("Failed to decrypt secret key: %v", err),
+				"Message": "We encountered an internal error. Please try again.",
 			})
 			return
 		}
 
 		// Validate signature
 		if err := validateSignature(c, authHeader, accessKey, secretKey); err != nil {
-			// Log signature validation failure for debugging
+			// Log signature validation failure for debugging (but don't expose details to client)
 			fmt.Printf("[S3Auth] Signature validation failed for %s: %v\n", accessKey, err)
 			fmt.Printf("[S3Auth] Method: %s, Path: %s\n", c.Request.Method, c.Request.URL.Path)
 			fmt.Printf("[S3Auth] Auth Header: %s\n", authHeader)
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"Code":    "SignatureDoesNotMatch",
-				"Message": err.Error(),
+				"Message": "The request signature we calculated does not match the signature you provided",
 			})
 			return
 		}

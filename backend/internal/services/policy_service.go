@@ -33,7 +33,15 @@ func NewPolicyService() *PolicyService {
 }
 
 // CheckBucketAccess checks if a user has permission to perform an action on a bucket
-func (ps *PolicyService) CheckBucketAccess(userID uuid.UUID, bucketName, action string) (bool, error) {
+func (ps *PolicyService) CheckBucketAccess(userID uuid.UUID, bucketName, action string) (result bool, err error) {
+	// Recover from panics to prevent service crash (fail-safe: deny access on panic)
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("bucket access check panic: %v", r)
+			result = false
+		}
+	}()
+
 	// Get user with policies
 	var user models.User
 	if err := database.DB.Preload("Policies").First(&user, userID).Error; err != nil {
@@ -84,7 +92,15 @@ func (ps *PolicyService) CheckBucketAccess(userID uuid.UUID, bucketName, action 
 }
 
 // CheckObjectAccess checks if a user has permission to perform an action on an object
-func (ps *PolicyService) CheckObjectAccess(userID uuid.UUID, bucketName, objectKey, action string) (bool, error) {
+func (ps *PolicyService) CheckObjectAccess(userID uuid.UUID, bucketName, objectKey, action string) (result bool, err error) {
+	// Recover from panics to prevent service crash (fail-safe: deny access on panic)
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("object access check panic: %v", r)
+			result = false
+		}
+	}()
+
 	// Get user with policies
 	var user models.User
 	if err := database.DB.Preload("Policies").First(&user, userID).Error; err != nil {
@@ -176,8 +192,17 @@ func (ps *PolicyService) evaluateBucketPolicy(bucketPolicy *models.BucketPolicy,
 	return ps.evaluatePolicy(bucketPolicy.PolicyDocument, action, resource, false)
 }
 
-// evaluatePolicy parses and evaluates a policy document
-func (ps *PolicyService) evaluatePolicy(policyJSON string, action, resource string, isAdmin bool) (bool, error) {
+// evaluatePolicy parses and evaluates a policy document with panic recovery
+func (ps *PolicyService) evaluatePolicy(policyJSON string, action, resource string, isAdmin bool) (result bool, err error) {
+	// Recover from panics in policy evaluation (prevent resource leaks)
+	defer func() {
+		if r := recover(); r != nil {
+			// Convert panic to error instead of crashing the service
+			err = fmt.Errorf("policy evaluation panic: %v", r)
+			result = false
+		}
+	}()
+
 	// Parse and validate policy document
 	policyDoc, err := security.ValidatePolicyDocument(policyJSON)
 	if err != nil {

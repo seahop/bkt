@@ -142,6 +142,49 @@ export const bucketApi = {
     return data
   },
 
+  uploadObjectAsync: async (bucketName: string, key: string, file: File): Promise<{ upload_id: string; status: string; message: string }> => {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('key', key)
+    const { data } = await api.post<{ upload_id: string; status: string; message: string }>(`/buckets/${bucketName}/objects/async`, formData)
+    return data
+  },
+
+  getUploadStatus: async (uploadId: string): Promise<{
+    id: string
+    status: string
+    filename: string
+    object_key: string
+    total_size: number
+    uploaded_size: number
+    progress_percent: number
+    error_message?: string
+    object_id?: string
+    created_at: string
+    completed_at?: string
+  }> => {
+    const { data } = await api.get(`/uploads/${uploadId}/status`)
+    return data
+  },
+
+  listUploads: async (status?: string): Promise<Array<{
+    id: string
+    status: string
+    filename: string
+    object_key: string
+    total_size: number
+    uploaded_size: number
+    progress_percent: number
+    error_message?: string
+    object_id?: string
+    created_at: string
+    completed_at?: string
+  }>> => {
+    const params = status ? { status } : {}
+    const { data } = await api.get('/uploads', { params })
+    return data
+  },
+
   deleteObject: async (bucketName: string, key: string): Promise<void> => {
     await api.delete(`/buckets/${bucketName}/objects/${key}`)
   },

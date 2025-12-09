@@ -2,11 +2,14 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"bkt/internal/config"
 	"bkt/internal/database"
+	"bkt/internal/logger"
 	"bkt/internal/models"
 	"bkt/internal/security"
 	"bkt/internal/services"
@@ -22,16 +25,80 @@ import (
 	"gorm.io/gorm"
 )
 
+// s3ConfigCacheEntry represents a cached S3 configuration with expiration
+type s3ConfigCacheEntry struct {
+	Config    *s3ConfigData
+	ExpiresAt time.Time
+}
+
+// s3ConfigData holds decrypted S3 configuration data for caching
+type s3ConfigData struct {
+	Endpoint        string
+	Region          string
+	AccessKeyID     string // Decrypted
+	SecretAccessKey string // Decrypted
+	BucketPrefix    string
+	UseSSL          bool
+	ForcePathStyle  bool
+}
+
+// Global S3 config cache with 5 minute TTL (reduces database load)
+var (
+	s3ConfigCache   = make(map[string]*s3ConfigCacheEntry)
+	s3ConfigCacheMu sync.RWMutex
+	s3ConfigCacheTTL = 5 * time.Minute
+)
+
 type BucketHandler struct {
 	config        *config.Config
 	policyService *services.PolicyService
+	auditService  *services.AuditService
 }
 
 func NewBucketHandler(cfg *config.Config) *BucketHandler {
 	return &BucketHandler{
 		config:        cfg,
 		policyService: services.NewPolicyService(),
+		auditService:  services.NewAuditService(),
 	}
+}
+
+// getS3ConfigFromCache retrieves S3 config from cache if valid
+func getS3ConfigFromCache(cacheKey string) (*s3ConfigData, bool) {
+	s3ConfigCacheMu.RLock()
+	defer s3ConfigCacheMu.RUnlock()
+
+	entry, exists := s3ConfigCache[cacheKey]
+	if !exists {
+		return nil, false
+	}
+
+	// Check if entry has expired
+	if time.Now().After(entry.ExpiresAt) {
+		return nil, false
+	}
+
+	return entry.Config, true
+}
+
+// setS3ConfigInCache stores S3 config in cache with TTL
+func setS3ConfigInCache(cacheKey string, config *s3ConfigData) {
+	s3ConfigCacheMu.Lock()
+	defer s3ConfigCacheMu.Unlock()
+
+	s3ConfigCache[cacheKey] = &s3ConfigCacheEntry{
+		Config:    config,
+		ExpiresAt: time.Now().Add(s3ConfigCacheTTL),
+	}
+}
+
+// InvalidateS3ConfigCache invalidates cached S3 configurations (called when configs are modified)
+func InvalidateS3ConfigCache() {
+	s3ConfigCacheMu.Lock()
+	defer s3ConfigCacheMu.Unlock()
+
+	// Clear entire cache when any config is modified
+	s3ConfigCache = make(map[string]*s3ConfigCacheEntry)
 }
 
 // getStorageBackend creates a storage backend instance based on the bucket's configuration
@@ -47,74 +114,111 @@ func (h *BucketHandler) getStorageBackend(bucket *models.Bucket) (storage.Storag
 		return storage.NewLocalStorage(h.config.Storage.RootPath), nil
 	}
 
-	// S3 backend: Check if bucket has a specific S3 configuration
+	// S3 backend: Load configuration with caching (reduces database load)
 	var endpoint, region, accessKeyID, secretAccessKey, bucketPrefix string
 	var useSSL, forcePathStyle bool
 
+	// Determine cache key and load config
+	var cacheKey string
+	var configData *s3ConfigData
+	var cacheHit bool
+
 	if bucket.S3ConfigID != nil {
-		// Load bucket-specific S3 configuration from database
-		var s3Config models.S3Configuration
-		if err := database.DB.Where("id = ?", bucket.S3ConfigID).First(&s3Config).Error; err == nil {
-			endpoint = s3Config.Endpoint
-			region = s3Config.Region
+		// Bucket-specific S3 configuration
+		cacheKey = bucket.S3ConfigID.String()
+		configData, cacheHit = getS3ConfigFromCache(cacheKey)
 
-			// Decrypt S3 credentials (they're stored encrypted for security)
-			var err error
-			accessKeyID, err = security.DecryptSecretKey(s3Config.AccessKeyID)
-			if err != nil {
-				return nil, fmt.Errorf("failed to decrypt access key ID: %w", err)
-			}
-			secretAccessKey, err = security.DecryptSecretKey(s3Config.SecretAccessKey)
-			if err != nil {
-				return nil, fmt.Errorf("failed to decrypt secret access key: %w", err)
-			}
+		if !cacheHit {
+			// Cache miss - load from database
+			var s3Config models.S3Configuration
+			if err := database.DB.Where("id = ?", bucket.S3ConfigID).First(&s3Config).Error; err == nil {
+				// Decrypt S3 credentials (they're stored encrypted for security)
+				decryptedAccessKeyID, err := security.DecryptSecretKey(s3Config.AccessKeyID)
+				if err != nil {
+					return nil, fmt.Errorf("failed to decrypt access key ID: %w", err)
+				}
+				decryptedSecretAccessKey, err := security.DecryptSecretKey(s3Config.SecretAccessKey)
+				if err != nil {
+					return nil, fmt.Errorf("failed to decrypt secret access key: %w", err)
+				}
 
-			bucketPrefix = s3Config.BucketPrefix
-			useSSL = s3Config.UseSSL
-			forcePathStyle = s3Config.ForcePathStyle
-		} else {
-			// If config not found, fall back to .env
-			endpoint = h.config.Storage.S3.Endpoint
-			region = h.config.Storage.S3.Region
-			accessKeyID = h.config.Storage.S3.AccessKeyID
-			secretAccessKey = h.config.Storage.S3.SecretAccessKey
-			bucketPrefix = h.config.Storage.S3.BucketPrefix
-			useSSL = h.config.Storage.S3.UseSSL
-			forcePathStyle = h.config.Storage.S3.ForcePathStyle
+				// Create config data and cache it
+				configData = &s3ConfigData{
+					Endpoint:        s3Config.Endpoint,
+					Region:          s3Config.Region,
+					AccessKeyID:     decryptedAccessKeyID,
+					SecretAccessKey: decryptedSecretAccessKey,
+					BucketPrefix:    s3Config.BucketPrefix,
+					UseSSL:          s3Config.UseSSL,
+					ForcePathStyle:  s3Config.ForcePathStyle,
+				}
+				setS3ConfigInCache(cacheKey, configData)
+			} else {
+				// Config not found - fall back to .env (don't cache fallback)
+				configData = &s3ConfigData{
+					Endpoint:        h.config.Storage.S3.Endpoint,
+					Region:          h.config.Storage.S3.Region,
+					AccessKeyID:     h.config.Storage.S3.AccessKeyID,
+					SecretAccessKey: h.config.Storage.S3.SecretAccessKey,
+					BucketPrefix:    h.config.Storage.S3.BucketPrefix,
+					UseSSL:          h.config.Storage.S3.UseSSL,
+					ForcePathStyle:  h.config.Storage.S3.ForcePathStyle,
+				}
+			}
 		}
 	} else {
-		// No specific config, use default from .env or default S3 config
-		var defaultConfig models.S3Configuration
-		if err := database.DB.Where("is_default = ?", true).First(&defaultConfig).Error; err == nil {
-			// Use default S3 configuration from database
-			endpoint = defaultConfig.Endpoint
-			region = defaultConfig.Region
+		// No specific config - use default S3 configuration
+		cacheKey = "default"
+		configData, cacheHit = getS3ConfigFromCache(cacheKey)
 
-			// Decrypt S3 credentials (they're stored encrypted for security)
-			var err error
-			accessKeyID, err = security.DecryptSecretKey(defaultConfig.AccessKeyID)
-			if err != nil {
-				return nil, fmt.Errorf("failed to decrypt default access key ID: %w", err)
-			}
-			secretAccessKey, err = security.DecryptSecretKey(defaultConfig.SecretAccessKey)
-			if err != nil {
-				return nil, fmt.Errorf("failed to decrypt default secret access key: %w", err)
-			}
+		if !cacheHit {
+			// Cache miss - load default from database
+			var defaultConfig models.S3Configuration
+			if err := database.DB.Where("is_default = ?", true).First(&defaultConfig).Error; err == nil {
+				// Decrypt S3 credentials (they're stored encrypted for security)
+				decryptedAccessKeyID, err := security.DecryptSecretKey(defaultConfig.AccessKeyID)
+				if err != nil {
+					return nil, fmt.Errorf("failed to decrypt default access key ID: %w", err)
+				}
+				decryptedSecretAccessKey, err := security.DecryptSecretKey(defaultConfig.SecretAccessKey)
+				if err != nil {
+					return nil, fmt.Errorf("failed to decrypt default secret access key: %w", err)
+				}
 
-			bucketPrefix = defaultConfig.BucketPrefix
-			useSSL = defaultConfig.UseSSL
-			forcePathStyle = defaultConfig.ForcePathStyle
-		} else {
-			// Fall back to .env configuration
-			endpoint = h.config.Storage.S3.Endpoint
-			region = h.config.Storage.S3.Region
-			accessKeyID = h.config.Storage.S3.AccessKeyID
-			secretAccessKey = h.config.Storage.S3.SecretAccessKey
-			bucketPrefix = h.config.Storage.S3.BucketPrefix
-			useSSL = h.config.Storage.S3.UseSSL
-			forcePathStyle = h.config.Storage.S3.ForcePathStyle
+				// Create config data and cache it
+				configData = &s3ConfigData{
+					Endpoint:        defaultConfig.Endpoint,
+					Region:          defaultConfig.Region,
+					AccessKeyID:     decryptedAccessKeyID,
+					SecretAccessKey: decryptedSecretAccessKey,
+					BucketPrefix:    defaultConfig.BucketPrefix,
+					UseSSL:          defaultConfig.UseSSL,
+					ForcePathStyle:  defaultConfig.ForcePathStyle,
+				}
+				setS3ConfigInCache(cacheKey, configData)
+			} else {
+				// No default config - fall back to .env (don't cache fallback)
+				configData = &s3ConfigData{
+					Endpoint:        h.config.Storage.S3.Endpoint,
+					Region:          h.config.Storage.S3.Region,
+					AccessKeyID:     h.config.Storage.S3.AccessKeyID,
+					SecretAccessKey: h.config.Storage.S3.SecretAccessKey,
+					BucketPrefix:    h.config.Storage.S3.BucketPrefix,
+					UseSSL:          h.config.Storage.S3.UseSSL,
+					ForcePathStyle:  h.config.Storage.S3.ForcePathStyle,
+				}
+			}
 		}
 	}
+
+	// Extract values from config data
+	endpoint = configData.Endpoint
+	region = configData.Region
+	accessKeyID = configData.AccessKeyID
+	secretAccessKey = configData.SecretAccessKey
+	bucketPrefix = configData.BucketPrefix
+	useSSL = configData.UseSSL
+	forcePathStyle = configData.ForcePathStyle
 
 	storageBackend, err := storage.NewStorageBackend(
 		backend,
@@ -129,8 +233,11 @@ func (h *BucketHandler) getStorageBackend(bucket *models.Bucket) (storage.Storag
 	)
 	if err != nil {
 		// Log configuration error - don't silently fallback as this can hide issues
-		fmt.Printf("[BucketHandler] WARNING: Failed to initialize %s storage backend: %v\n", backend, err)
-		fmt.Printf("[BucketHandler] Falling back to local storage (bucket: %s)\n", bucket.Name)
+		logger.Warn("Failed to initialize storage backend", map[string]interface{}{
+			"backend": backend,
+			"bucket":  bucket.Name,
+			"error":   err.Error(),
+		})
 
 		// Return error if S3 was explicitly configured for this bucket
 		// Silent fallback can lead to data being written to wrong storage
@@ -139,6 +246,9 @@ func (h *BucketHandler) getStorageBackend(bucket *models.Bucket) (storage.Storag
 		}
 
 		// Only fallback to local if backend was "local" or unspecified
+		logger.Info("Falling back to local storage", map[string]interface{}{
+			"bucket": bucket.Name,
+		})
 		return storage.NewLocalStorage(h.config.Storage.RootPath), nil
 	}
 
@@ -233,12 +343,53 @@ func (h *BucketHandler) CreateBucket(c *gin.Context) {
 	}
 
 	if err := database.DB.Create(&bucket).Error; err != nil {
+		// Get user info for audit log
+		username, _ := c.Get("username")
+
+		// Log failure
+		h.auditService.LogFailure(
+			c,
+			userUUID,
+			username.(string),
+			"CreateBucket",
+			"Bucket",
+			"",
+			req.Name,
+			err.Error(),
+			map[string]interface{}{
+				"bucket_name":     req.Name,
+				"region":          req.Region,
+				"storage_backend": req.StorageBackend,
+				"is_public":       req.IsPublic,
+			},
+		)
+
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to create bucket",
 			Message: err.Error(),
 		})
 		return
 	}
+
+	// Get user info for audit log
+	username, _ := c.Get("username")
+
+	// Log success
+	h.auditService.LogSuccess(
+		c,
+		userUUID,
+		username.(string),
+		"CreateBucket",
+		"Bucket",
+		bucket.ID.String(),
+		bucket.Name,
+		map[string]interface{}{
+			"bucket_name":     bucket.Name,
+			"region":          bucket.Region,
+			"storage_backend": bucket.StorageBackend,
+			"is_public":       bucket.IsPublic,
+		},
+	)
 
 	c.JSON(http.StatusCreated, bucket)
 }
@@ -382,6 +533,25 @@ func (h *BucketHandler) DeleteBucket(c *gin.Context) {
 	})
 
 	if err != nil {
+		// Get user info for audit log
+		username, _ := c.Get("username")
+
+		// Log failure
+		h.auditService.LogFailure(
+			c,
+			userUUID,
+			username.(string),
+			"DeleteBucket",
+			"Bucket",
+			bucket.ID.String(),
+			bucket.Name,
+			err.Error(),
+			map[string]interface{}{
+				"bucket_name": bucket.Name,
+				"owner_id":    bucket.OwnerID.String(),
+			},
+		)
+
 		if err.Error() == "bucket not empty" {
 			c.JSON(http.StatusConflict, models.ErrorResponse{
 				Error:   "Bucket not empty",
@@ -395,6 +565,24 @@ func (h *BucketHandler) DeleteBucket(c *gin.Context) {
 		})
 		return
 	}
+
+	// Get user info for audit log
+	username, _ := c.Get("username")
+
+	// Log success
+	h.auditService.LogSuccess(
+		c,
+		userUUID,
+		username.(string),
+		"DeleteBucket",
+		"Bucket",
+		bucket.ID.String(),
+		bucket.Name,
+		map[string]interface{}{
+			"bucket_name": bucket.Name,
+			"owner_id":    bucket.OwnerID.String(),
+		},
+	)
 
 	c.JSON(http.StatusOK, models.SuccessResponse{
 		Message: "Bucket deleted successfully",
@@ -611,13 +799,33 @@ func (h *BucketHandler) UploadObject(c *gin.Context) {
 		return
 	}
 
-	// Check file size
+	// Validate file size (prevent edge cases and resource abuse)
+	if fileHeader.Size < 0 {
+		// Negative size is invalid (should never happen, but check for safety)
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Invalid file size",
+			Message: "File size cannot be negative",
+		})
+		return
+	}
+
 	if fileHeader.Size > h.config.Storage.MaxFileSize {
 		c.JSON(http.StatusRequestEntityTooLarge, models.ErrorResponse{
 			Error:   "File too large",
 			Message: fmt.Sprintf("Maximum file size is %d bytes", h.config.Storage.MaxFileSize),
 		})
 		return
+	}
+
+	// Warn about suspiciously large files even if under limit (potential resource abuse)
+	// 1GB threshold for warning (could indicate accidental large file upload)
+	if fileHeader.Size > 1*1024*1024*1024 {
+		// Log warning but allow upload (admin may want to review)
+		logger.Warn("Large file upload detected", map[string]interface{}{
+			"object_key": objectKey,
+			"size_bytes": fileHeader.Size,
+			"size_mb":    fileHeader.Size / (1024 * 1024),
+		})
 	}
 
 	// Open uploaded file
@@ -666,12 +874,37 @@ func (h *BucketHandler) UploadObject(c *gin.Context) {
 		return
 	}
 
-	// Save object using storage backend (use combinedReader that includes first 512 bytes)
-	err = storageBackend.PutObject(bucketName, objectKey, combinedReader, fileHeader.Size, contentType)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Failed to save object",
-			Message: err.Error(),
+	// Save object using storage backend with timeout (prevents indefinite blocking on large uploads)
+	// Use 10 minute timeout for uploads (configurable based on max file size)
+	uploadTimeout := 10 * time.Minute
+	ctx, cancel := context.WithTimeout(c.Request.Context(), uploadTimeout)
+	defer cancel()
+
+	// Run upload in goroutine to support timeout
+	type uploadResult struct {
+		err error
+	}
+	resultChan := make(chan uploadResult, 1)
+
+	go func() {
+		err := storageBackend.PutObject(bucketName, objectKey, combinedReader, fileHeader.Size, contentType)
+		resultChan <- uploadResult{err: err}
+	}()
+
+	// Wait for upload or timeout
+	select {
+	case result := <-resultChan:
+		if result.err != nil {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+				Error:   "Failed to save object",
+				Message: result.err.Error(),
+			})
+			return
+		}
+	case <-ctx.Done():
+		c.JSON(http.StatusRequestTimeout, models.ErrorResponse{
+			Error:   "Upload timeout",
+			Message: fmt.Sprintf("Upload exceeded timeout of %v", uploadTimeout),
 		})
 		return
 	}

@@ -138,6 +138,9 @@ func (h *S3ConfigHandler) CreateS3Config(c *gin.Context) {
 		return
 	}
 
+	// Invalidate S3 config cache after creation
+	InvalidateS3ConfigCache()
+
 	c.JSON(http.StatusCreated, s3Config)
 }
 
@@ -279,6 +282,9 @@ func (h *S3ConfigHandler) UpdateS3Config(c *gin.Context) {
 		return
 	}
 
+	// Invalidate S3 config cache after update
+	InvalidateS3ConfigCache()
+
 	c.JSON(http.StatusOK, s3Config)
 }
 
@@ -328,6 +334,9 @@ func (h *S3ConfigHandler) DeleteS3Config(c *gin.Context) {
 		})
 		return
 	}
+
+	// Invalidate S3 config cache after deletion
+	InvalidateS3ConfigCache()
 
 	c.JSON(http.StatusOK, models.SuccessResponse{
 		Message: "S3 configuration deleted successfully",

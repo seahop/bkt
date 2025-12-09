@@ -7,17 +7,22 @@ import (
 	"bkt/internal/config"
 	"bkt/internal/database"
 	"bkt/internal/models"
+	"bkt/internal/services"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
 type UserHandler struct {
-	config *config.Config
+	config       *config.Config
+	auditService *services.AuditService
 }
 
 func NewUserHandler(cfg *config.Config) *UserHandler {
-	return &UserHandler{config: cfg}
+	return &UserHandler{
+		config:       cfg,
+		auditService: services.NewAuditService(),
+	}
 }
 
 func (h *UserHandler) GetCurrentUser(c *gin.Context) {
@@ -123,6 +128,27 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 	}
 
 	if err := database.DB.Create(&user).Error; err != nil {
+		// Get admin user info for audit log
+		adminUserID, _ := c.Get("user_id")
+		adminUsername, _ := c.Get("username")
+
+		// Log failure
+		h.auditService.LogFailure(
+			c,
+			adminUserID.(uuid.UUID),
+			adminUsername.(string),
+			"CreateUser",
+			"User",
+			"",
+			req.Username,
+			err.Error(),
+			map[string]interface{}{
+				"target_username": req.Username,
+				"target_email":    req.Email,
+				"is_admin":        req.IsAdmin,
+			},
+		)
+
 		// Check for unique constraint violations
 		errMsg := err.Error()
 		if strings.Contains(errMsg, "duplicate key") || strings.Contains(errMsg, "unique constraint") {
@@ -149,6 +175,26 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 		})
 		return
 	}
+
+	// Get admin user info for audit log
+	adminUserID, _ := c.Get("user_id")
+	adminUsername, _ := c.Get("username")
+
+	// Log success
+	h.auditService.LogSuccess(
+		c,
+		adminUserID.(uuid.UUID),
+		adminUsername.(string),
+		"CreateUser",
+		"User",
+		user.ID.String(),
+		user.Username,
+		map[string]interface{}{
+			"target_username": user.Username,
+			"target_email":    user.Email,
+			"is_admin":        user.IsAdmin,
+		},
+	)
 
 	// Don't return password hash
 	user.Password = ""
@@ -180,13 +226,61 @@ func (h *UserHandler) DeleteUser(c *gin.Context) {
 		return
 	}
 
+	// Get user info before deletion for audit log
+	var targetUser models.User
+	if err := database.DB.First(&targetUser, "id = ?", userID).Error; err != nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{
+			Error: "User not found",
+		})
+		return
+	}
+
 	if err := database.DB.Delete(&models.User{}, "id = ?", userID).Error; err != nil {
+		// Get admin user info for audit log
+		adminUserID, _ := c.Get("user_id")
+		adminUsername, _ := c.Get("username")
+
+		// Log failure
+		h.auditService.LogFailure(
+			c,
+			adminUserID.(uuid.UUID),
+			adminUsername.(string),
+			"DeleteUser",
+			"User",
+			userID.String(),
+			targetUser.Username,
+			err.Error(),
+			map[string]interface{}{
+				"target_username": targetUser.Username,
+				"target_email":    targetUser.Email,
+			},
+		)
+
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to delete user",
 			Message: err.Error(),
 		})
 		return
 	}
+
+	// Get admin user info for audit log
+	adminUserID, _ := c.Get("user_id")
+	adminUsername, _ := c.Get("username")
+
+	// Log success
+	h.auditService.LogSuccess(
+		c,
+		adminUserID.(uuid.UUID),
+		adminUsername.(string),
+		"DeleteUser",
+		"User",
+		userID.String(),
+		targetUser.Username,
+		map[string]interface{}{
+			"target_username": targetUser.Username,
+			"target_email":    targetUser.Email,
+		},
+	)
 
 	c.JSON(http.StatusOK, models.SuccessResponse{
 		Message: "User deleted successfully",
@@ -214,6 +308,26 @@ func (h *UserHandler) LockUser(c *gin.Context) {
 
 	// Prevent locking admin users
 	if user.IsAdmin {
+		// Get admin user info for audit log
+		adminUserID, _ := c.Get("user_id")
+		adminUsername, _ := c.Get("username")
+
+		// Log denied action
+		h.auditService.LogDenied(
+			c,
+			adminUserID.(uuid.UUID),
+			adminUsername.(string),
+			"LockUser",
+			"User",
+			userID.String(),
+			user.Username,
+			"Cannot lock admin user",
+			map[string]interface{}{
+				"target_username": user.Username,
+				"is_admin":        true,
+			},
+		)
+
 		c.JSON(http.StatusForbidden, models.ErrorResponse{
 			Error:   "Cannot lock admin user",
 			Message: "Admin users cannot be locked",
@@ -223,12 +337,49 @@ func (h *UserHandler) LockUser(c *gin.Context) {
 
 	user.IsLocked = true
 	if err := database.DB.Save(&user).Error; err != nil {
+		// Get admin user info for audit log
+		adminUserID, _ := c.Get("user_id")
+		adminUsername, _ := c.Get("username")
+
+		// Log failure
+		h.auditService.LogFailure(
+			c,
+			adminUserID.(uuid.UUID),
+			adminUsername.(string),
+			"LockUser",
+			"User",
+			userID.String(),
+			user.Username,
+			err.Error(),
+			map[string]interface{}{
+				"target_username": user.Username,
+			},
+		)
+
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to lock user",
 			Message: err.Error(),
 		})
 		return
 	}
+
+	// Get admin user info for audit log
+	adminUserID, _ := c.Get("user_id")
+	adminUsername, _ := c.Get("username")
+
+	// Log success
+	h.auditService.LogSuccess(
+		c,
+		adminUserID.(uuid.UUID),
+		adminUsername.(string),
+		"LockUser",
+		"User",
+		userID.String(),
+		user.Username,
+		map[string]interface{}{
+			"target_username": user.Username,
+		},
+	)
 
 	c.JSON(http.StatusOK, models.SuccessResponse{
 		Message: "User locked successfully",
@@ -256,12 +407,49 @@ func (h *UserHandler) UnlockUser(c *gin.Context) {
 
 	user.IsLocked = false
 	if err := database.DB.Save(&user).Error; err != nil {
+		// Get admin user info for audit log
+		adminUserID, _ := c.Get("user_id")
+		adminUsername, _ := c.Get("username")
+
+		// Log failure
+		h.auditService.LogFailure(
+			c,
+			adminUserID.(uuid.UUID),
+			adminUsername.(string),
+			"UnlockUser",
+			"User",
+			userID.String(),
+			user.Username,
+			err.Error(),
+			map[string]interface{}{
+				"target_username": user.Username,
+			},
+		)
+
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to unlock user",
 			Message: err.Error(),
 		})
 		return
 	}
+
+	// Get admin user info for audit log
+	adminUserID, _ := c.Get("user_id")
+	adminUsername, _ := c.Get("username")
+
+	// Log success
+	h.auditService.LogSuccess(
+		c,
+		adminUserID.(uuid.UUID),
+		adminUsername.(string),
+		"UnlockUser",
+		"User",
+		userID.String(),
+		user.Username,
+		map[string]interface{}{
+			"target_username": user.Username,
+		},
+	)
 
 	c.JSON(http.StatusOK, models.SuccessResponse{
 		Message: "User unlocked successfully",
@@ -342,12 +530,53 @@ func (h *UserHandler) DeleteUserAccessKey(c *gin.Context) {
 
 	// Hard delete the access key for admin revocation
 	if err := database.DB.Unscoped().Delete(&accessKey).Error; err != nil {
+		// Get admin user info for audit log
+		adminUserID, _ := c.Get("user_id")
+		adminUsername, _ := c.Get("username")
+
+		// Log failure
+		h.auditService.LogFailure(
+			c,
+			adminUserID.(uuid.UUID),
+			adminUsername.(string),
+			"DeleteAccessKey",
+			"AccessKey",
+			keyID.String(),
+			accessKey.AccessKey,
+			err.Error(),
+			map[string]interface{}{
+				"target_user_id":  userID.String(),
+				"target_username": user.Username,
+				"access_key":      accessKey.AccessKey,
+			},
+		)
+
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to delete access key",
 			Message: err.Error(),
 		})
 		return
 	}
+
+	// Get admin user info for audit log
+	adminUserID, _ := c.Get("user_id")
+	adminUsername, _ := c.Get("username")
+
+	// Log success
+	h.auditService.LogSuccess(
+		c,
+		adminUserID.(uuid.UUID),
+		adminUsername.(string),
+		"DeleteAccessKey",
+		"AccessKey",
+		keyID.String(),
+		accessKey.AccessKey,
+		map[string]interface{}{
+			"target_user_id":  userID.String(),
+			"target_username": user.Username,
+			"access_key":      accessKey.AccessKey,
+		},
+	)
 
 	c.JSON(http.StatusOK, models.SuccessResponse{
 		Message: "Access key deleted successfully",

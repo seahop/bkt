@@ -88,7 +88,7 @@ type CORSConfig struct {
 }
 
 func Load() *Config {
-	return &Config{
+	cfg := &Config{
 		Database: DatabaseConfig{
 			Host:     getEnv("DB_HOST", "localhost"),
 			Port:     getEnv("DB_PORT", "5432"),
@@ -147,6 +147,60 @@ func Load() *Config {
 			Audience: getEnv("VAULT_JWT_AUDIENCE", "object-storage"),
 		},
 	}
+
+	// Validate critical secrets in production
+	if err := cfg.Validate(); err != nil {
+		panic(fmt.Sprintf("Configuration validation failed: %v", err))
+	}
+
+	return cfg
+}
+
+// Validate checks that critical secrets are set in production environments
+func (c *Config) Validate() error {
+	// Check if running in production (via GO_ENV or APP_ENV environment variable)
+	env := strings.ToLower(getEnv("GO_ENV", getEnv("APP_ENV", "development")))
+	isProd := env == "production" || env == "prod"
+
+	if !isProd {
+		// Skip validation in development/test environments
+		return nil
+	}
+
+	// In production, critical secrets must be explicitly set
+	errors := []string{}
+
+	// JWT Secret must not be default value
+	if c.Auth.JWTSecret == "dev_jwt_secret_change_in_production" || c.Auth.JWTSecret == "" {
+		errors = append(errors, "JWT_SECRET must be set in production (cannot use default value)")
+	}
+
+	// Database password should be set in production
+	if c.Database.Password == "objectstore_dev_password" || c.Database.Password == "" {
+		errors = append(errors, "DB_PASSWORD must be set in production (cannot use default value)")
+	}
+
+	// ENCRYPTION_KEY from environment (checked via security package initialization)
+	encryptionKey := os.Getenv("ENCRYPTION_KEY")
+	if encryptionKey == "" {
+		errors = append(errors, "ENCRYPTION_KEY must be set in production (required for S3 credential encryption)")
+	}
+
+	// TLS should be enabled in production
+	if !c.TLS.Enabled {
+		errors = append(errors, "TLS_ENABLED must be true in production (TLS is required for secure communication)")
+	}
+
+	// If Google SSO is enabled, credentials must be set
+	if c.GoogleSSO.Enabled && (c.GoogleSSO.ClientID == "" || c.GoogleSSO.ClientSecret == "") {
+		errors = append(errors, "Google SSO enabled but GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET not set")
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("production configuration errors:\n  - %s", strings.Join(errors, "\n  - "))
+	}
+
+	return nil
 }
 
 func (c *Config) GetDSN() string {

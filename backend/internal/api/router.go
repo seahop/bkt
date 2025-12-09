@@ -17,12 +17,15 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	// Request ID middleware - adds unique ID to each request for tracing
 	router.Use(middleware.RequestIDMiddleware())
 
+	// User-Agent validation - prevents malformed requests
+	router.Use(middleware.UserAgentValidationMiddleware())
+
 	// CORS configuration - loaded from environment for security (CORS_ALLOWED_ORIGINS)
 	// Defaults to development origins if not set. In production, always set explicitly.
 	router.Use(cors.New(cors.Config{
 		AllowOrigins:     cfg.CORS.AllowedOrigins,
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "X-Amz-Date", "X-Amz-Content-Sha256", "X-Request-ID"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "X-Amz-Date", "X-Amz-Content-Sha256", "X-Request-ID", "Idempotency-Key"},
 		ExposeHeaders:    []string{"Content-Length", "ETag", "X-Amz-Request-Id", "X-Request-ID"},
 		AllowCredentials: cfg.CORS.AllowCredentials,
 	}))
@@ -64,6 +67,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// Protected routes (require authentication)
 		protected := api.Group("")
 		protected.Use(middleware.AuthMiddleware(cfg.Auth.JWTSecret))
+		protected.Use(middleware.IdempotencyMiddleware()) // Apply idempotency to all authenticated routes
 		{
 			// User routes
 			userHandler := NewUserHandler(cfg)
@@ -104,9 +108,17 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 				// Object routes within a bucket - use :name to match the bucket parameter above
 				buckets.GET("/:name/objects", bucketHandler.ListObjects)
 				buckets.POST("/:name/objects", bucketHandler.UploadObject)
+				buckets.POST("/:name/objects/async", bucketHandler.UploadObjectAsync) // Async upload
 				buckets.GET("/:name/objects/*key", bucketHandler.DownloadObject)
 				buckets.DELETE("/:name/objects/*key", bucketHandler.DeleteObject)
 				buckets.HEAD("/:name/objects/*key", bucketHandler.HeadObject)
+			}
+
+			// Upload status routes (for async uploads)
+			uploads := protected.Group("/uploads")
+			{
+				uploads.GET("", bucketHandler.ListUploads)
+				uploads.GET("/:id/status", bucketHandler.GetUploadStatus)
 			}
 
 			// Policy routes

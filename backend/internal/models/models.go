@@ -230,6 +230,59 @@ type AuthResponse struct {
 	User         User   `json:"user"`
 }
 
+// AuditLog represents a logged administrative action for compliance and security
+type AuditLog struct {
+	ID          uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
+	UserID      uuid.UUID `gorm:"type:uuid;index;not null" json:"user_id"`
+	Username    string    `gorm:"index;not null" json:"username"`           // Denormalized for faster queries
+	Action      string    `gorm:"index;not null" json:"action"`             // e.g., "CreateUser", "DeleteBucket", "UpdatePolicy"
+	ResourceType string   `gorm:"index" json:"resource_type"`               // e.g., "User", "Bucket", "Policy"
+	ResourceID  string    `gorm:"index" json:"resource_id,omitempty"`       // ID of affected resource
+	ResourceName string   `gorm:"" json:"resource_name,omitempty"`          // Name of affected resource (for readability)
+	IPAddress   string    `gorm:"index" json:"ip_address"`                  // Client IP for forensics
+	UserAgent   string    `gorm:"" json:"user_agent,omitempty"`             // Client User-Agent
+	RequestID   string    `gorm:"index" json:"request_id,omitempty"`        // Correlation ID for tracing
+	Status      string    `gorm:"index;not null" json:"status"`             // "success", "failure", "denied"
+	ErrorMessage string   `gorm:"" json:"error_message,omitempty"`          // Error details if failed
+	Metadata    string    `gorm:"type:jsonb" json:"metadata,omitempty"`     // Additional context (JSON)
+	CreatedAt   time.Time `gorm:"index" json:"created_at"`
+
+	// Relationships
+	User User `gorm:"foreignKey:UserID" json:"user,omitempty"`
+}
+
+// BeforeCreate hook to generate UUID
+func (a *AuditLog) BeforeCreate(tx *gorm.DB) error {
+	if a.ID == uuid.Nil {
+		a.ID = uuid.New()
+	}
+	return nil
+}
+
+// IdempotencyKey represents a stored idempotency key for preventing duplicate requests
+type IdempotencyKey struct {
+	ID           uuid.UUID  `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
+	Key          string     `gorm:"uniqueIndex;not null" json:"key"`                 // Client-provided idempotency key
+	UserID       uuid.UUID  `gorm:"type:uuid;index;not null" json:"user_id"`         // User who made the request
+	Method       string     `gorm:"not null" json:"method"`                          // HTTP method (POST, PUT, etc.)
+	Path         string     `gorm:"not null" json:"path"`                            // Request path
+	StatusCode   int        `gorm:"not null" json:"status_code"`                     // Response status code
+	ResponseBody string     `gorm:"type:text" json:"response_body"`                  // Cached response body
+	RequestHash  string     `gorm:"not null" json:"request_hash"`                    // SHA256 hash of request body
+	CreatedAt    time.Time  `gorm:"index" json:"created_at"`
+	ExpiresAt    time.Time  `gorm:"index;not null" json:"expires_at"`                // TTL expiration
+
+	// Relationships
+	User User `gorm:"foreignKey:UserID" json:"user,omitempty"`
+}
+
+func (i *IdempotencyKey) BeforeCreate(tx *gorm.DB) error {
+	if i.ID == uuid.Nil {
+		i.ID = uuid.New()
+	}
+	return nil
+}
+
 type AccessKeyResponse struct {
 	AccessKey string    `json:"access_key"`
 	SecretKey string    `json:"secret_key"` // Only shown once during creation

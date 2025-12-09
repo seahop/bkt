@@ -82,12 +82,29 @@ func (s3s *S3Storage) PutObject(bucketName, objectKey string, data io.Reader, si
 		Bucket: aws.String(actualBucketName),
 	})
 	if err != nil {
-		// Bucket doesn't exist, create it
+		// Bucket doesn't exist, attempt to create it
 		_, err = s3s.client.CreateBucket(ctx, &s3.CreateBucketInput{
 			Bucket: aws.String(actualBucketName),
 		})
 		if err != nil {
-			return fmt.Errorf("failed to create bucket: %w", err)
+			// Categorize error for better debugging
+			errMsg := err.Error()
+			if strings.Contains(errMsg, "BucketAlreadyOwnedByYou") {
+				// Bucket exists but HeadBucket failed (eventual consistency) - safe to proceed
+				// Don't return error, continue with upload
+			} else if strings.Contains(errMsg, "BucketAlreadyExists") {
+				// Bucket owned by someone else - permission error
+				return fmt.Errorf("bucket already exists (owned by another account): %w", err)
+			} else if strings.Contains(errMsg, "AccessDenied") || strings.Contains(errMsg, "Forbidden") {
+				// Permission error - clearly indicate auth failure
+				return fmt.Errorf("insufficient permissions to create bucket (check S3 credentials): %w", err)
+			} else if strings.Contains(errMsg, "InvalidBucketName") {
+				// Invalid bucket name format
+				return fmt.Errorf("invalid bucket name format: %w", err)
+			} else {
+				// Generic error - include full context
+				return fmt.Errorf("failed to create S3 bucket '%s': %w", actualBucketName, err)
+			}
 		}
 	}
 

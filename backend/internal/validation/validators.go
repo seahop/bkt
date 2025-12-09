@@ -1,6 +1,9 @@
 package validation
 
 import (
+	"crypto/md5"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
@@ -173,4 +176,22 @@ func ValidateRegion(region string) error {
 	}
 
 	return nil
+}
+
+// CalculateSHA256 calculates the SHA256 hash of the data from a reader
+func CalculateSHA256(reader io.Reader) (string, error) {
+	hash := sha256.New()
+	if _, err := io.Copy(hash, reader); err != nil {
+		return "", fmt.Errorf("failed to calculate SHA256: %w", err)
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// CalculateMD5 calculates the MD5 hash of the data from a reader (used for ETag)
+func CalculateMD5(reader io.Reader) (string, error) {
+	hash := md5.New()
+	if _, err := io.Copy(hash, reader); err != nil {
+		return "", fmt.Errorf("failed to calculate MD5: %w", err)
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }

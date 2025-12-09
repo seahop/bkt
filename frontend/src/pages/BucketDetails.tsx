@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { FolderOpen, Upload, Download, Trash2, File as FileIcon, ArrowLeft, RefreshCw, Folder, FolderPlus, Home } from 'lucide-react'
+import { FolderOpen, Upload, Download, Trash2, File as FileIcon, ArrowLeft, RefreshCw, Folder, FolderPlus, Home, Loader2 } from 'lucide-react'
 import { bucketApi } from '../services/api'
 import type { Object as StorageObject } from '../types'
 
@@ -16,6 +16,14 @@ interface FileItem extends StorageObject {
 
 type BrowserItem = FolderItem | FileItem
 
+interface ActiveUpload {
+  uploadId: string
+  filename: string
+  progress: number
+  status: string
+  error?: string
+}
+
 export default function BucketDetails() {
   const { bucketName } = useParams<{ bucketName: string }>()
   const [objects, setObjects] = useState<StorageObject[]>([])
@@ -25,11 +33,13 @@ export default function BucketDetails() {
   const [error, setError] = useState('')
   const [showCreateFolderModal, setShowCreateFolderModal] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
+  const [activeUploads, setActiveUploads] = useState<ActiveUpload[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     if (bucketName) {
       loadObjects()
+      loadActiveUploads()
     }
   }, [bucketName, currentPrefix])
 
@@ -48,6 +58,82 @@ export default function BucketDetails() {
     } finally {
       setLoading(false)
     }
+  }
+
+  const loadActiveUploads = async () => {
+    try {
+      // Load uploads that are pending or processing
+      const uploads = await bucketApi.listUploads('processing')
+      const pendingUploads = await bucketApi.listUploads('pending')
+
+      const allActiveUploads = [...uploads, ...pendingUploads]
+
+      // Convert to ActiveUpload format and start polling
+      const activeUploadsList: ActiveUpload[] = allActiveUploads.map(upload => ({
+        uploadId: upload.id,
+        filename: upload.filename,
+        progress: upload.progress_percent,
+        status: upload.status,
+        error: upload.error_message
+      }))
+
+      setActiveUploads(activeUploadsList)
+
+      // Start polling for each active upload
+      allActiveUploads.forEach(upload => {
+        if (upload.status === 'pending' || upload.status === 'processing') {
+          pollUploadStatus(upload.id, upload.filename)
+        }
+      })
+    } catch (error) {
+      console.error('Failed to load active uploads:', error)
+    }
+  }
+
+  // Poll upload status
+  const pollUploadStatus = async (uploadId: string, filename: string) => {
+    const maxAttempts = 600 // 10 minutes with 1 second intervals
+    let attempts = 0
+
+    const poll = async () => {
+      try {
+        const status = await bucketApi.getUploadStatus(uploadId)
+
+        setActiveUploads(prev =>
+          prev.map(u =>
+            u.uploadId === uploadId
+              ? {
+                  ...u,
+                  progress: status.progress_percent,
+                  status: status.status,
+                  error: status.error_message
+                }
+              : u
+          )
+        )
+
+        if (status.status === 'completed') {
+          // Remove from active uploads after a brief delay
+          setTimeout(() => {
+            setActiveUploads(prev => prev.filter(u => u.uploadId !== uploadId))
+          }, 2000)
+          await loadObjects()
+        } else if (status.status === 'failed') {
+          // Keep failed upload visible for user to see error
+          setTimeout(() => {
+            setActiveUploads(prev => prev.filter(u => u.uploadId !== uploadId))
+          }, 10000)
+        } else if (attempts < maxAttempts) {
+          attempts++
+          setTimeout(poll, 1000) // Poll every second
+        }
+      } catch (error) {
+        console.error('Failed to poll upload status:', error)
+        setActiveUploads(prev => prev.filter(u => u.uploadId !== uploadId))
+      }
+    }
+
+    poll()
   }
 
   // Parse objects into folders and files for current prefix
@@ -119,13 +205,40 @@ export default function BucketDetails() {
     setError('')
 
     try {
-      // Upload each selected file with current prefix
+      // Upload each selected file
       for (const file of Array.from(files)) {
         const objectKey = currentPrefix + file.name
-        await bucketApi.uploadObject(bucketName, objectKey, file)
+        const fileSizeMB = file.size / (1024 * 1024)
+
+        // Use async upload for files larger than 10MB
+        if (fileSizeMB > 10) {
+          try {
+            const response = await bucketApi.uploadObjectAsync(bucketName, objectKey, file)
+
+            // Add to active uploads
+            setActiveUploads(prev => [
+              ...prev,
+              {
+                uploadId: response.upload_id,
+                filename: file.name,
+                progress: 0,
+                status: 'pending',
+              }
+            ])
+
+            // Start polling for status
+            pollUploadStatus(response.upload_id, file.name)
+          } catch (error: any) {
+            console.error('Failed to start async upload:', error)
+            setError(error.response?.data?.message || `Failed to upload ${file.name}`)
+          }
+        } else {
+          // Use synchronous upload for smaller files
+          await bucketApi.uploadObject(bucketName, objectKey, file)
+        }
       }
 
-      // Reload objects list
+      // Reload objects list for synchronous uploads
       await loadObjects()
 
       // Reset file input
@@ -288,6 +401,42 @@ export default function BucketDetails() {
           ))}
         </div>
       </div>
+
+      {/* Active Uploads Progress */}
+      {activeUploads.length > 0 && (
+        <div className="mb-6 space-y-3">
+          {activeUploads.map((upload) => (
+            <div key={upload.uploadId} className="bg-dark-surface border border-dark-border rounded-lg p-4">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  {upload.status === 'completed' ? (
+                    <div className="text-green-500 text-sm font-medium">✓ Completed</div>
+                  ) : upload.status === 'failed' ? (
+                    <div className="text-red-500 text-sm font-medium">✗ Failed</div>
+                  ) : (
+                    <Loader2 className="w-4 h-4 text-blue-500 animate-spin" />
+                  )}
+                  <span className="text-dark-text font-medium">{upload.filename}</span>
+                </div>
+                <span className="text-dark-textSecondary text-sm">{Math.round(upload.progress)}%</span>
+              </div>
+              <div className="w-full bg-dark-bg rounded-full h-2">
+                <div
+                  className={`h-2 rounded-full transition-all duration-300 ${
+                    upload.status === 'completed' ? 'bg-green-500' :
+                    upload.status === 'failed' ? 'bg-red-500' :
+                    'bg-blue-500'
+                  }`}
+                  style={{ width: `${upload.progress}%` }}
+                />
+              </div>
+              {upload.error && (
+                <div className="mt-2 text-red-500 text-sm">{upload.error}</div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Error Message */}
       {error && (

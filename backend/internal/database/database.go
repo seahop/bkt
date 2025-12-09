@@ -2,14 +2,14 @@ package database
 
 import (
 	"fmt"
-	"log"
 	"time"
 	"bkt/internal/config"
+	"bkt/internal/logger"
 	"bkt/internal/models"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 var DB *gorm.DB
@@ -20,7 +20,7 @@ func Initialize(cfg *config.Config) error {
 
 	var err error
 	DB, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Info),
+		Logger: gormlogger.Default.LogMode(gormlogger.Info),
 	})
 
 	if err != nil {
@@ -43,7 +43,11 @@ func Initialize(cfg *config.Config) error {
 	// 1 hour - forces connection refresh to pick up DNS/network changes
 	sqlDB.SetConnMaxLifetime(time.Hour)
 
-	log.Println("Database connection established")
+	logger.Info("Database connection established", map[string]interface{}{
+		"host": cfg.Database.Host,
+		"port": cfg.Database.Port,
+		"db":   cfg.Database.DBName,
+	})
 
 	// Run auto migrations
 	err = DB.AutoMigrate(
@@ -54,13 +58,16 @@ func Initialize(cfg *config.Config) error {
 		&models.Object{},
 		&models.Policy{},
 		&models.BucketPolicy{},
+		&models.AuditLog{},
+		&models.IdempotencyKey{},
+		&models.Upload{},
 	)
 
 	if err != nil {
 		return fmt.Errorf("failed to run migrations: %w", err)
 	}
 
-	log.Println("Database migrations completed")
+	logger.Info("Database migrations completed", nil)
 
 	// Add custom indexes for performance (PostgreSQL-specific optimizations)
 	// Create index for efficient LIKE prefix queries on object keys
@@ -71,9 +78,11 @@ func Initialize(cfg *config.Config) error {
 	`).Error
 	if err != nil {
 		// Log warning but don't fail - this is an optimization, not critical
-		log.Printf("Warning: Failed to create pattern index: %v", err)
+		logger.Warn("Failed to create pattern index", map[string]interface{}{
+			"error": err.Error(),
+		})
 	} else {
-		log.Println("Performance indexes created")
+		logger.Info("Performance indexes created", nil)
 	}
 
 	return nil

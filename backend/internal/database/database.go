@@ -3,6 +3,7 @@ package database
 import (
 	"fmt"
 	"log"
+	"time"
 	"bkt/internal/config"
 	"bkt/internal/models"
 
@@ -25,6 +26,22 @@ func Initialize(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)
 	}
+
+	// Configure connection pool to prevent resource exhaustion
+	sqlDB, err := DB.DB()
+	if err != nil {
+		return fmt.Errorf("failed to get database instance: %w", err)
+	}
+
+	// Set maximum number of open connections (prevents exhausting database resources)
+	sqlDB.SetMaxOpenConns(25)
+
+	// Set maximum number of idle connections (reduces overhead)
+	sqlDB.SetMaxIdleConns(10)
+
+	// Set maximum lifetime of a connection (prevents stale connections)
+	// 1 hour - forces connection refresh to pick up DNS/network changes
+	sqlDB.SetConnMaxLifetime(time.Hour)
 
 	log.Println("Database connection established")
 

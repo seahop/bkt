@@ -209,7 +209,7 @@ func (h *S3APIHandler) ListObjects(c *gin.Context) {
 		contents = append(contents, ObjectInfo{
 			Key:          obj.Key,
 			LastModified: obj.UpdatedAt,
-			ETag:         fmt.Sprintf(`"%s"`, obj.ETag),
+			ETag:         `"` + obj.ETag + `"`, // Avoid fmt.Sprintf allocation in hot path
 			Size:         obj.Size,
 			StorageClass: "STANDARD",
 			Owner: Owner{

@@ -251,7 +251,7 @@ func buildCanonicalRequest(c *gin.Context, signedHeaders string) string {
 		encodedKey := url.QueryEscape(key)
 		for _, value := range query[key] {
 			encodedValue := url.QueryEscape(value)
-			queryParts = append(queryParts, fmt.Sprintf("%s=%s", encodedKey, encodedValue))
+			queryParts = append(queryParts, encodedKey+"="+encodedValue) // Avoid fmt.Sprintf allocation
 		}
 	}
 	canonicalQuery := strings.Join(queryParts, "&")

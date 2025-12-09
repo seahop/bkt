@@ -13,6 +13,7 @@ import (
 var (
 	bucketNameRegex = regexp.MustCompile(`^[a-z0-9][a-z0-9\-]*[a-z0-9]$`)
 	ipAddressRegex  = regexp.MustCompile(`^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$`)
+	regionRegex     = regexp.MustCompile(`^[a-z]{2}-[a-z]+-[0-9]{1,2}$`)
 )
 
 // ValidateBucketName validates bucket name according to S3 naming rules
@@ -149,4 +150,27 @@ func IsSafeContentType(contentType string) bool {
 	}
 
 	return true
+}
+
+// ValidateRegion validates AWS/S3 region format
+// Accepts standard AWS region format (e.g., "us-east-1", "eu-west-2")
+// or allows empty string for default region
+func ValidateRegion(region string) error {
+	// Empty region is allowed (will use default)
+	if region == "" {
+		return nil
+	}
+
+	// Check if region matches standard AWS format: <continent>-<direction>-<number>
+	// Examples: us-east-1, eu-west-2, ap-southeast-1
+	if !regionRegex.MatchString(region) {
+		return fmt.Errorf("region must match AWS format (e.g., us-east-1, eu-west-2)")
+	}
+
+	// Limit region length to prevent DoS
+	if len(region) > 20 {
+		return fmt.Errorf("region name too long (max 20 characters)")
+	}
+
+	return nil
 }

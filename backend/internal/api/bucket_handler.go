@@ -157,6 +157,15 @@ func (h *BucketHandler) CreateBucket(c *gin.Context) {
 		return
 	}
 
+	// Validate region format
+	if err := validation.ValidateRegion(req.Region); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Invalid region",
+			Message: err.Error(),
+		})
+		return
+	}
+
 	// Check policy permissions
 	allowed, err := h.policyService.CheckBucketAccess(userUUID, req.Name, services.ActionCreateBucket)
 	if err != nil {

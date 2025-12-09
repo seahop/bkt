@@ -24,7 +24,9 @@ func (h *UserHandler) GetCurrentUser(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 
 	var user models.User
-	if err := database.DB.Preload("Buckets").Preload("AccessKeys").First(&user, "id = ?", userID).Error; err != nil {
+	// Don't preload Buckets and AccessKeys to avoid memory issues with large datasets
+	// Clients should use dedicated endpoints to list buckets/keys if needed
+	if err := database.DB.First(&user, "id = ?", userID).Error; err != nil {
 		c.JSON(http.StatusNotFound, models.ErrorResponse{
 			Error: "User not found",
 		})
@@ -38,7 +40,7 @@ func (h *UserHandler) UpdateCurrentUser(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 
 	var req struct {
-		Email    string `json:"email"`
+		Email    string `json:"email" binding:"omitempty,email"`
 		Password string `json:"password,omitempty"`
 	}
 
@@ -58,7 +60,7 @@ func (h *UserHandler) UpdateCurrentUser(c *gin.Context) {
 		return
 	}
 
-	// Update email if provided
+	// Update email if provided (already validated by binding tag)
 	if req.Email != "" {
 		user.Email = req.Email
 	}
@@ -155,7 +157,9 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 
 func (h *UserHandler) ListUsers(c *gin.Context) {
 	users := make([]models.User, 0)
-	if err := database.DB.Preload("Policies").Find(&users).Error; err != nil {
+	// Don't preload Policies to avoid memory issues when there are many users
+	// Use dedicated policy endpoints if policy details are needed
+	if err := database.DB.Find(&users).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to fetch users",
 			Message: err.Error(),

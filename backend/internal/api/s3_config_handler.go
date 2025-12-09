@@ -5,9 +5,11 @@ import (
 	"bkt/internal/config"
 	"bkt/internal/database"
 	"bkt/internal/models"
+	"bkt/internal/security"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type S3ConfigHandler struct {
@@ -70,11 +72,6 @@ func (h *S3ConfigHandler) CreateS3Config(c *gin.Context) {
 		return
 	}
 
-	// If this is set as default, unset any existing default
-	if req.IsDefault {
-		database.DB.Model(&models.S3Configuration{}).Where("is_default = ?", true).Update("is_default", false)
-	}
-
 	// Set default values for booleans if not provided
 	useSSL := true
 	if req.UseSSL != nil {
@@ -86,20 +83,54 @@ func (h *S3ConfigHandler) CreateS3Config(c *gin.Context) {
 		forcePathStyle = *req.ForcePathStyle
 	}
 
-	// Create S3 configuration
+	// Encrypt S3 credentials before storing (CRITICAL security requirement)
+	encryptedAccessKeyID, err := security.EncryptSecretKey(req.AccessKeyID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to encrypt access key ID",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	encryptedSecretAccessKey, err := security.EncryptSecretKey(req.SecretAccessKey)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to encrypt secret access key",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	// Create S3 configuration with encrypted credentials
 	s3Config := models.S3Configuration{
 		Name:            req.Name,
 		Endpoint:        req.Endpoint,
 		Region:          req.Region,
-		AccessKeyID:     req.AccessKeyID,
-		SecretAccessKey: req.SecretAccessKey, // TODO: Encrypt in production
+		AccessKeyID:     encryptedAccessKeyID,     // Encrypted for database storage
+		SecretAccessKey: encryptedSecretAccessKey, // Encrypted for database storage
 		BucketPrefix:    req.BucketPrefix,
 		UseSSL:          useSSL,
 		ForcePathStyle:  forcePathStyle,
 		IsDefault:       req.IsDefault,
 	}
 
-	if err := database.DB.Create(&s3Config).Error; err != nil {
+	// Use transaction to atomically unset existing default and create new config (prevents TOCTOU race)
+	err = database.DB.Transaction(func(tx *gorm.DB) error {
+		// If this is set as default, unset any existing default within the transaction
+		if req.IsDefault {
+			if err := tx.Model(&models.S3Configuration{}).
+				Where("is_default = ?", true).
+				Update("is_default", false).Error; err != nil {
+				return err
+			}
+		}
+
+		// Create the new S3 configuration
+		return tx.Create(&s3Config).Error
+	})
+
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to create S3 configuration",
 			Message: err.Error(),
@@ -178,13 +209,6 @@ func (h *S3ConfigHandler) UpdateS3Config(c *gin.Context) {
 		return
 	}
 
-	// If setting as default, unset any existing default
-	if req.IsDefault != nil && *req.IsDefault {
-		database.DB.Model(&models.S3Configuration{}).
-			Where("is_default = ? AND id != ?", true, configUUID).
-			Update("is_default", false)
-	}
-
 	// Update fields if provided
 	if req.Name != "" {
 		s3Config.Name = req.Name
@@ -196,10 +220,28 @@ func (h *S3ConfigHandler) UpdateS3Config(c *gin.Context) {
 		s3Config.Region = req.Region
 	}
 	if req.AccessKeyID != "" {
-		s3Config.AccessKeyID = req.AccessKeyID
+		// Encrypt access key ID before storing
+		encryptedAccessKeyID, err := security.EncryptSecretKey(req.AccessKeyID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+				Error:   "Failed to encrypt access key ID",
+				Message: err.Error(),
+			})
+			return
+		}
+		s3Config.AccessKeyID = encryptedAccessKeyID
 	}
 	if req.SecretAccessKey != "" {
-		s3Config.SecretAccessKey = req.SecretAccessKey // TODO: Encrypt in production
+		// Encrypt secret access key before storing (CRITICAL security requirement)
+		encryptedSecretAccessKey, err := security.EncryptSecretKey(req.SecretAccessKey)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+				Error:   "Failed to encrypt secret access key",
+				Message: err.Error(),
+			})
+			return
+		}
+		s3Config.SecretAccessKey = encryptedSecretAccessKey
 	}
 	if req.BucketPrefix != "" {
 		s3Config.BucketPrefix = req.BucketPrefix
@@ -214,7 +256,22 @@ func (h *S3ConfigHandler) UpdateS3Config(c *gin.Context) {
 		s3Config.IsDefault = *req.IsDefault
 	}
 
-	if err := database.DB.Save(&s3Config).Error; err != nil {
+	// Use transaction to atomically unset existing default and save config (prevents TOCTOU race)
+	err = database.DB.Transaction(func(tx *gorm.DB) error {
+		// If setting as default, unset any existing default within the transaction
+		if req.IsDefault != nil && *req.IsDefault {
+			if err := tx.Model(&models.S3Configuration{}).
+				Where("is_default = ? AND id != ?", true, configUUID).
+				Update("is_default", false).Error; err != nil {
+				return err
+			}
+		}
+
+		// Save the updated S3 configuration
+		return tx.Save(&s3Config).Error
+	})
+
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to update S3 configuration",
 			Message: err.Error(),

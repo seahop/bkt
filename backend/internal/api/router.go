@@ -1,6 +1,8 @@
 package api
 
 import (
+	"time"
+
 	authpkg "bkt/internal/auth"
 	"bkt/internal/config"
 	"bkt/internal/middleware"
@@ -12,19 +14,14 @@ import (
 func SetupRouter(cfg *config.Config) *gin.Engine {
 	router := gin.Default()
 
-	// CORS configuration
+	// CORS configuration - loaded from environment for security (CORS_ALLOWED_ORIGINS)
+	// Defaults to development origins if not set. In production, always set explicitly.
 	router.Use(cors.New(cors.Config{
-		AllowOrigins: []string{
-			"https://localhost",
-			"https://localhost:443",
-			"https://localhost:5173",
-			"http://localhost:5173",
-			"http://localhost:3000",
-		},
+		AllowOrigins:     cfg.CORS.AllowedOrigins,
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "X-Amz-Date", "X-Amz-Content-Sha256"},
 		ExposeHeaders:    []string{"Content-Length", "ETag", "X-Amz-Request-Id"},
-		AllowCredentials: true,
+		AllowCredentials: cfg.CORS.AllowCredentials,
 	}))
 
 	// Health check endpoint
@@ -39,9 +36,13 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		authHandler := NewAuthHandler(cfg)
 		auth := api.Group("/auth")
 		{
-			auth.POST("/register", authHandler.Register)
-			auth.POST("/login", authHandler.Login)
-			auth.POST("/refresh", authHandler.RefreshToken)
+			// Apply strict rate limiting to auth endpoints (prevents brute force attacks)
+			// 5 requests per minute per IP for login/register
+			authRateLimit := middleware.RateLimitMiddleware(5, time.Minute)
+
+			auth.POST("/register", authRateLimit, authHandler.Register)
+			auth.POST("/login", authRateLimit, authHandler.Login)
+			auth.POST("/refresh", authRateLimit, authHandler.RefreshToken)
 
 			// SSO configuration endpoint
 			ssoConfigHandler := NewSSOConfigHandler(cfg)

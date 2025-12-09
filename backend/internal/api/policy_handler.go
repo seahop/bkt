@@ -84,7 +84,14 @@ func (h *PolicyHandler) CreatePolicy(c *gin.Context) {
 	}
 
 	// Re-serialize validated policy (prevents injection attacks)
-	validatedDoc, _ := json.Marshal(policyDoc)
+	validatedDoc, err := json.Marshal(policyDoc)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to serialize policy document",
+			Message: err.Error(),
+		})
+		return
+	}
 
 	// Check if policy with same name already exists
 	var existingPolicy models.Policy
@@ -195,7 +202,14 @@ func (h *PolicyHandler) UpdatePolicy(c *gin.Context) {
 		}
 
 		// Re-serialize validated policy
-		validatedDoc, _ := json.Marshal(policyDoc)
+		validatedDoc, err := json.Marshal(policyDoc)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+				Error:   "Failed to serialize policy document",
+				Message: err.Error(),
+			})
+			return
+		}
 		policy.Document = string(validatedDoc)
 	}
 

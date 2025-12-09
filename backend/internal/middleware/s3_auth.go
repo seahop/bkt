@@ -95,10 +95,13 @@ func S3AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Update last used timestamp
+		// Update last used timestamp (best-effort, don't fail auth if update fails)
 		now := time.Now()
 		key.LastUsedAt = &now
-		database.DB.Save(&key)
+		if err := database.DB.Save(&key).Error; err != nil {
+			// Log error but don't fail the request - auth already succeeded
+			fmt.Printf("[S3Auth] Warning: Failed to update LastUsedAt: %v\n", err)
+		}
 
 		// Set user context for downstream handlers
 		c.Set("user_id", key.UserID)

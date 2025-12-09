@@ -45,6 +45,20 @@ func Initialize(cfg *config.Config) error {
 
 	log.Println("Database migrations completed")
 
+	// Add custom indexes for performance (PostgreSQL-specific optimizations)
+	// Create index for efficient LIKE prefix queries on object keys
+	// Using text_pattern_ops operator class for better prefix matching performance
+	err = DB.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_objects_key_pattern
+		ON objects (bucket_id, key text_pattern_ops)
+	`).Error
+	if err != nil {
+		// Log warning but don't fail - this is an optimization, not critical
+		log.Printf("Warning: Failed to create pattern index: %v", err)
+	} else {
+		log.Println("Performance indexes created")
+	}
+
 	return nil
 }
 

@@ -91,10 +91,19 @@ func validateStatement(stmt *PolicyStatement, index int) error {
 		return fmt.Errorf("statement must have at least one action")
 	}
 
+	// Limit number of actions per statement (prevent DoS)
+	if len(stmt.Action) > 50 {
+		return fmt.Errorf("statement cannot contain more than 50 actions")
+	}
+
 	// Validate action format and prevent dangerous wildcards
 	for _, action := range stmt.Action {
 		if err := validateAction(action); err != nil {
 			return fmt.Errorf("invalid action '%s': %w", action, err)
+		}
+		// Limit action string length (prevent DoS)
+		if len(action) > 200 {
+			return fmt.Errorf("action '%s' too long (max 200 characters)", action)
 		}
 	}
 
@@ -103,10 +112,19 @@ func validateStatement(stmt *PolicyStatement, index int) error {
 		return fmt.Errorf("statement must have at least one resource")
 	}
 
+	// Limit number of resources per statement (prevent DoS)
+	if len(stmt.Resource) > 50 {
+		return fmt.Errorf("statement cannot contain more than 50 resources")
+	}
+
 	// Validate resource format
 	for _, resource := range stmt.Resource {
 		if err := validateResource(resource); err != nil {
 			return fmt.Errorf("invalid resource '%s': %w", resource, err)
+		}
+		// Limit resource string length (prevent DoS)
+		if len(resource) > 500 {
+			return fmt.Errorf("resource '%s' too long (max 500 characters)", resource)
 		}
 	}
 
@@ -114,6 +132,17 @@ func validateStatement(stmt *PolicyStatement, index int) error {
 	if stmt.Sid != "" {
 		if err := validateSid(stmt.Sid); err != nil {
 			return fmt.Errorf("invalid Sid: %w", err)
+		}
+	}
+
+	// Validate Condition size (if present) - prevent DoS via large condition objects
+	if stmt.Condition != nil {
+		conditionJSON, err := json.Marshal(stmt.Condition)
+		if err != nil {
+			return fmt.Errorf("invalid condition object")
+		}
+		if len(conditionJSON) > 2048 {
+			return fmt.Errorf("condition object too large (max 2KB)")
 		}
 	}
 

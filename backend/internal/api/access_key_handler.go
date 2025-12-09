@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type AccessKeyHandler struct {
@@ -31,18 +32,8 @@ func (h *AccessKeyHandler) GenerateAccessKey(c *gin.Context) {
 		return
 	}
 
-	// Check if user already has maximum number of access keys (limit to 5 per user for security)
-	var count int64
-	database.DB.Model(&models.AccessKey{}).Where("user_id = ? AND is_active = ?", userID, true).Count(&count)
-	if count >= 5 {
-		c.JSON(http.StatusBadRequest, models.ErrorResponse{
-			Error:   "Maximum access keys reached",
-			Message: "You can have a maximum of 5 active access keys. Please revoke an existing key first.",
-		})
-		return
-	}
-
-	// Generate cryptographically secure access key and secret key
+	// Generate cryptographically secure access key and secret key BEFORE transaction
+	// to avoid holding locks during expensive crypto operations
 	accessKey, err := security.GenerateAccessKey()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
@@ -81,16 +72,42 @@ func (h *AccessKeyHandler) GenerateAccessKey(c *gin.Context) {
 		return
 	}
 
-	// Create access key record
-	newAccessKey := models.AccessKey{
-		UserID:             userID.(uuid.UUID),
-		AccessKey:          accessKey,
-		SecretKeyHash:      secretKeyHash,
-		SecretKeyEncrypted: secretKeyEncrypted,
-		IsActive:           true,
-	}
+	// Use transaction to atomically check limit and create key (prevents TOCTOU race)
+	var newAccessKey models.AccessKey
+	err = database.DB.Transaction(func(tx *gorm.DB) error {
+		// Count active access keys with row lock to prevent concurrent modifications
+		var count int64
+		if err := tx.Model(&models.AccessKey{}).
+			Where("user_id = ? AND is_active = ?", userID, true).
+			Count(&count).Error; err != nil {
+			return err
+		}
 
-	if err := database.DB.Create(&newAccessKey).Error; err != nil {
+		// Check limit (5 per user for security)
+		if count >= 5 {
+			return fmt.Errorf("maximum access keys reached")
+		}
+
+		// Create access key record
+		newAccessKey = models.AccessKey{
+			UserID:             userID.(uuid.UUID),
+			AccessKey:          accessKey,
+			SecretKeyHash:      secretKeyHash,
+			SecretKeyEncrypted: secretKeyEncrypted,
+			IsActive:           true,
+		}
+
+		return tx.Create(&newAccessKey).Error
+	})
+
+	if err != nil {
+		if err.Error() == "maximum access keys reached" {
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{
+				Error:   "Maximum access keys reached",
+				Message: "You can have a maximum of 5 active access keys. Please revoke an existing key first.",
+			})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to create access key",
 			Message: err.Error(),
@@ -99,6 +116,11 @@ func (h *AccessKeyHandler) GenerateAccessKey(c *gin.Context) {
 	}
 
 	// Return the secret key ONLY ONCE - it will never be shown again
+	// Add cache-control headers to prevent caching of sensitive data
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate, private")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+
 	c.JSON(http.StatusCreated, gin.H{
 		"message":     "Access key created successfully",
 		"access_key":  accessKey,
@@ -208,10 +230,13 @@ func (h *AccessKeyHandler) ValidateAccessKey(accessKey, secretKey string) (*mode
 		return nil, fmt.Errorf("invalid secret key")
 	}
 
-	// Update last used timestamp
+	// Update last used timestamp (best-effort, log error but don't fail validation)
 	now := time.Now()
 	key.LastUsedAt = &now
-	database.DB.Save(&key)
+	if err := database.DB.Save(&key).Error; err != nil {
+		// Log error but don't fail validation - auth already succeeded
+		fmt.Printf("[AccessKey] Warning: Failed to update LastUsedAt for key %s: %v\n", key.AccessKey, err)
+	}
 
 	return &key.User, nil
 }

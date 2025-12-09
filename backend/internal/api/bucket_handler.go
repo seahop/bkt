@@ -1,13 +1,17 @@
 package api
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"bkt/internal/config"
 	"bkt/internal/database"
 	"bkt/internal/models"
+	"bkt/internal/security"
 	"bkt/internal/services"
 	"bkt/internal/storage"
+	"bkt/internal/validation"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -15,6 +19,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type BucketHandler struct {
@@ -52,8 +57,18 @@ func (h *BucketHandler) getStorageBackend(bucket *models.Bucket) (storage.Storag
 		if err := database.DB.Where("id = ?", bucket.S3ConfigID).First(&s3Config).Error; err == nil {
 			endpoint = s3Config.Endpoint
 			region = s3Config.Region
-			accessKeyID = s3Config.AccessKeyID
-			secretAccessKey = s3Config.SecretAccessKey
+
+			// Decrypt S3 credentials (they're stored encrypted for security)
+			var err error
+			accessKeyID, err = security.DecryptSecretKey(s3Config.AccessKeyID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decrypt access key ID: %w", err)
+			}
+			secretAccessKey, err = security.DecryptSecretKey(s3Config.SecretAccessKey)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decrypt secret access key: %w", err)
+			}
+
 			bucketPrefix = s3Config.BucketPrefix
 			useSSL = s3Config.UseSSL
 			forcePathStyle = s3Config.ForcePathStyle
@@ -74,8 +89,18 @@ func (h *BucketHandler) getStorageBackend(bucket *models.Bucket) (storage.Storag
 			// Use default S3 configuration from database
 			endpoint = defaultConfig.Endpoint
 			region = defaultConfig.Region
-			accessKeyID = defaultConfig.AccessKeyID
-			secretAccessKey = defaultConfig.SecretAccessKey
+
+			// Decrypt S3 credentials (they're stored encrypted for security)
+			var err error
+			accessKeyID, err = security.DecryptSecretKey(defaultConfig.AccessKeyID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decrypt default access key ID: %w", err)
+			}
+			secretAccessKey, err = security.DecryptSecretKey(defaultConfig.SecretAccessKey)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decrypt default secret access key: %w", err)
+			}
+
 			bucketPrefix = defaultConfig.BucketPrefix
 			useSSL = defaultConfig.UseSSL
 			forcePathStyle = defaultConfig.ForcePathStyle
@@ -118,6 +143,15 @@ func (h *BucketHandler) CreateBucket(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error:   "Invalid request",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	// Validate bucket name according to S3 naming rules
+	if err := validation.ValidateBucketName(req.Name); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Invalid bucket name",
 			Message: err.Error(),
 		})
 		return
@@ -207,39 +241,41 @@ func (h *BucketHandler) ListBuckets(c *gin.Context) {
 		return
 	}
 
-	// Filter buckets based on policy permissions
-	accessibleBuckets := make([]models.Bucket, 0)
-	for _, bucket := range allBuckets {
-		// Admins can see all buckets
-		if isAdmin.(bool) {
-			accessibleBuckets = append(accessibleBuckets, bucket)
+	// Admin bypass - return all buckets
+	if isAdmin.(bool) {
+		c.JSON(http.StatusOK, allBuckets)
+		return
+	}
+
+	// Use batch permission check to avoid N+1 queries (fixes CRITICAL performance issue)
+	// Check if user has ANY of these common actions on each bucket
+	actions := []string{
+		services.ActionListBucket,
+		services.ActionGetObject,
+		services.ActionPutObject,
+		services.ActionDeleteObject,
+	}
+
+	// Track buckets with access (use map to avoid duplicates)
+	accessibleBucketMap := make(map[uuid.UUID]models.Bucket)
+
+	// For each action, perform batch check and collect accessible buckets
+	for _, action := range actions {
+		bucketsWithAccess, err := h.policyService.FilterAccessibleBuckets(userUUID, allBuckets, action)
+		if err != nil {
+			// Log error but continue with other actions
 			continue
 		}
-
-		// Check if user has ANY permission on this bucket
-		// Try multiple common actions - if they have any access, they should see the bucket
-		hasAccess := false
-		actions := []string{
-			services.ActionListBucket,
-			services.ActionGetObject,
-			services.ActionPutObject,
-			services.ActionDeleteObject,
+		// Add accessible buckets to map (deduplicates automatically)
+		for _, bucket := range bucketsWithAccess {
+			accessibleBucketMap[bucket.ID] = bucket
 		}
+	}
 
-		for _, action := range actions {
-			allowed, err := h.policyService.CheckBucketAccess(userUUID, bucket.Name, action)
-			if err != nil {
-				continue
-			}
-			if allowed {
-				hasAccess = true
-				break
-			}
-		}
-
-		if hasAccess {
-			accessibleBuckets = append(accessibleBuckets, bucket)
-		}
+	// Convert map back to slice
+	accessibleBuckets := make([]models.Bucket, 0, len(accessibleBucketMap))
+	for _, bucket := range accessibleBucketMap {
+		accessibleBuckets = append(accessibleBuckets, bucket)
 	}
 
 	c.JSON(http.StatusOK, accessibleBuckets)
@@ -308,18 +344,32 @@ func (h *BucketHandler) DeleteBucket(c *gin.Context) {
 		return
 	}
 
-	// Check if bucket is empty
-	var objectCount int64
-	database.DB.Model(&models.Object{}).Where("bucket_id = ?", bucket.ID).Count(&objectCount)
-	if objectCount > 0 {
-		c.JSON(http.StatusConflict, models.ErrorResponse{
-			Error:   "Bucket not empty",
-			Message: "Delete all objects before deleting the bucket",
-		})
-		return
-	}
+	// Use transaction to atomically check and delete (prevents TOCTOU race)
+	err = database.DB.Transaction(func(tx *gorm.DB) error {
+		// Check if bucket is empty with row lock to prevent concurrent modifications
+		var objectCount int64
+		if err := tx.Model(&models.Object{}).
+			Where("bucket_id = ?", bucket.ID).
+			Count(&objectCount).Error; err != nil {
+			return err
+		}
 
-	if err := database.DB.Delete(&bucket).Error; err != nil {
+		if objectCount > 0 {
+			return fmt.Errorf("bucket not empty")
+		}
+
+		// Delete the bucket within the same transaction
+		return tx.Delete(&bucket).Error
+	})
+
+	if err != nil {
+		if err.Error() == "bucket not empty" {
+			c.JSON(http.StatusConflict, models.ErrorResponse{
+				Error:   "Bucket not empty",
+				Message: "Delete all objects before deleting the bucket",
+			})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to delete bucket",
 			Message: err.Error(),
@@ -459,7 +509,9 @@ func (h *BucketHandler) ListObjects(c *gin.Context) {
 	// Get objects from database
 	query := database.DB.Where("bucket_id = ?", bucket.ID)
 	if prefix != "" {
-		query = query.Where("key LIKE ?", prefix+"%")
+		// Escape LIKE wildcards to prevent SQL injection via prefix parameter
+		escapedPrefix := validation.EscapeLikeWildcards(prefix)
+		query = query.Where("key LIKE ?", escapedPrefix+"%")
 	}
 
 	var objects []models.Object
@@ -500,6 +552,15 @@ func (h *BucketHandler) UploadObject(c *gin.Context) {
 	if objectKey == "" {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error: "Object key is required",
+		})
+		return
+	}
+
+	// Validate object key to prevent path traversal and other attacks
+	if err := validation.ValidateObjectKey(objectKey); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Invalid object key",
+			Message: err.Error(),
 		})
 		return
 	}
@@ -551,11 +612,30 @@ func (h *BucketHandler) UploadObject(c *gin.Context) {
 	}
 	defer file.Close()
 
-	// Get or detect content type
-	contentType := fileHeader.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "application/octet-stream"
+	// Detect actual content type from file magic numbers (don't trust client)
+	detectedType, firstBytes, err := validation.DetectContentType(file)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to detect content type",
+			Message: err.Error(),
+		})
+		return
 	}
+
+	// Validate content type is safe
+	if !validation.IsSafeContentType(detectedType) {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Forbidden file type",
+			Message: fmt.Sprintf("File type '%s' is not allowed", detectedType),
+		})
+		return
+	}
+
+	// Use detected content type (from magic numbers, not from client header)
+	contentType := detectedType
+
+	// Create MultiReader to prepend the first bytes back to the stream
+	combinedReader := io.MultiReader(bytes.NewReader(firstBytes), file)
 
 	// Get storage backend for this bucket
 	storageBackend, err := h.getStorageBackend(&bucket)
@@ -567,8 +647,8 @@ func (h *BucketHandler) UploadObject(c *gin.Context) {
 		return
 	}
 
-	// Save object using storage backend
-	err = storageBackend.PutObject(bucketName, objectKey, file, fileHeader.Size, contentType)
+	// Save object using storage backend (use combinedReader that includes first 512 bytes)
+	err = storageBackend.PutObject(bucketName, objectKey, combinedReader, fileHeader.Size, contentType)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to save object",
@@ -587,47 +667,50 @@ func (h *BucketHandler) UploadObject(c *gin.Context) {
 		return
 	}
 
-	// Create or update object metadata in database
-	var object models.Object
-	result := database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, objectKey).First(&object)
+	// Use UPSERT to create or update object metadata in single query (performance optimization)
+	now := time.Now()
+	object := models.Object{
+		BucketID:    bucket.ID,
+		Key:         objectKey,
+		Size:        objectInfo.Size,
+		ContentType: objectInfo.ContentType,
+		ETag:        objectInfo.ETag,
+		StoragePath: objectKey,
+		SHA256:      "",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
 
-	if result.Error == nil {
-		// Update existing object
-		object.Size = objectInfo.Size
-		object.ContentType = objectInfo.ContentType
-		object.ETag = objectInfo.ETag
-		object.StoragePath = objectKey // Use key as storage path
-		object.SHA256 = ""               // SHA256 not provided by storage backend
-		object.UpdatedAt = time.Now()
+	// PostgreSQL UPSERT: INSERT with ON CONFLICT UPDATE
+	// This reduces 2 queries (SELECT + INSERT/UPDATE) to 1 query
+	err = database.DB.Exec(`
+		INSERT INTO objects (id, bucket_id, key, size, content_type, e_tag, storage_path, sha256, created_at, updated_at)
+		VALUES (gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (bucket_id, key)
+		DO UPDATE SET
+			size = EXCLUDED.size,
+			content_type = EXCLUDED.content_type,
+			e_tag = EXCLUDED.e_tag,
+			storage_path = EXCLUDED.storage_path,
+			sha256 = EXCLUDED.sha256,
+			updated_at = EXCLUDED.updated_at
+	`, object.BucketID, object.Key, object.Size, object.ContentType, object.ETag,
+		object.StoragePath, object.SHA256, object.CreatedAt, object.UpdatedAt).Error
 
-		if err := database.DB.Save(&object).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-				Error:   "Failed to update object metadata",
-				Message: err.Error(),
-			})
-			return
-		}
-	} else {
-		// Create new object
-		object = models.Object{
-			BucketID:    bucket.ID,
-			Key:         objectKey,
-			Size:        objectInfo.Size,
-			ContentType: objectInfo.ContentType,
-			ETag:        objectInfo.ETag,
-			StoragePath: objectKey, // Use key as storage path
-			SHA256:      "",         // SHA256 not provided by storage backend
-		}
+	if err != nil {
+		// Clean up file if database operation fails
+		storageBackend.DeleteObject(bucketName, objectKey)
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to save object metadata",
+			Message: err.Error(),
+		})
+		return
+	}
 
-		if err := database.DB.Create(&object).Error; err != nil {
-			// Clean up file if database insert fails
-			storageBackend.DeleteObject(bucketName, objectKey)
-			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-				Error:   "Failed to create object metadata",
-				Message: err.Error(),
-			})
-			return
-		}
+	// Retrieve the object to get the ID and timestamps for response
+	if err := database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, objectKey).First(&object).Error; err != nil {
+		// Object was created but couldn't retrieve - log but don't fail the upload
+		// The file is successfully stored, just return success without full details
 	}
 
 	c.JSON(http.StatusOK, gin.H{

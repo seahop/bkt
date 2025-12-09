@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 	"bkt/internal/auth"
 	"bkt/internal/config"
 	"bkt/internal/database"
@@ -101,25 +102,6 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 		return
 	}
 
-	// Check if username already exists
-	var existingUser models.User
-	if err := database.DB.Where("username = ?", req.Username).First(&existingUser).Error; err == nil {
-		c.JSON(http.StatusConflict, models.ErrorResponse{
-			Error:   "Username already exists",
-			Message: "A user with this username already exists",
-		})
-		return
-	}
-
-	// Check if email already exists
-	if err := database.DB.Where("email = ?", req.Email).First(&existingUser).Error; err == nil {
-		c.JSON(http.StatusConflict, models.ErrorResponse{
-			Error:   "Email already exists",
-			Message: "A user with this email already exists",
-		})
-		return
-	}
-
 	// Hash password
 	hashedPassword, err := auth.HashPassword(req.Password, h.config.Auth.BcryptCost)
 	if err != nil {
@@ -139,6 +121,26 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 	}
 
 	if err := database.DB.Create(&user).Error; err != nil {
+		// Check for unique constraint violations
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "duplicate key") || strings.Contains(errMsg, "unique constraint") {
+			// Determine which field caused the violation
+			if strings.Contains(errMsg, "username") || strings.Contains(errMsg, "idx_users_username") {
+				c.JSON(http.StatusConflict, models.ErrorResponse{
+					Error:   "Username already exists",
+					Message: "A user with this username already exists",
+				})
+				return
+			}
+			if strings.Contains(errMsg, "email") || strings.Contains(errMsg, "idx_users_email") {
+				c.JSON(http.StatusConflict, models.ErrorResponse{
+					Error:   "Email already exists",
+					Message: "A user with this email already exists",
+				})
+				return
+			}
+		}
+		// Generic database error
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to create user",
 			Message: err.Error(),

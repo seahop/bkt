@@ -55,6 +55,11 @@ func ValidateToken(tokenString string, secret string) (*Claims, error) {
 		return nil, ErrInvalidToken
 	}
 
+	// Verify expiration time exists and is valid
+	if claims.ExpiresAt == nil {
+		return nil, ErrInvalidToken
+	}
+
 	if time.Now().After(claims.ExpiresAt.Time) {
 		return nil, ErrExpiredToken
 	}

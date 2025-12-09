@@ -261,3 +261,76 @@ func (ps *PolicyService) DeleteBucketPolicy(bucketName string) error {
 	// Delete bucket policy
 	return database.DB.Where("bucket_id = ?", bucket.ID).Delete(&models.BucketPolicy{}).Error
 }
+
+// FilterAccessibleBuckets performs batch permission checks on a list of buckets
+// Returns only buckets the user has permission to access (fixes N+1 query problem)
+func (ps *PolicyService) FilterAccessibleBuckets(userID uuid.UUID, buckets []models.Bucket, action string) ([]models.Bucket, error) {
+	// Empty list - return early
+	if len(buckets) == 0 {
+		return buckets, nil
+	}
+
+	// Load user with policies ONCE (instead of N times)
+	var user models.User
+	if err := database.DB.Preload("Policies").First(&user, userID).Error; err != nil {
+		return nil, fmt.Errorf("failed to fetch user: %w", err)
+	}
+
+	// Admin bypass - admins can access all buckets
+	if user.IsAdmin {
+		return buckets, nil
+	}
+
+	// Collect all bucket IDs for batch loading
+	bucketIDs := make([]uuid.UUID, len(buckets))
+	bucketIDMap := make(map[uuid.UUID]*models.Bucket)
+	for i := range buckets {
+		bucketIDs[i] = buckets[i].ID
+		bucketIDMap[buckets[i].ID] = &buckets[i]
+	}
+
+	// Load all bucket policies in ONE query (instead of N queries)
+	var bucketPolicies []models.BucketPolicy
+	database.DB.Where("bucket_id IN ?", bucketIDs).Find(&bucketPolicies)
+
+	// Create map of bucket ID to policy for fast lookup
+	bucketPolicyMap := make(map[uuid.UUID]*models.BucketPolicy)
+	for i := range bucketPolicies {
+		bucketPolicyMap[bucketPolicies[i].BucketID] = &bucketPolicies[i]
+	}
+
+	// Filter buckets - evaluate permissions in memory
+	accessibleBuckets := make([]models.Bucket, 0, len(buckets))
+	for _, bucket := range buckets {
+		// Build resource ARN
+		resourceARN := fmt.Sprintf("arn:aws:s3:::%s", bucket.Name)
+
+		// Check user policies
+		userPolicyResult := ps.evaluateUserPolicies(&user, action, resourceARN)
+
+		// Check bucket policy if exists
+		bucketPolicy, hasBucketPolicy := bucketPolicyMap[bucket.ID]
+		if hasBucketPolicy {
+			bucketPolicyResult, err := ps.evaluateBucketPolicy(bucketPolicy, action, resourceARN)
+			if err != nil {
+				// If bucket policy is malformed, fall back to user policies only
+				if userPolicyResult {
+					accessibleBuckets = append(accessibleBuckets, bucket)
+				}
+				continue
+			}
+
+			// Combine results: explicit deny wins, then explicit allow
+			if bucketPolicyResult || userPolicyResult {
+				accessibleBuckets = append(accessibleBuckets, bucket)
+			}
+		} else {
+			// No bucket policy - use user policies only
+			if userPolicyResult {
+				accessibleBuckets = append(accessibleBuckets, bucket)
+			}
+		}
+	}
+
+	return accessibleBuckets, nil
+}

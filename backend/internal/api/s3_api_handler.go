@@ -5,8 +5,11 @@ import (
 	"bkt/internal/database"
 	"bkt/internal/models"
 	"bkt/internal/services"
+	"bkt/internal/validation"
+	"bytes"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -97,18 +100,18 @@ func (h *S3APIHandler) ListBuckets(c *gin.Context) {
 		return
 	}
 
-	// Filter buckets based on policy permissions
-	accessibleBuckets := make([]models.Bucket, 0)
-	for _, bucket := range allBuckets {
-		if isAdmin.(bool) {
-			accessibleBuckets = append(accessibleBuckets, bucket)
-			continue
-		}
-
-		// Check if user has any access to this bucket
-		allowed, _ := h.policyService.CheckBucketAccess(userUUID, bucket.Name, services.ActionListBucket)
-		if allowed {
-			accessibleBuckets = append(accessibleBuckets, bucket)
+	// Use batch permission check to avoid N+1 queries (fixes CRITICAL performance issue)
+	var accessibleBuckets []models.Bucket
+	if isAdmin.(bool) {
+		// Admin bypass - return all buckets
+		accessibleBuckets = allBuckets
+	} else {
+		// Batch check which buckets user can list
+		var err error
+		accessibleBuckets, err = h.policyService.FilterAccessibleBuckets(userUUID, allBuckets, services.ActionListBucket)
+		if err != nil {
+			h.s3Error(c, "InternalError", "Failed to check bucket permissions", "", http.StatusInternalServerError)
+			return
 		}
 	}
 
@@ -172,7 +175,9 @@ func (h *S3APIHandler) ListObjects(c *gin.Context) {
 	var objects []models.Object
 	query := database.DB.Where("bucket_id = ?", bucket.ID)
 	if prefix != "" {
-		query = query.Where("key LIKE ?", prefix+"%")
+		// Escape LIKE wildcards to prevent SQL injection via prefix parameter
+		escapedPrefix := validation.EscapeLikeWildcards(prefix)
+		query = query.Where("key LIKE ?", escapedPrefix+"%")
 	}
 	if err := query.Limit(maxKeys).Order("key ASC").Find(&objects).Error; err != nil {
 		h.s3Error(c, "InternalError", "Failed to list objects", bucketName, http.StatusInternalServerError)
@@ -305,6 +310,12 @@ func (h *S3APIHandler) PutObject(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 	userUUID := userID.(uuid.UUID)
 
+	// Validate object key to prevent path traversal and other attacks
+	if err := validation.ValidateObjectKey(objectKey); err != nil {
+		h.s3Error(c, "InvalidArgument", err.Error(), objectKey, http.StatusBadRequest)
+		return
+	}
+
 	// Get bucket
 	var bucket models.Bucket
 	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
@@ -332,11 +343,24 @@ func (h *S3APIHandler) PutObject(c *gin.Context) {
 		return
 	}
 
-	// Get content type
-	contentType := c.GetHeader("Content-Type")
-	if contentType == "" {
-		contentType = "application/octet-stream"
+	// Detect actual content type from file magic numbers (don't trust client)
+	detectedType, firstBytes, err := validation.DetectContentType(c.Request.Body)
+	if err != nil {
+		h.s3Error(c, "InternalError", "Failed to detect content type", objectKey, http.StatusInternalServerError)
+		return
 	}
+
+	// Validate content type is safe
+	if !validation.IsSafeContentType(detectedType) {
+		h.s3Error(c, "InvalidRequest", fmt.Sprintf("File type '%s' is not allowed", detectedType), objectKey, http.StatusBadRequest)
+		return
+	}
+
+	// Use detected content type (from magic numbers, not from client header)
+	contentType := detectedType
+
+	// Create MultiReader to prepend the first bytes back to the stream
+	combinedReader := io.MultiReader(bytes.NewReader(firstBytes), c.Request.Body)
 
 	// Get storage backend
 	storageBackend, err := h.bucketHandler.getStorageBackend(&bucket)
@@ -345,8 +369,8 @@ func (h *S3APIHandler) PutObject(c *gin.Context) {
 		return
 	}
 
-	// Save object
-	err = storageBackend.PutObject(bucketName, objectKey, c.Request.Body, contentLength, contentType)
+	// Save object (use combinedReader that includes first 512 bytes)
+	err = storageBackend.PutObject(bucketName, objectKey, combinedReader, contentLength, contentType)
 	if err != nil {
 		h.s3Error(c, "InternalError", "Failed to save object", objectKey, http.StatusInternalServerError)
 		return
@@ -426,12 +450,23 @@ func (h *S3APIHandler) DeleteObject(c *gin.Context) {
 
 	// Get storage backend
 	storageBackend, err := h.bucketHandler.getStorageBackend(&bucket)
-	if err == nil {
-		storageBackend.DeleteObject(bucketName, objectKey)
+	if err != nil {
+		h.s3Error(c, "InternalError", "Failed to get storage backend", objectKey, http.StatusInternalServerError)
+		return
 	}
 
-	// Delete from database
-	database.DB.Delete(&object)
+	// Delete from storage first - MUST succeed before database delete (prevents inconsistency)
+	if err := storageBackend.DeleteObject(bucketName, objectKey); err != nil {
+		h.s3Error(c, "InternalError", "Failed to delete object from storage", objectKey, http.StatusInternalServerError)
+		return
+	}
+
+	// Delete from database only after storage delete succeeds
+	if err := database.DB.Delete(&object).Error; err != nil {
+		// Critical: storage deleted but database failed - log this for manual cleanup
+		h.s3Error(c, "InternalError", "Failed to delete object metadata", objectKey, http.StatusInternalServerError)
+		return
+	}
 
 	c.Header("x-amz-request-id", uuid.New().String())
 	c.Status(http.StatusNoContent)

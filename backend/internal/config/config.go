@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 type Config struct {
@@ -11,6 +12,7 @@ type Config struct {
 	Auth       AuthConfig
 	Storage    StorageConfig
 	TLS        TLSConfig
+	CORS       CORSConfig
 	GoogleSSO  GoogleSSOConfig
 	VaultSSO   VaultSSOConfig
 }
@@ -80,6 +82,11 @@ type VaultSSOConfig struct {
 	Audience string
 }
 
+type CORSConfig struct {
+	AllowedOrigins   []string
+	AllowCredentials bool
+}
+
 func Load() *Config {
 	return &Config{
 		Database: DatabaseConfig{
@@ -125,6 +132,7 @@ func Load() *Config {
 			KeyFile:  getEnv("TLS_KEY_FILE", ""),
 			CAFile:   getEnv("TLS_CA_FILE", ""),
 		},
+		CORS: loadCORSConfig(),
 		GoogleSSO: GoogleSSOConfig{
 			Enabled:      getEnv("GOOGLE_SSO_ENABLED", "false") == "true",
 			ClientID:     getEnv("GOOGLE_CLIENT_ID", ""),
@@ -158,4 +166,53 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+// loadCORSConfig loads CORS configuration from environment or uses secure defaults
+func loadCORSConfig() CORSConfig {
+	// Check if custom origins are set via environment variable (comma-separated)
+	originsEnv := os.Getenv("CORS_ALLOWED_ORIGINS")
+	var origins []string
+
+	if originsEnv != "" {
+		// Split by comma and trim spaces
+		for _, origin := range splitAndTrim(originsEnv, ",") {
+			if origin != "" {
+				origins = append(origins, origin)
+			}
+		}
+	} else {
+		// Default to development origins for backward compatibility
+		// In production, set CORS_ALLOWED_ORIGINS explicitly
+		origins = []string{
+			"https://localhost",
+			"https://localhost:443",
+			"https://localhost:5173",
+			"http://localhost:5173",
+			"http://localhost:3000",
+		}
+	}
+
+	// AllowCredentials defaults to true if not explicitly disabled
+	allowCredentials := getEnv("CORS_ALLOW_CREDENTIALS", "true") == "true"
+
+	return CORSConfig{
+		AllowedOrigins:   origins,
+		AllowCredentials: allowCredentials,
+	}
+}
+
+// splitAndTrim splits a string by delimiter and trims whitespace from each part
+func splitAndTrim(s, delimiter string) []string {
+	if s == "" {
+		return []string{}
+	}
+	parts := []string{}
+	for _, part := range strings.Split(s, delimiter) {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			parts = append(parts, trimmed)
+		}
+	}
+	return parts
 }

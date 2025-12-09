@@ -113,8 +113,8 @@ func (b *Bucket) BeforeCreate(tx *gorm.DB) error {
 // Object represents a stored object
 type Object struct {
 	ID          uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
-	BucketID    uuid.UUID `gorm:"type:uuid;not null;index:idx_bucket_key" json:"bucket_id"`
-	Key         string    `gorm:"not null;index:idx_bucket_key" json:"key"` // Object name/path
+	BucketID    uuid.UUID `gorm:"type:uuid;not null;uniqueIndex:idx_bucket_key_unique" json:"bucket_id"`
+	Key         string    `gorm:"not null;uniqueIndex:idx_bucket_key_unique" json:"key"` // Object name/path
 	Size        int64     `gorm:"not null" json:"size"`
 	ContentType string    `json:"content_type"`
 	ETag        string    `json:"etag"`

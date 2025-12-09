@@ -1,0 +1,60 @@
+# Environment files (contain secrets - DO NOT COMMIT)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Go
+backend/tmp/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work
+
+# Node
+node_modules/
+dist/
+.pnpm-store/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker/
+
+# SSL Certificates and private keys (DO NOT COMMIT)
+certs/
+*.key
+*.crt
+*.csr
+*.pem
+*.srl
+
+# Data directories (persistent storage)
+data/
+*.db
+*.sqlite
+
+# Archived/backup files
+.old-setup/
+*.backup
+*.bak
+
+.claude

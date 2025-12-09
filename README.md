@@ -33,7 +33,7 @@
 
 1. Clone or navigate to the repository:
 ```bash
-cd /home/sean/bkt
+cd bkt
 ```
 
 2. Run the setup script to generate credentials and SSL certificates:

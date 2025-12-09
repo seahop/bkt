@@ -72,6 +72,40 @@ func (s3s *S3Storage) getBucketName(bucketName string) string {
 	return bucketName
 }
 
+// CreateBucket creates a new bucket in S3
+func (s3s *S3Storage) CreateBucket(bucketName, region string) error {
+	ctx := context.Background()
+	actualBucketName := s3s.getBucketName(bucketName)
+
+	// Check if bucket already exists
+	_, err := s3s.client.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String(actualBucketName),
+	})
+	if err == nil {
+		// Bucket already exists, that's fine
+		return nil
+	}
+
+	// Create the bucket
+	createInput := &s3.CreateBucketInput{
+		Bucket: aws.String(actualBucketName),
+	}
+
+	// For regions other than us-east-1, we need to specify LocationConstraint
+	if region != "" && region != "us-east-1" {
+		createInput.CreateBucketConfiguration = &types.CreateBucketConfiguration{
+			LocationConstraint: types.BucketLocationConstraint(region),
+		}
+	}
+
+	_, err = s3s.client.CreateBucket(ctx, createInput)
+	if err != nil {
+		return fmt.Errorf("failed to create S3 bucket: %w", err)
+	}
+
+	return nil
+}
+
 // PutObject stores an object in S3
 func (s3s *S3Storage) PutObject(bucketName, objectKey string, data io.Reader, size int64, contentType string) error {
 	ctx := context.Background()

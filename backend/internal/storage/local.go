@@ -24,6 +24,18 @@ func NewLocalStorage(rootPath string) *LocalStorage {
 	}
 }
 
+// CreateBucket creates a bucket directory in the local filesystem
+func (ls *LocalStorage) CreateBucket(bucketName, region string) error {
+	bucketPath := filepath.Join(ls.rootPath, bucketName)
+
+	// Create the bucket directory
+	if err := os.MkdirAll(bucketPath, 0755); err != nil {
+		return fmt.Errorf("failed to create bucket directory: %w", err)
+	}
+
+	return nil
+}
+
 // PutObject stores an object in the local filesystem
 func (ls *LocalStorage) PutObject(bucketName, objectKey string, data io.Reader, size int64, contentType string) error {
 	bucketPath := filepath.Join(ls.rootPath, bucketName)

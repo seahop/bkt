@@ -371,6 +371,32 @@ func (h *BucketHandler) CreateBucket(c *gin.Context) {
 		return
 	}
 
+	// Create bucket in storage backend (local filesystem or S3)
+	// This ensures the bucket exists in the storage backend immediately
+	storageBackend, err := h.getStorageBackend(&bucket)
+	if err == nil {
+		if err := storageBackend.CreateBucket(bucket.Name, bucket.Region); err != nil {
+			logger.Warn("Failed to create bucket in storage backend", map[string]interface{}{
+				"bucket_name":     bucket.Name,
+				"storage_backend": bucket.StorageBackend,
+				"error":           err.Error(),
+			})
+			// Don't fail the request - the database record was created
+			// The bucket will be created lazily on first object upload if this fails
+		} else {
+			logger.Info("Bucket created in storage backend", map[string]interface{}{
+				"bucket_name":     bucket.Name,
+				"storage_backend": bucket.StorageBackend,
+				"region":          bucket.Region,
+			})
+		}
+	} else {
+		logger.Warn("Failed to initialize storage backend for bucket creation", map[string]interface{}{
+			"bucket_name": bucket.Name,
+			"error":       err.Error(),
+		})
+	}
+
 	// Get user info for audit log
 	username, _ := c.Get("username")
 

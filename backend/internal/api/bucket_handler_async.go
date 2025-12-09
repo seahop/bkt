@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,9 +19,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// ProgressReader wraps an io.Reader and tracks upload progress in real-time
+// ProgressReader wraps an io.ReadSeeker and tracks upload progress in real-time
 type ProgressReader struct {
-	reader        io.Reader
+	reader        io.ReadSeeker
 	uploadID      uuid.UUID
 	totalSize     int64
 	bytesRead     int64
@@ -32,7 +31,7 @@ type ProgressReader struct {
 }
 
 // NewProgressReader creates a new progress tracking reader
-func NewProgressReader(reader io.Reader, uploadID uuid.UUID, totalSize int64) *ProgressReader {
+func NewProgressReader(reader io.ReadSeeker, uploadID uuid.UUID, totalSize int64) *ProgressReader {
 	return &ProgressReader{
 		reader:            reader,
 		uploadID:          uploadID,
@@ -66,6 +65,24 @@ func (pr *ProgressReader) Read(p []byte) (n int, err error) {
 		pr.updateMutex.Unlock()
 	}
 	return n, err
+}
+
+// Seek implements io.Seeker to support AWS SDK retries
+func (pr *ProgressReader) Seek(offset int64, whence int) (int64, error) {
+	pr.updateMutex.Lock()
+	defer pr.updateMutex.Unlock()
+
+	// Delegate seek to underlying reader
+	pos, err := pr.reader.Seek(offset, whence)
+	if err != nil {
+		return pos, err
+	}
+
+	// Reset bytesRead to match the new position
+	// This ensures progress tracking remains accurate after seeks
+	pr.bytesRead = pos
+
+	return pos, nil
 }
 
 // UploadObjectAsync initiates an asynchronous upload and returns immediately with upload ID
@@ -261,7 +278,7 @@ func (h *BucketHandler) processAsyncUpload(uploadID uuid.UUID, tempFilePath stri
 	defer file.Close()
 
 	// Re-detect content type from file
-	detectedType, firstBytes, err := validation.DetectContentType(file)
+	detectedType, _, err := validation.DetectContentType(file)
 	if err != nil {
 		upload.Status = models.UploadStatusFailed
 		upload.ErrorMessage = fmt.Sprintf("Failed to detect content type: %v", err)
@@ -269,11 +286,8 @@ func (h *BucketHandler) processAsyncUpload(uploadID uuid.UUID, tempFilePath stri
 		return
 	}
 
-	// Reset file position after reading
+	// Reset file position after reading (file is seekable so no need for MultiReader)
 	file.Seek(0, 0)
-
-	// Combine first bytes with rest of file for upload
-	combinedReader := io.MultiReader(bytes.NewReader(firstBytes), file)
 
 	// Get storage backend
 	storageBackend, err := h.getStorageBackend(bucket)
@@ -288,8 +302,9 @@ func (h *BucketHandler) processAsyncUpload(uploadID uuid.UUID, tempFilePath stri
 	// ProgressReader will update uploaded_size as bytes are transferred
 	startTime := time.Now()
 
-	// Wrap reader with progress tracker for real-time updates
-	progressReader := NewProgressReader(combinedReader, upload.ID, upload.TotalSize)
+	// Wrap file with progress tracker for real-time updates
+	// File implements io.ReadSeeker, so ProgressReader will be seekable for AWS SDK retries
+	progressReader := NewProgressReader(file, upload.ID, upload.TotalSize)
 
 	if err := storageBackend.PutObject(bucket.Name, upload.ObjectKey, progressReader, upload.TotalSize, detectedType); err != nil {
 		upload.Status = models.UploadStatusFailed

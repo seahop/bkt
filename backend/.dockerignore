@@ -1,0 +1,9 @@
+tmp/
+*.exe
+*.out
+.git/
+.gitignore
+README.md
+.env
+*.test
+coverage.txt

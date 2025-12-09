@@ -216,13 +216,28 @@ func (h *BucketHandler) ListBuckets(c *gin.Context) {
 			continue
 		}
 
-		// Check policy permission for ListBucket action
-		allowed, err := h.policyService.CheckBucketAccess(userUUID, bucket.Name, services.ActionListBucket)
-		if err != nil {
-			// Log error but continue checking other buckets
-			continue
+		// Check if user has ANY permission on this bucket
+		// Try multiple common actions - if they have any access, they should see the bucket
+		hasAccess := false
+		actions := []string{
+			services.ActionListBucket,
+			services.ActionGetObject,
+			services.ActionPutObject,
+			services.ActionDeleteObject,
 		}
-		if allowed {
+
+		for _, action := range actions {
+			allowed, err := h.policyService.CheckBucketAccess(userUUID, bucket.Name, action)
+			if err != nil {
+				continue
+			}
+			if allowed {
+				hasAccess = true
+				break
+			}
+		}
+
+		if hasAccess {
 			accessibleBuckets = append(accessibleBuckets, bucket)
 		}
 	}

@@ -135,13 +135,25 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		api.POST("/auth/logout", middleware.AuthMiddleware(cfg.Auth.JWTSecret), authHandler.Logout)
 	}
 
-	// S3-compatible API routes (future implementation)
+	// S3-compatible API routes (authenticated with AWS Signature V4)
+	// These routes enable s3fs-fuse and other S3 clients to mount buckets
+	s3Handler := NewS3APIHandler(cfg)
 	s3 := router.Group("")
+	s3.Use(middleware.S3AuthMiddleware())
 	{
-		// These will be implemented later for S3 compatibility
-		s3.GET("/", func(c *gin.Context) {
-			c.JSON(501, gin.H{"error": "S3 API not yet implemented"})
-		})
+		// Service-level operations
+		s3.GET("/", s3Handler.ListBuckets)
+
+		// Bucket-level operations
+		s3.HEAD("/:bucket", s3Handler.HeadBucket)
+		s3.GET("/:bucket", s3Handler.ListObjects)
+		s3.PUT("/:bucket", s3Handler.CreateBucket) // Currently disabled
+
+		// Object-level operations
+		s3.HEAD("/:bucket/*key", s3Handler.HeadObject)
+		s3.GET("/:bucket/*key", s3Handler.GetObject)
+		s3.PUT("/:bucket/*key", s3Handler.PutObject)
+		s3.DELETE("/:bucket/*key", s3Handler.DeleteObject)
 	}
 
 	return router

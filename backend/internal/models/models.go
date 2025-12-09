@@ -39,13 +39,14 @@ func (u *User) BeforeCreate(tx *gorm.DB) error {
 
 // AccessKey represents API access credentials
 type AccessKey struct {
-	ID           uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
-	UserID       uuid.UUID `gorm:"type:uuid;not null" json:"user_id"`
-	AccessKey    string    `gorm:"uniqueIndex;not null" json:"access_key"`
-	SecretKeyHash string   `gorm:"not null" json:"-"` // Never serialize secret
-	IsActive     bool      `gorm:"default:true" json:"is_active"`
-	LastUsedAt   *time.Time `json:"last_used_at,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
+	ID                 uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
+	UserID             uuid.UUID `gorm:"type:uuid;not null" json:"user_id"`
+	AccessKey          string    `gorm:"uniqueIndex;not null" json:"access_key"`
+	SecretKeyHash      string    `gorm:"not null" json:"-"` // Never serialize secret (bcrypt hash for API auth)
+	SecretKeyEncrypted string    `gorm:"not null" json:"-"` // Never serialize secret (AES-encrypted for S3 auth)
+	IsActive           bool      `gorm:"default:true" json:"is_active"`
+	LastUsedAt         *time.Time `json:"last_used_at,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
 
 	// Relationships
 	User User `gorm:"foreignKey:UserID" json:"user,omitempty"`

@@ -61,7 +61,7 @@ func (h *AccessKeyHandler) GenerateAccessKey(c *gin.Context) {
 		return
 	}
 
-	// Hash the secret key before storing (NEVER store plaintext secrets)
+	// Hash the secret key before storing (for API auth)
 	secretKeyHash, err := security.HashSecretKey(secretKey)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
@@ -71,12 +71,23 @@ func (h *AccessKeyHandler) GenerateAccessKey(c *gin.Context) {
 		return
 	}
 
+	// Encrypt the secret key for S3 auth
+	secretKeyEncrypted, err := security.EncryptSecretKey(secretKey)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to encrypt secret key",
+			Message: err.Error(),
+		})
+		return
+	}
+
 	// Create access key record
 	newAccessKey := models.AccessKey{
-		UserID:        userID.(uuid.UUID),
-		AccessKey:     accessKey,
-		SecretKeyHash: secretKeyHash,
-		IsActive:      true,
+		UserID:             userID.(uuid.UUID),
+		AccessKey:          accessKey,
+		SecretKeyHash:      secretKeyHash,
+		SecretKeyEncrypted: secretKeyEncrypted,
+		IsActive:           true,
 	}
 
 	if err := database.DB.Create(&newAccessKey).Error; err != nil {

@@ -12,7 +12,7 @@
 - Object upload/download/delete operations with virtual folder support
 - Policy-based access control (PBAC)
 - Access key and secret key generation
-- S3-compatible REST API
+- **S3-compatible REST API with filesystem mounting support (s3fs-fuse)**
 - Modern dark-mode web interface with file management
 
 ## Tech Stack
@@ -74,6 +74,40 @@ docker-compose down
 docker-compose down -v
 rm -rf data/
 ```
+
+## S3 Filesystem Mounting
+
+Mount your buckets as local filesystems using s3fs-fuse:
+
+### Quick Setup
+
+1. **Create credentials file** (replace with your actual access key and secret key from the web UI):
+```bash
+echo "YOUR_ACCESS_KEY:YOUR_SECRET_KEY" > ~/.bkt
+chmod 600 ~/.bkt
+```
+
+2. **Create mount point**:
+```bash
+mkdir -p ~/bkt-mounts/my-bucket
+```
+
+3. **Mount a bucket**:
+```bash
+s3fs my-bucket ~/bkt-mounts/my-bucket \
+  -o url=https://localhost:9443 \
+  -o use_path_request_style \
+  -o passwd_file=~/.bkt \
+  -o ssl_verify_hostname=0 \
+  -o no_check_certificate
+```
+
+4. **Unmount when done**:
+```bash
+fusermount -u ~/bkt-mounts/my-bucket
+```
+
+For detailed setup instructions, troubleshooting, and advanced options, see [docs/MOUNTING.md](docs/MOUNTING.md).
 
 ## Project Structure
 

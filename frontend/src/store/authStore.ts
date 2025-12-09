@@ -12,6 +12,7 @@ interface AuthState {
   logout: () => Promise<void>
   refreshUser: () => Promise<void>
   setAuth: (data: AuthResponse) => void
+  validateToken: () => Promise<boolean>
 }
 
 export const useAuthStore = create<AuthState>()(
@@ -45,8 +46,10 @@ export const useAuthStore = create<AuthState>()(
         } catch (error) {
           console.error('Logout error:', error)
         }
+        // Clear all auth-related storage
         localStorage.removeItem('token')
         localStorage.removeItem('refresh_token')
+        localStorage.removeItem('auth-storage') // Clear persisted Zustand state
         set({ user: null, token: null, isAuthenticated: false })
       },
 
@@ -56,6 +59,36 @@ export const useAuthStore = create<AuthState>()(
           set({ user })
         } catch (error) {
           console.error('Failed to refresh user:', error)
+          // If refresh fails, logout
+          useAuthStore.getState().logout()
+        }
+      },
+
+      validateToken: async () => {
+        const state = useAuthStore.getState()
+
+        // If no token or not authenticated, clear state
+        if (!state.token || !state.isAuthenticated) {
+          localStorage.removeItem('token')
+          localStorage.removeItem('refresh_token')
+          localStorage.removeItem('auth-storage')
+          set({ user: null, token: null, isAuthenticated: false })
+          return false
+        }
+
+        try {
+          // Try to fetch current user to validate token
+          const user = await userApi.getCurrentUser()
+          set({ user })
+          return true
+        } catch (error) {
+          // Token is invalid, clear everything
+          console.error('Token validation failed:', error)
+          localStorage.removeItem('token')
+          localStorage.removeItem('refresh_token')
+          localStorage.removeItem('auth-storage')
+          set({ user: null, token: null, isAuthenticated: false })
+          return false
         }
       },
     }),

@@ -1,4 +1,5 @@
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
+import { useEffect, useState } from 'react'
 import { useAuthStore } from './store/authStore'
 import Login from './pages/Login'
 import GoogleCallback from './pages/GoogleCallback'
@@ -22,7 +23,28 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
 }
 
 function App() {
-  const { isAuthenticated } = useAuthStore()
+  const { isAuthenticated, validateToken } = useAuthStore()
+  const [isValidating, setIsValidating] = useState(true)
+
+  useEffect(() => {
+    // Validate token on app load
+    const validate = async () => {
+      if (isAuthenticated) {
+        await validateToken()
+      }
+      setIsValidating(false)
+    }
+    validate()
+  }, [])
+
+  // Show loading state while validating token
+  if (isValidating && isAuthenticated) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-dark-bg">
+        <div className="text-dark-textSecondary">Validating session...</div>
+      </div>
+    )
+  }
 
   return (
     <Router>

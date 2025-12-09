@@ -22,10 +22,27 @@ api.interceptors.request.use((config) => {
 // Response interceptor to handle errors
 api.interceptors.response.use(
   (response) => response,
-  (error) => {
+  async (error) => {
     if (error.response?.status === 401) {
+      // Clear all auth data
       localStorage.removeItem('token')
-      window.location.href = '/login'
+      localStorage.removeItem('refresh_token')
+      localStorage.removeItem('auth-storage') // Clear persisted Zustand state
+
+      // Import authStore dynamically to avoid circular dependency
+      const { useAuthStore } = await import('../store/authStore')
+
+      // Clear the auth store state
+      useAuthStore.setState({
+        user: null,
+        token: null,
+        isAuthenticated: false
+      })
+
+      // Only redirect if not already on login page
+      if (!window.location.pathname.includes('/login')) {
+        window.location.href = '/login'
+      }
     }
     return Promise.reject(error)
   }

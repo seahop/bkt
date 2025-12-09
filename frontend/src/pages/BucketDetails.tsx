@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { FolderOpen, Upload, Download, Trash2, File, ArrowLeft, RefreshCw, Folder, FolderPlus, Home } from 'lucide-react'
+import { FolderOpen, Upload, Download, Trash2, File as FileIcon, ArrowLeft, RefreshCw, Folder, FolderPlus, Home } from 'lucide-react'
 import { bucketApi } from '../services/api'
 import type { Object as StorageObject } from '../types'
 
@@ -71,8 +71,8 @@ export default function BucketDetails() {
         // This is in a subfolder
         const folderName = relativePath.substring(0, slashIndex)
         folders.add(folderName)
-      } else if (relativePath.length > 0) {
-        // This is a file in current directory
+      } else if (relativePath.length > 0 && relativePath !== '.keep') {
+        // This is a file in current directory (skip .keep files)
         items.push({ ...obj, isFolder: false })
       }
     })
@@ -299,7 +299,7 @@ export default function BucketDetails() {
       {/* Objects List */}
       {browserItems.length === 0 ? (
         <div className="bg-dark-surface border border-dark-border rounded-lg p-12 text-center">
-          <File className="w-16 h-16 text-dark-textSecondary mx-auto mb-4 opacity-50" />
+          <FileIcon className="w-16 h-16 text-dark-textSecondary mx-auto mb-4 opacity-50" />
           <h2 className="text-xl font-semibold text-dark-text mb-2">No items yet</h2>
           <p className="text-dark-textSecondary mb-6">Upload files or create folders to get started</p>
           <div className="flex gap-3 justify-center">
@@ -348,7 +348,7 @@ export default function BucketDetails() {
                   <tr key={item.id} className="hover:bg-dark-surfaceHover transition-colors">
                     <td className="px-6 py-4">
                       <div className="flex items-center gap-3">
-                        <File className="w-5 h-5 text-blue-500" />
+                        <FileIcon className="w-5 h-5 text-blue-500" />
                         <span className="text-dark-text">{item.key.substring(currentPrefix.length)}</span>
                       </div>
                     </td>
@@ -398,7 +398,7 @@ export default function BucketDetails() {
                   className="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="my-folder"
                   required
-                  pattern="[a-zA-Z0-9-_]+"
+                  pattern="[a-zA-Z0-9_\-]+"
                   title="Only letters, numbers, hyphens, and underscores"
                 />
                 <p className="text-xs text-dark-textSecondary mt-1">

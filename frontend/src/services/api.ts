@@ -5,17 +5,21 @@ import type { AuthResponse, User, Bucket, AccessKey, AccessKeyResponse, Policy, 
 // The proxy will forward /api/* requests to the backend
 const api = axios.create({
   baseURL: '/api',
-  headers: {
-    'Content-Type': 'application/json',
-  },
 })
 
-// Request interceptor to add auth token
+// Request interceptor to add auth token and set Content-Type
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('token')
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
   }
+
+  // Set Content-Type to application/json for non-FormData requests
+  // For FormData, axios will automatically set multipart/form-data with boundary
+  if (!(config.data instanceof FormData)) {
+    config.headers['Content-Type'] = 'application/json'
+  }
+
   return config
 })
 
@@ -133,9 +137,8 @@ export const bucketApi = {
     const formData = new FormData()
     formData.append('file', file)
     formData.append('key', key)
-    const { data } = await api.post<StorageObject>(`/buckets/${bucketName}/objects`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })
+    // Don't set Content-Type - let axios handle multipart/form-data with boundary
+    const { data } = await api.post<StorageObject>(`/buckets/${bucketName}/objects`, formData)
     return data
   },
 

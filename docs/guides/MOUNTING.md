@@ -69,8 +69,28 @@ s3fs my-bucket ~/bkt-mounts/my-bucket \
   -o passwd_file=~/.bkt \
   -o ssl_verify_hostname=0 \
   -o no_check_certificate \
-  -o allow_other
+  -o allow_other \
+  -o uid=$(id -u) \
+  -o gid=$(id -g) \
+  -o umask=0022
 ```
+
+**If mounting with sudo** (required for some mount points like `/mnt`):
+
+```bash
+sudo s3fs my-bucket /mnt/my-bucket \
+  -o url=https://localhost:9443 \
+  -o use_path_request_style \
+  -o passwd_file=/home/<your-username>/.bkt \
+  -o ssl_verify_hostname=0 \
+  -o no_check_certificate \
+  -o allow_other \
+  -o uid=$(id -u) \
+  -o gid=$(id -g) \
+  -o umask=0022
+```
+
+**Important:** When using `sudo`, use the full path to your credentials file (e.g., `/home/<your-username>/.bkt`) instead of `~/.bkt`, as `~` expands to root's home directory.
 
 **Important Options:**
 - `my-bucket`: Replace with your actual bucket name
@@ -80,6 +100,9 @@ s3fs my-bucket ~/bkt-mounts/my-bucket \
 - `-o ssl_verify_hostname=0`: Disable SSL hostname verification (for self-signed certs)
 - `-o no_check_certificate`: Disable certificate verification (for self-signed certs)
 - `-o allow_other`: Allow other users to access the mount (optional)
+- `-o uid=$(id -u)`: Set file owner to your user ID
+- `-o gid=$(id -g)`: Set file group to your group ID
+- `-o umask=0022`: Set permissions (755 for directories, 644 for files)
 
 ### 4. Verify Mount
 
@@ -134,8 +157,10 @@ To automatically mount your bucket at boot, add an entry to `/etc/fstab`:
 
 2. Add this line (adjust paths and options as needed):
    ```
-   my-bucket /home/youruser/bkt-mounts/my-bucket fuse.s3fs _netdev,allow_other,use_path_request_style,url=https://localhost:9443,passwd_file=/home/youruser/.bkt,ssl_verify_hostname=0,no_check_certificate 0 0
+   my-bucket /home/<your-username>/bkt-mounts/my-bucket fuse.s3fs _netdev,allow_other,use_path_request_style,url=https://localhost:9443,passwd_file=/home/<your-username>/.bkt,ssl_verify_hostname=0,no_check_certificate,uid=1000,gid=1000,umask=0022 0 0
    ```
+
+   Replace `<your-username>` with your actual username and `uid=1000,gid=1000` with your actual user/group IDs (find them with `id -u` and `id -g`).
 
 3. Test the fstab entry:
    ```bash
@@ -147,9 +172,30 @@ To automatically mount your bucket at boot, add an entry to `/etc/fstab`:
 ### Permission Denied
 
 If you get "Permission Denied" errors:
+
+**When accessing files/folders in the mount:**
+- Check file ownership with `ls -la /path/to/mount/`
+- If files are owned by `root`, you likely mounted with `sudo` without the `uid`/`gid` options
+- Remount with proper ownership options:
+  ```bash
+  sudo fusermount -u /mnt/my-bucket
+  sudo s3fs my-bucket /mnt/my-bucket \
+    -o url=https://localhost:9443 \
+    -o passwd_file=/home/<your-username>/.bkt \
+    -o use_path_request_style \
+    -o ssl_verify_hostname=0 \
+    -o no_check_certificate \
+    -o allow_other \
+    -o uid=$(id -u) \
+    -o gid=$(id -g) \
+    -o umask=0022
+  ```
+
+**When mounting fails with permission denied:**
 - Verify your credentials file permissions: `ls -l ~/.bkt` (should be `-rw-------`)
 - Check that your access key and secret key are correct
 - Verify that your user has the necessary policies attached in BKT
+- When using `sudo`, use full path to credentials file (not `~/.bkt`)
 
 ### Transport endpoint is not connected
 
@@ -248,12 +294,15 @@ for bucket in "${BUCKETS[@]}"; do
         -o use_path_request_style \
         -o ssl_verify_hostname=0 \
         -o no_check_certificate \
-        -o allow_other
+        -o allow_other \
+        -o uid=$(id -u) \
+        -o gid=$(id -g) \
+        -o umask=0022
 
     if [ $? -eq 0 ]; then
-        echo "✓ $bucket mounted successfully"
+        echo "Mounted $bucket successfully"
     else
-        echo "✗ Failed to mount $bucket"
+        echo "Failed to mount $bucket"
     fi
 done
 ```

@@ -36,6 +36,18 @@ func (ls *LocalStorage) CreateBucket(bucketName, region string) error {
 	return nil
 }
 
+// DeleteBucket removes a bucket directory from the local filesystem
+func (ls *LocalStorage) DeleteBucket(bucketName string) error {
+	bucketPath := filepath.Join(ls.rootPath, bucketName)
+
+	// Remove the bucket directory and all contents
+	if err := os.RemoveAll(bucketPath); err != nil {
+		return fmt.Errorf("failed to delete bucket directory: %w", err)
+	}
+
+	return nil
+}
+
 // PutObject stores an object in the local filesystem
 func (ls *LocalStorage) PutObject(bucketName, objectKey string, data io.Reader, size int64, contentType string) error {
 	bucketPath := filepath.Join(ls.rootPath, bucketName)

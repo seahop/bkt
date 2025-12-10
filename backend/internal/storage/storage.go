@@ -9,6 +9,9 @@ type StorageBackend interface {
 	// CreateBucket creates a new bucket in the storage backend
 	CreateBucket(bucketName, region string) error
 
+	// DeleteBucket removes a bucket from the storage backend (must be empty)
+	DeleteBucket(bucketName string) error
+
 	// PutObject stores an object in the given bucket
 	PutObject(bucketName, objectKey string, data io.Reader, size int64, contentType string) error
 

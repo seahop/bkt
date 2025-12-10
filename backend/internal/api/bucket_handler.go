@@ -514,6 +514,7 @@ func (h *BucketHandler) DeleteBucket(c *gin.Context) {
 	bucketName := c.Param("name")
 	userID, _ := c.Get("user_id")
 	userUUID := userID.(uuid.UUID)
+	username, _ := c.Get("username")
 
 	var bucket models.Bucket
 	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
@@ -540,28 +541,63 @@ func (h *BucketHandler) DeleteBucket(c *gin.Context) {
 		return
 	}
 
-	// Use transaction to atomically check and delete (prevents TOCTOU race)
+	// Get storage backend for this bucket
+	storageBackend, err := h.getStorageBackend(&bucket)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to get storage backend",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	// Get all objects in the bucket
+	var objects []models.Object
+	if err := database.DB.Where("bucket_id = ?", bucket.ID).Find(&objects).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to list bucket objects",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	// Delete all objects from storage first
+	var storageErrors []string
+	for _, obj := range objects {
+		if err := storageBackend.DeleteObject(bucketName, obj.Key); err != nil {
+			// Log error but continue - we'll still try to delete the rest
+			storageErrors = append(storageErrors, fmt.Sprintf("%s: %v", obj.Key, err))
+		}
+	}
+
+	// Delete the bucket from storage backend (after objects are removed)
+	if err := storageBackend.DeleteBucket(bucketName); err != nil {
+		storageErrors = append(storageErrors, fmt.Sprintf("bucket deletion: %v", err))
+	}
+
+	// Use transaction to delete all objects and the bucket from database
 	err = database.DB.Transaction(func(tx *gorm.DB) error {
-		// Check if bucket is empty with row lock to prevent concurrent modifications
-		var objectCount int64
-		if err := tx.Model(&models.Object{}).
-			Where("bucket_id = ?", bucket.ID).
-			Count(&objectCount).Error; err != nil {
-			return err
+		// Delete all objects from database
+		if len(objects) > 0 {
+			if err := tx.Where("bucket_id = ?", bucket.ID).Delete(&models.Object{}).Error; err != nil {
+				return fmt.Errorf("failed to delete objects: %w", err)
+			}
 		}
 
-		if objectCount > 0 {
-			return fmt.Errorf("bucket not empty")
+		// Delete any bucket policies
+		if err := tx.Where("bucket_id = ?", bucket.ID).Delete(&models.BucketPolicy{}).Error; err != nil {
+			return fmt.Errorf("failed to delete bucket policies: %w", err)
 		}
 
-		// Delete the bucket within the same transaction
-		return tx.Delete(&bucket).Error
+		// Delete the bucket
+		if err := tx.Delete(&bucket).Error; err != nil {
+			return fmt.Errorf("failed to delete bucket: %w", err)
+		}
+
+		return nil
 	})
 
 	if err != nil {
-		// Get user info for audit log
-		username, _ := c.Get("username")
-
 		// Log failure
 		h.auditService.LogFailure(
 			c,
@@ -573,27 +609,19 @@ func (h *BucketHandler) DeleteBucket(c *gin.Context) {
 			bucket.Name,
 			err.Error(),
 			map[string]interface{}{
-				"bucket_name": bucket.Name,
-				"owner_id":    bucket.OwnerID.String(),
+				"bucket_name":    bucket.Name,
+				"owner_id":       bucket.OwnerID.String(),
+				"objects_count":  len(objects),
+				"storage_errors": storageErrors,
 			},
 		)
 
-		if err.Error() == "bucket not empty" {
-			c.JSON(http.StatusConflict, models.ErrorResponse{
-				Error:   "Bucket not empty",
-				Message: "Delete all objects before deleting the bucket",
-			})
-			return
-		}
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to delete bucket",
 			Message: err.Error(),
 		})
 		return
 	}
-
-	// Get user info for audit log
-	username, _ := c.Get("username")
 
 	// Log success
 	h.auditService.LogSuccess(
@@ -605,13 +633,14 @@ func (h *BucketHandler) DeleteBucket(c *gin.Context) {
 		bucket.ID.String(),
 		bucket.Name,
 		map[string]interface{}{
-			"bucket_name": bucket.Name,
-			"owner_id":    bucket.OwnerID.String(),
+			"bucket_name":     bucket.Name,
+			"owner_id":        bucket.OwnerID.String(),
+			"objects_deleted": len(objects),
 		},
 	)
 
 	c.JSON(http.StatusOK, models.SuccessResponse{
-		Message: "Bucket deleted successfully",
+		Message: fmt.Sprintf("Bucket deleted successfully (%d objects removed)", len(objects)),
 	})
 }
 

@@ -106,6 +106,21 @@ func (s3s *S3Storage) CreateBucket(bucketName, region string) error {
 	return nil
 }
 
+// DeleteBucket removes a bucket from S3 (bucket must be empty)
+func (s3s *S3Storage) DeleteBucket(bucketName string) error {
+	ctx := context.Background()
+	actualBucketName := s3s.getBucketName(bucketName)
+
+	_, err := s3s.client.DeleteBucket(ctx, &s3.DeleteBucketInput{
+		Bucket: aws.String(actualBucketName),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to delete S3 bucket: %w", err)
+	}
+
+	return nil
+}
+
 // PutObject stores an object in S3
 func (s3s *S3Storage) PutObject(bucketName, objectKey string, data io.Reader, size int64, contentType string) error {
 	ctx := context.Background()

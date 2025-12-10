@@ -465,11 +465,18 @@ export default function BucketDetails() {
           </div>
         </div>
 
-        {/* Breadcrumbs */}
+        {/* Breadcrumbs - droppable for moving files up */}
         <div className="flex items-center gap-2 text-sm">
           <button
             onClick={() => setCurrentPrefix('')}
-            className="flex items-center gap-1 text-blue-500 hover:text-blue-400"
+            onDragOver={(e) => handleDragOver(e, '')}
+            onDragLeave={handleDragLeave}
+            onDrop={(e) => handleDrop(e, '')}
+            className={`flex items-center gap-1 px-2 py-1 rounded transition-colors ${
+              dropTarget === ''
+                ? 'bg-blue-500/20 ring-2 ring-blue-500 text-blue-400'
+                : 'text-blue-500 hover:text-blue-400'
+            }`}
           >
             <Home className="w-4 h-4" />
             <span>{bucketName}</span>
@@ -479,7 +486,14 @@ export default function BucketDetails() {
               <span className="text-dark-textSecondary">/</span>
               <button
                 onClick={() => navigateToFolder(crumb.prefix)}
-                className="text-blue-500 hover:text-blue-400"
+                onDragOver={(e) => handleDragOver(e, crumb.prefix)}
+                onDragLeave={handleDragLeave}
+                onDrop={(e) => handleDrop(e, crumb.prefix)}
+                className={`px-2 py-1 rounded transition-colors ${
+                  dropTarget === crumb.prefix
+                    ? 'bg-blue-500/20 ring-2 ring-blue-500 text-blue-400'
+                    : 'text-blue-500 hover:text-blue-400'
+                }`}
               >
                 {crumb.name}
               </button>

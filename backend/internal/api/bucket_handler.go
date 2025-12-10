@@ -1551,3 +1551,134 @@ func (h *BucketHandler) RenameObject(c *gin.Context) {
 		"object":  sourceObject,
 	})
 }
+
+// MoveFolderRequest represents the request body for moving a folder
+type MoveFolderRequest struct {
+	SourcePrefix      string `json:"source_prefix" binding:"required"`
+	DestinationPrefix string `json:"destination_prefix" binding:"required"`
+}
+
+func (h *BucketHandler) MoveFolder(c *gin.Context) {
+	bucketName := c.Param("name")
+	userID, _ := c.Get("user_id")
+	userUUID := userID.(uuid.UUID)
+
+	var req MoveFolderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Invalid request",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	// Validate prefixes
+	if req.SourcePrefix == req.DestinationPrefix {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error: "Source and destination prefixes cannot be the same",
+		})
+		return
+	}
+
+	// Don't allow moving a folder into itself
+	if strings.HasPrefix(req.DestinationPrefix, req.SourcePrefix) {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error: "Cannot move a folder into itself",
+		})
+		return
+	}
+
+	// Get bucket from database
+	var bucket models.Bucket
+	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{
+			Error: "Bucket not found",
+		})
+		return
+	}
+
+	// Check bucket ownership or admin status
+	isAdmin, _ := c.Get("is_admin")
+	if bucket.OwnerID != userUUID && isAdmin != true {
+		// Check policy for source folder access
+		allowed, err := h.policyService.CheckObjectAccess(userUUID, bucketName, req.SourcePrefix+"*", services.ActionGetObject)
+		if err != nil || !allowed {
+			c.JSON(http.StatusForbidden, models.ErrorResponse{
+				Error: "Permission denied",
+			})
+			return
+		}
+	}
+
+	// Get all objects with the source prefix from database
+	var sourceObjects []models.Object
+	if err := database.DB.Where("bucket_id = ? AND key LIKE ?", bucket.ID, req.SourcePrefix+"%").Find(&sourceObjects).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to list source objects",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	if len(sourceObjects) == 0 {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{
+			Error: "No objects found in source folder",
+		})
+		return
+	}
+
+	// Get storage backend
+	storageBackend, err := h.getStorageBackend(&bucket)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to initialize storage backend",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	// Move each object
+	movedCount := 0
+	for _, obj := range sourceObjects {
+		// Calculate new key by replacing source prefix with destination prefix
+		newKey := req.DestinationPrefix + strings.TrimPrefix(obj.Key, req.SourcePrefix)
+
+		// Copy object in storage backend
+		if err := storageBackend.CopyObject(bucketName, obj.Key, newKey); err != nil {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+				Error:   "Failed to copy object",
+				Message: fmt.Sprintf("Failed to copy %s: %v", obj.Key, err),
+			})
+			return
+		}
+
+		// Delete source from storage backend
+		if err := storageBackend.DeleteObject(bucketName, obj.Key); err != nil {
+			// Try to rollback - delete the copy
+			storageBackend.DeleteObject(bucketName, newKey)
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+				Error:   "Failed to delete source object",
+				Message: fmt.Sprintf("Failed to delete %s: %v", obj.Key, err),
+			})
+			return
+		}
+
+		// Update database record with new key
+		obj.Key = newKey
+		obj.UpdatedAt = time.Now()
+		if err := database.DB.Save(&obj).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+				Error:   "Failed to update object metadata",
+				Message: err.Error(),
+			})
+			return
+		}
+
+		movedCount++
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":     "Folder moved successfully",
+		"moved_count": movedCount,
+	})
+}

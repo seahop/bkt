@@ -211,6 +211,14 @@ export const bucketApi = {
     })
     return data
   },
+
+  moveFolder: async (bucketName: string, sourcePrefix: string, destinationPrefix: string): Promise<{ moved_count: number }> => {
+    const { data } = await api.post<{ moved_count: number }>(`/buckets/${bucketName}/folders/move`, {
+      source_prefix: sourcePrefix,
+      destination_prefix: destinationPrefix,
+    })
+    return data
+  },
 }
 
 // Access Key API

@@ -74,8 +74,7 @@ func S3AuthMiddleware() gin.HandlerFunc {
 		// Decrypt secret key
 		secretKey, err := security.DecryptSecretKey(key.SecretKeyEncrypted)
 		if err != nil {
-			// Log internal error but don't expose details to client
-			fmt.Printf("[S3Auth] Failed to decrypt secret for access key %s: %v\n", accessKey, err)
+			// Don't log access key - security risk
 			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
 				"Code":    "InternalError",
 				"Message": "We encountered an internal error. Please try again.",
@@ -85,10 +84,8 @@ func S3AuthMiddleware() gin.HandlerFunc {
 
 		// Validate signature
 		if err := validateSignature(c, authHeader, accessKey, secretKey); err != nil {
-			// Log signature validation failure for debugging (but don't expose details to client)
-			fmt.Printf("[S3Auth] Signature validation failed for %s: %v\n", accessKey, err)
-			fmt.Printf("[S3Auth] Method: %s, Path: %s\n", c.Request.Method, c.Request.URL.Path)
-			fmt.Printf("[S3Auth] Auth Header: %s\n", authHeader)
+			// Log method and path for debugging, but NOT credentials or auth header
+			fmt.Printf("[S3Auth] Signature validation failed: %s %s\n", c.Request.Method, c.Request.URL.Path)
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"Code":    "SignatureDoesNotMatch",
 				"Message": "The request signature we calculated does not match the signature you provided",
@@ -100,8 +97,7 @@ func S3AuthMiddleware() gin.HandlerFunc {
 		now := time.Now()
 		key.LastUsedAt = &now
 		if err := database.DB.Save(&key).Error; err != nil {
-			// Log error but don't fail the request - auth already succeeded
-			fmt.Printf("[S3Auth] Warning: Failed to update LastUsedAt: %v\n", err)
+			// Don't log - not critical and avoids any credential exposure
 		}
 
 		// Set user context for downstream handlers
@@ -160,6 +156,11 @@ func validateSignature(c *gin.Context, authHeader, accessKey, secretKey string) 
 	}
 	if dateStr == "" {
 		return fmt.Errorf("missing date header")
+	}
+
+	// Validate timestamp to prevent replay attacks (15 minute window per AWS spec)
+	if err := validateTimestamp(dateStr); err != nil {
+		return err
 	}
 
 	// Extract credential scope
@@ -337,4 +338,40 @@ func sha256Hash(data string) string {
 	h := sha256.New()
 	h.Write([]byte(data))
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// validateTimestamp validates that the request timestamp is within 15 minutes of server time
+// This prevents replay attacks using captured requests
+func validateTimestamp(dateStr string) error {
+	// AWS Signature V4 uses ISO 8601 format: 20130524T000000Z
+	var requestTime time.Time
+	var err error
+
+	// Try X-Amz-Date format first (20130524T000000Z)
+	requestTime, err = time.Parse("20060102T150405Z", dateStr)
+	if err != nil {
+		// Try RFC1123 format (used in Date header)
+		requestTime, err = time.Parse(time.RFC1123, dateStr)
+		if err != nil {
+			// Try RFC1123Z format
+			requestTime, err = time.Parse(time.RFC1123Z, dateStr)
+			if err != nil {
+				return fmt.Errorf("invalid date format")
+			}
+		}
+	}
+
+	// Check if request is within 15 minute window
+	now := time.Now().UTC()
+	diff := now.Sub(requestTime)
+	if diff < 0 {
+		diff = -diff
+	}
+
+	// AWS allows 15 minute skew
+	if diff > 15*time.Minute {
+		return fmt.Errorf("request timestamp too old or too far in the future")
+	}
+
+	return nil
 }

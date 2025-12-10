@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"mime"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -231,15 +233,10 @@ func (s3s *S3Storage) ListObjects(bucketName, prefix string) ([]ObjectInfo, erro
 		}
 
 		for _, obj := range page.Contents {
-			contentType := "application/octet-stream"
-			
-			// Get object metadata to retrieve content type
-			headResult, err := s3s.client.HeadObject(ctx, &s3.HeadObjectInput{
-				Bucket: aws.String(actualBucketName),
-				Key:    obj.Key,
-			})
-			if err == nil && headResult.ContentType != nil {
-				contentType = *headResult.ContentType
+			// Infer content type from file extension (avoids N+1 HeadObject calls)
+			contentType := mime.TypeByExtension(filepath.Ext(*obj.Key))
+			if contentType == "" {
+				contentType = "application/octet-stream"
 			}
 
 			etag := ""

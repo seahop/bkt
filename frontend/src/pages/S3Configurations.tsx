@@ -124,7 +124,11 @@ export default function S3Configurations() {
                     </div>
                     <div>
                       <span className="text-dark-textSecondary">Access Key: </span>
-                      <span className="text-dark-text font-mono text-xs">{config.access_key_id}</span>
+                      <span className="text-dark-text font-mono text-xs">
+                        {config.access_key_id.length > 8
+                          ? `${config.access_key_id.slice(0, 4)}****${config.access_key_id.slice(-4)}`
+                          : '****'}
+                      </span>
                     </div>
                     <div>
                       <span className="text-dark-textSecondary">Bucket Prefix: </span>

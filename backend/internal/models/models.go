@@ -40,7 +40,7 @@ func (u *User) BeforeCreate(tx *gorm.DB) error {
 // AccessKey represents API access credentials
 type AccessKey struct {
 	ID                 uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
-	UserID             uuid.UUID `gorm:"type:uuid;not null" json:"user_id"`
+	UserID             uuid.UUID `gorm:"type:uuid;not null;index" json:"user_id"`
 	AccessKey          string    `gorm:"uniqueIndex;not null" json:"access_key"`
 	SecretKeyHash      string    `gorm:"not null" json:"-"` // Never serialize secret (bcrypt hash for API auth)
 	SecretKeyEncrypted string    `gorm:"not null" json:"-"` // Never serialize secret (AES-encrypted for S3 auth)
@@ -89,7 +89,7 @@ func (s *S3Configuration) BeforeCreate(tx *gorm.DB) error {
 type Bucket struct {
 	ID             uuid.UUID  `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
 	Name           string     `gorm:"uniqueIndex;not null" json:"name"`
-	OwnerID        uuid.UUID  `gorm:"type:uuid;not null" json:"owner_id"`
+	OwnerID        uuid.UUID  `gorm:"type:uuid;not null;index" json:"owner_id"`
 	IsPublic       bool       `gorm:"default:false" json:"is_public"`
 	Region         string     `gorm:"default:'us-east-1'" json:"region"`
 	StorageBackend string     `gorm:"default:'local'" json:"storage_backend"` // "local" or "s3"
@@ -113,7 +113,7 @@ func (b *Bucket) BeforeCreate(tx *gorm.DB) error {
 // Object represents a stored object
 type Object struct {
 	ID          uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
-	BucketID    uuid.UUID `gorm:"type:uuid;not null;uniqueIndex:idx_bucket_key_unique" json:"bucket_id"`
+	BucketID    uuid.UUID `gorm:"type:uuid;not null;index;uniqueIndex:idx_bucket_key_unique" json:"bucket_id"`
 	Key         string    `gorm:"not null;uniqueIndex:idx_bucket_key_unique" json:"key"` // Object name/path
 	Size        int64     `gorm:"not null" json:"size"`
 	ContentType string    `json:"content_type"`

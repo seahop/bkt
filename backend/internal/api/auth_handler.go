@@ -70,7 +70,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	if err := database.DB.Create(&user).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to create user",
-			Message: err.Error(),
+			Message: "An internal error occurred. Please try again.",
 		})
 		return
 	}
@@ -81,7 +81,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to generate token",
-			Message: err.Error(),
+			Message: "An internal error occurred. Please try again.",
 		})
 		return
 	}
@@ -92,7 +92,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to generate refresh token",
-			Message: err.Error(),
+			Message: "An internal error occurred. Please try again.",
 		})
 		return
 	}
@@ -149,7 +149,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to generate token",
-			Message: err.Error(),
+			Message: "An internal error occurred. Please try again.",
 		})
 		return
 	}
@@ -160,7 +160,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to generate refresh token",
-			Message: err.Error(),
+			Message: "An internal error occurred. Please try again.",
 		})
 		return
 	}
@@ -191,7 +191,7 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, models.ErrorResponse{
 			Error:   "Invalid refresh token",
-			Message: err.Error(),
+			Message: "Please log in again",
 		})
 		return
 	}
@@ -221,7 +221,7 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to generate token",
-			Message: err.Error(),
+			Message: "An internal error occurred. Please try again.",
 		})
 		return
 	}

@@ -9,22 +9,45 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
+
+	"golang.org/x/crypto/pbkdf2"
+)
+
+// cachedKey stores the derived encryption key to avoid repeated PBKDF2 computation
+var (
+	cachedKey     []byte
+	cachedKeyOnce sync.Once
+	cachedKeyErr  error
 )
 
 // getEncryptionKey derives a 32-byte encryption key from environment variable
+// Uses PBKDF2 for secure key derivation with caching to avoid performance impact
 // If ENCRYPTION_KEY is not set, it falls back to JWT_SECRET
 func getEncryptionKey() ([]byte, error) {
-	keyString := os.Getenv("ENCRYPTION_KEY")
-	if keyString == "" {
-		keyString = os.Getenv("JWT_SECRET")
-	}
-	if keyString == "" {
-		return nil, fmt.Errorf("ENCRYPTION_KEY or JWT_SECRET must be set")
-	}
+	cachedKeyOnce.Do(func() {
+		keyString := os.Getenv("ENCRYPTION_KEY")
+		if keyString == "" {
+			keyString = os.Getenv("JWT_SECRET")
+		}
+		if keyString == "" {
+			cachedKeyErr = fmt.Errorf("ENCRYPTION_KEY or JWT_SECRET must be set")
+			return
+		}
 
-	// Derive a 32-byte key using SHA256
-	hash := sha256.Sum256([]byte(keyString))
-	return hash[:], nil
+		// Use application name as salt (unique per deployment via JWT_SECRET anyway)
+		// For a static salt, this is acceptable since the key itself is already secret
+		salt := []byte("bkt-object-storage-v1")
+
+		// Derive a 32-byte key using PBKDF2-SHA256 with 100,000 iterations
+		// This is computationally expensive but only runs once per process
+		cachedKey = pbkdf2.Key([]byte(keyString), salt, 100000, 32, sha256.New)
+	})
+
+	if cachedKeyErr != nil {
+		return nil, cachedKeyErr
+	}
+	return cachedKey, nil
 }
 
 // EncryptSecretKey encrypts a secret key using AES-256-GCM

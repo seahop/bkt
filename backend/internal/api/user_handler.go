@@ -85,7 +85,7 @@ func (h *UserHandler) UpdateCurrentUser(c *gin.Context) {
 	if err := database.DB.Save(&user).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to update user",
-			Message: err.Error(),
+			Message: "An internal error occurred. Please try again.",
 		})
 		return
 	}
@@ -114,7 +114,7 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to hash password",
-			Message: err.Error(),
+			Message: "An internal error occurred. Please try again.",
 		})
 		return
 	}
@@ -171,7 +171,7 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 		// Generic database error
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to create user",
-			Message: err.Error(),
+			Message: "An internal error occurred. Please try again.",
 		})
 		return
 	}
@@ -208,7 +208,7 @@ func (h *UserHandler) ListUsers(c *gin.Context) {
 	if err := database.DB.Find(&users).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to fetch users",
-			Message: err.Error(),
+			Message: "An internal error occurred. Please try again.",
 		})
 		return
 	}
@@ -258,7 +258,7 @@ func (h *UserHandler) DeleteUser(c *gin.Context) {
 
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to delete user",
-			Message: err.Error(),
+			Message: "An internal error occurred. Please try again.",
 		})
 		return
 	}
@@ -358,7 +358,7 @@ func (h *UserHandler) LockUser(c *gin.Context) {
 
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to lock user",
-			Message: err.Error(),
+			Message: "An internal error occurred. Please try again.",
 		})
 		return
 	}
@@ -428,7 +428,7 @@ func (h *UserHandler) UnlockUser(c *gin.Context) {
 
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to unlock user",
-			Message: err.Error(),
+			Message: "An internal error occurred. Please try again.",
 		})
 		return
 	}
@@ -481,7 +481,7 @@ func (h *UserHandler) ListUserAccessKeys(c *gin.Context) {
 	if err := database.DB.Where("user_id = ?", userID).Order("created_at DESC").Find(&accessKeys).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to list access keys",
-			Message: err.Error(),
+			Message: "An internal error occurred. Please try again.",
 		})
 		return
 	}
@@ -553,7 +553,7 @@ func (h *UserHandler) DeleteUserAccessKey(c *gin.Context) {
 
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to delete access key",
-			Message: err.Error(),
+			Message: "An internal error occurred. Please try again.",
 		})
 		return
 	}

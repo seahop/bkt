@@ -230,13 +230,11 @@ func (h *AccessKeyHandler) ValidateAccessKey(accessKey, secretKey string) (*mode
 		return nil, fmt.Errorf("invalid secret key")
 	}
 
-	// Update last used timestamp (best-effort, log error but don't fail validation)
+	// Update last used timestamp (best-effort, don't fail validation)
 	now := time.Now()
 	key.LastUsedAt = &now
-	if err := database.DB.Save(&key).Error; err != nil {
-		// Log error but don't fail validation - auth already succeeded
-		fmt.Printf("[AccessKey] Warning: Failed to update LastUsedAt for key %s: %v\n", key.AccessKey, err)
-	}
+	// Silently ignore errors - don't log access keys for security
+	database.DB.Save(&key)
 
 	return &key.User, nil
 }

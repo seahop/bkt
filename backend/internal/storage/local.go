@@ -131,8 +131,9 @@ func (ls *LocalStorage) ListObjects(bucketName, prefix string) ([]ObjectInfo, er
 			return nil
 		}
 
-		// Calculate ETag (MD5 hash)
-		etag, _ := calculateMD5(path)
+		// Use mod time as ETag surrogate for listing (avoids expensive MD5 on every file)
+		// Real ETag is computed on-demand via GetObjectInfo
+		etag := fmt.Sprintf("%x-%x", info.ModTime().Unix(), info.Size())
 
 		// Detect content type
 		contentType := mime.TypeByExtension(filepath.Ext(path))

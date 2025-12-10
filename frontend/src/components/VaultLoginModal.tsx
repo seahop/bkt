@@ -78,6 +78,11 @@ const VaultLoginModal: React.FC<VaultLoginModalProps> = ({ isOpen, onClose }) =>
                   className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 font-mono text-sm"
                   placeholder="Paste your Vault JWT token here..."
                   required
+                  autoComplete="off"
+                  spellCheck={false}
+                  data-lpignore="true"
+                  data-1p-ignore="true"
+                  style={{ WebkitTextSecurity: 'disc' } as React.CSSProperties}
                 />
                 <p className="mt-2 text-sm text-gray-500">
                   Obtain this token from your Vault server using: <code className="bg-gray-100 px-1 py-0.5 rounded">vault login -method=jwt</code>

@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { FolderOpen, Upload, Download, Trash2, File as FileIcon, ArrowLeft, RefreshCw, Folder, FolderPlus, Home, Loader2, Pencil, Columns2, Info, FolderInput, Copy, ExternalLink } from 'lucide-react'
+import { FolderOpen, Upload, Download, Trash2, File as FileIcon, ArrowLeft, RefreshCw, Folder, FolderPlus, Home, Loader2, Pencil, Columns2, Info, FolderInput, Copy, ExternalLink, Search, X, Calendar, Filter } from 'lucide-react'
 import { bucketApi } from '../services/api'
 import type { Object as StorageObject } from '../types'
 
@@ -73,6 +73,16 @@ export default function BucketDetails() {
   // File info modal state
   const [showFileInfo, setShowFileInfo] = useState(false)
   const [fileInfoTarget, setFileInfoTarget] = useState<StorageObject | null>(null)
+
+  // Search and filter state
+  const [searchQuery, setSearchQuery] = useState('')
+  const [showFilters, setShowFilters] = useState(false)
+  const [filterDateFrom, setFilterDateFrom] = useState('')
+  const [filterDateTo, setFilterDateTo] = useState('')
+  const [filterExtension, setFilterExtension] = useState('')
+  const [filterMinSize, setFilterMinSize] = useState('')
+  const [filterMaxSize, setFilterMaxSize] = useState('')
+  const [filterMaxDepth, setFilterMaxDepth] = useState('')
 
   // Close context menu on click outside
   useEffect(() => {
@@ -240,6 +250,192 @@ export default function BucketDetails() {
       name: part,
       prefix: parts.slice(0, index + 1).join('/') + '/',
     }))
+  }
+
+  // Convert wildcard pattern to regex
+  // Supports: * (any characters), ? (single character)
+  const wildcardToRegex = (pattern: string): RegExp => {
+    const escaped = pattern
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&') // Escape regex special chars except * and ?
+      .replace(/\*/g, '.*')  // * matches any characters
+      .replace(/\?/g, '.')   // ? matches single character
+    return new RegExp(`^${escaped}$`, 'i') // Case insensitive
+  }
+
+  // Check if search query has active filters
+  const hasActiveFilters = searchQuery || filterDateFrom || filterDateTo || filterExtension || filterMinSize || filterMaxSize || filterMaxDepth
+
+  // Calculate folder depth from key (number of slashes)
+  const getFolderDepth = (key: string): number => {
+    const parts = key.split('/').filter(p => p.length > 0)
+    return parts.length - 1 // -1 because the last part is the filename
+  }
+
+  // Check if item matches search criteria
+  const matchesSearchCriteria = (obj: StorageObject): boolean => {
+    const name = obj.key.split('/').pop() || ''
+
+    // Max depth filter
+    if (filterMaxDepth) {
+      const maxDepth = parseInt(filterMaxDepth, 10)
+      if (!isNaN(maxDepth) && getFolderDepth(obj.key) > maxDepth) {
+        return false
+      }
+    }
+
+    // Search query filter (with wildcard support)
+    if (searchQuery) {
+      const pattern = wildcardToRegex(searchQuery)
+      if (!pattern.test(name)) {
+        // Also check if it's a partial match without wildcards
+        if (!name.toLowerCase().includes(searchQuery.toLowerCase())) {
+          return false
+        }
+      }
+    }
+
+    // Extension filter
+    if (filterExtension) {
+      const ext = name.split('.').pop()?.toLowerCase() || ''
+      const filterExts = filterExtension.toLowerCase().split(',').map(e => e.trim().replace(/^\./, ''))
+      if (!filterExts.some(fe => ext === fe || wildcardToRegex(fe).test(ext))) {
+        return false
+      }
+    }
+
+    // Date filters
+    const fileDate = new Date(obj.updated_at)
+
+    if (filterDateFrom) {
+      const fromDate = new Date(filterDateFrom)
+      if (fileDate < fromDate) return false
+    }
+
+    if (filterDateTo) {
+      const toDate = new Date(filterDateTo)
+      toDate.setHours(23, 59, 59, 999)
+      if (fileDate > toDate) return false
+    }
+
+    // Size filters
+    if (filterMinSize) {
+      const minBytes = parseSize(filterMinSize)
+      if (minBytes !== null && obj.size < minBytes) return false
+    }
+
+    if (filterMaxSize) {
+      const maxBytes = parseSize(filterMaxSize)
+      if (maxBytes !== null && obj.size > maxBytes) return false
+    }
+
+    return true
+  }
+
+  // Get all matching files across the entire bucket when searching
+  const getGlobalSearchResults = (): FileItem[] => {
+    if (!hasActiveFilters) return []
+
+    return objects
+      .filter(obj => !obj.key.endsWith('.keep')) // Skip .keep files
+      .filter(matchesSearchCriteria)
+      .map(obj => ({ ...obj, isFolder: false as const }))
+  }
+
+  // Filter browser items based on search query and filters (for current directory view)
+  const filterBrowserItems = (items: BrowserItem[]): BrowserItem[] => {
+    if (!hasActiveFilters) return items
+
+    return items.filter(item => {
+      // Get the name to search
+      const name = item.isFolder ? item.name : item.key.split('/').pop() || ''
+
+      // Search query filter (with wildcard support)
+      if (searchQuery) {
+        const pattern = wildcardToRegex(searchQuery)
+        if (!pattern.test(name)) {
+          // Also check if it's a partial match without wildcards
+          if (!name.toLowerCase().includes(searchQuery.toLowerCase())) {
+            return false
+          }
+        }
+      }
+
+      // Extension filter (only for files)
+      if (filterExtension && !item.isFolder) {
+        const ext = name.split('.').pop()?.toLowerCase() || ''
+        const filterExts = filterExtension.toLowerCase().split(',').map(e => e.trim().replace(/^\./, ''))
+        if (!filterExts.some(fe => ext === fe || wildcardToRegex(fe).test(ext))) {
+          return false
+        }
+      }
+
+      // Date filters (only for files)
+      if (!item.isFolder) {
+        const fileItem = item as FileItem
+        const fileDate = new Date(fileItem.updated_at)
+
+        if (filterDateFrom) {
+          const fromDate = new Date(filterDateFrom)
+          if (fileDate < fromDate) return false
+        }
+
+        if (filterDateTo) {
+          const toDate = new Date(filterDateTo)
+          toDate.setHours(23, 59, 59, 999) // End of day
+          if (fileDate > toDate) return false
+        }
+
+        // Size filters
+        if (filterMinSize) {
+          const minBytes = parseSize(filterMinSize)
+          if (minBytes !== null && fileItem.size < minBytes) return false
+        }
+
+        if (filterMaxSize) {
+          const maxBytes = parseSize(filterMaxSize)
+          if (maxBytes !== null && fileItem.size > maxBytes) return false
+        }
+      }
+
+      return true
+    })
+  }
+
+  // Get folder path for a file (for display in search results)
+  const getFolderPath = (key: string): string => {
+    const parts = key.split('/')
+    parts.pop() // Remove filename
+    return parts.length > 0 ? parts.join('/') + '/' : '/'
+  }
+
+  // Parse size string like "10KB", "5MB", "1GB" to bytes
+  const parseSize = (sizeStr: string): number | null => {
+    const match = sizeStr.trim().match(/^(\d+(?:\.\d+)?)\s*(bytes?|kb|mb|gb|tb)?$/i)
+    if (!match) return null
+
+    const value = parseFloat(match[1])
+    const unit = (match[2] || 'bytes').toLowerCase()
+
+    const multipliers: Record<string, number> = {
+      'byte': 1, 'bytes': 1,
+      'kb': 1024,
+      'mb': 1024 * 1024,
+      'gb': 1024 * 1024 * 1024,
+      'tb': 1024 * 1024 * 1024 * 1024,
+    }
+
+    return value * (multipliers[unit] || 1)
+  }
+
+  // Clear all filters
+  const clearFilters = () => {
+    setSearchQuery('')
+    setFilterDateFrom('')
+    setFilterDateTo('')
+    setFilterExtension('')
+    setFilterMinSize('')
+    setFilterMaxSize('')
+    setFilterMaxDepth('')
   }
 
   const handleUploadClick = () => {
@@ -525,10 +721,16 @@ export default function BucketDetails() {
     )
   }
 
-  const browserItems = getBrowserItemsForPrefix(currentPrefix)
+  // When searching, show global results from entire bucket; otherwise show current directory
+  const browserItems = hasActiveFilters
+    ? getGlobalSearchResults()
+    : getBrowserItemsForPrefix(currentPrefix)
   const leftBreadcrumbs = getBreadcrumbsForPrefix(currentPrefix)
-  const rightBrowserItems = getBrowserItemsForPrefix(rightPrefix)
+  const rightBrowserItems = hasActiveFilters
+    ? getGlobalSearchResults()
+    : getBrowserItemsForPrefix(rightPrefix)
   const rightBreadcrumbs = getBreadcrumbsForPrefix(rightPrefix)
+  const isSearchMode = !!hasActiveFilters
 
   return (
     <div className="p-8">
@@ -600,6 +802,210 @@ export default function BucketDetails() {
               className="hidden"
             />
           </div>
+        </div>
+
+        {/* Search and Filter Bar */}
+        <div className="bg-dark-surface border border-dark-border rounded-lg p-4">
+          <div className="flex items-center gap-4">
+            {/* Search Input */}
+            <div className="flex-1 relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-dark-textSecondary" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search files... (use * for wildcard, e.g., *.jpg, report*)"
+                className="w-full pl-10 pr-10 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text placeholder-dark-textSecondary focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-dark-textSecondary hover:text-dark-text"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+
+            {/* Filter Toggle Button */}
+            <button
+              onClick={() => setShowFilters(!showFilters)}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
+                showFilters || (filterDateFrom || filterDateTo || filterExtension || filterMinSize || filterMaxSize || filterMaxDepth)
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-dark-bg border border-dark-border text-dark-text hover:bg-dark-surfaceHover'
+              }`}
+            >
+              <Filter className="w-4 h-4" />
+              Filters
+              {(filterDateFrom || filterDateTo || filterExtension || filterMinSize || filterMaxSize || filterMaxDepth) && (
+                <span className="bg-white/20 text-xs px-1.5 py-0.5 rounded">
+                  {[filterDateFrom, filterDateTo, filterExtension, filterMinSize, filterMaxSize, filterMaxDepth].filter(Boolean).length}
+                </span>
+              )}
+            </button>
+
+            {/* Clear Filters */}
+            {hasActiveFilters && (
+              <button
+                onClick={clearFilters}
+                className="flex items-center gap-2 px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-textSecondary hover:text-dark-text hover:bg-dark-surfaceHover transition-colors"
+              >
+                <X className="w-4 h-4" />
+                Clear
+              </button>
+            )}
+          </div>
+
+          {/* Expanded Filters */}
+          {showFilters && (
+            <div className="mt-4 pt-4 border-t border-dark-border space-y-4">
+              {/* Row 1: Extension and Max Depth */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {/* Extension Filter */}
+                <div>
+                  <label className="block text-sm font-medium text-dark-textSecondary mb-1">File Extension</label>
+                  <input
+                    type="text"
+                    value={filterExtension}
+                    onChange={(e) => setFilterExtension(e.target.value)}
+                    placeholder="e.g., jpg, png, pdf"
+                    className="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text placeholder-dark-textSecondary focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                  />
+                </div>
+
+                {/* Max Depth Filter */}
+                <div>
+                  <label className="block text-sm font-medium text-dark-textSecondary mb-1">Max Folder Depth</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={filterMaxDepth}
+                    onChange={(e) => setFilterMaxDepth(e.target.value)}
+                    placeholder="e.g., 2 (0 = root only)"
+                    className="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text placeholder-dark-textSecondary focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                  />
+                </div>
+
+                {/* Size Filter */}
+                <div className="sm:col-span-2 lg:col-span-1">
+                  <label className="block text-sm font-medium text-dark-textSecondary mb-1">File Size</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={filterMinSize}
+                      onChange={(e) => setFilterMinSize(e.target.value)}
+                      placeholder="Min (e.g., 1MB)"
+                      className="flex-1 px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text placeholder-dark-textSecondary focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                    />
+                    <input
+                      type="text"
+                      value={filterMaxSize}
+                      onChange={(e) => setFilterMaxSize(e.target.value)}
+                      placeholder="Max (e.g., 10MB)"
+                      className="flex-1 px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text placeholder-dark-textSecondary focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Row 2: Date Filters */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {/* Date From Filter */}
+                <div>
+                  <label className="block text-sm font-medium text-dark-textSecondary mb-1">Modified After</label>
+                  <div className="relative">
+                    <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-dark-textSecondary" />
+                    <input
+                      type="date"
+                      value={filterDateFrom}
+                      onChange={(e) => setFilterDateFrom(e.target.value)}
+                      className="w-full pl-10 pr-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                    />
+                  </div>
+                </div>
+
+                {/* Date To Filter */}
+                <div>
+                  <label className="block text-sm font-medium text-dark-textSecondary mb-1">Modified Before</label>
+                  <div className="relative">
+                    <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-dark-textSecondary" />
+                    <input
+                      type="date"
+                      value={filterDateTo}
+                      onChange={(e) => setFilterDateTo(e.target.value)}
+                      className="w-full pl-10 pr-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Search Tips */}
+          {searchQuery && !filterDateFrom && !filterDateTo && !filterExtension && !filterMinSize && !filterMaxSize && (
+            <p className="mt-2 text-xs text-dark-textSecondary">
+              Tip: Use <code className="bg-dark-bg px-1 rounded">*</code> for any characters, <code className="bg-dark-bg px-1 rounded">?</code> for single character
+            </p>
+          )}
+
+          {/* Active Filter Summary */}
+          {hasActiveFilters && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {searchQuery && (
+                <span className="inline-flex items-center gap-1 px-2 py-1 bg-blue-500/20 text-blue-400 rounded text-sm">
+                  Search: "{searchQuery}"
+                  <button onClick={() => setSearchQuery('')} className="hover:text-blue-300"><X className="w-3 h-3" /></button>
+                </span>
+              )}
+              {filterExtension && (
+                <span className="inline-flex items-center gap-1 px-2 py-1 bg-green-500/20 text-green-400 rounded text-sm">
+                  Extension: {filterExtension}
+                  <button onClick={() => setFilterExtension('')} className="hover:text-green-300"><X className="w-3 h-3" /></button>
+                </span>
+              )}
+              {filterDateFrom && (
+                <span className="inline-flex items-center gap-1 px-2 py-1 bg-purple-500/20 text-purple-400 rounded text-sm">
+                  After: {filterDateFrom}
+                  <button onClick={() => setFilterDateFrom('')} className="hover:text-purple-300"><X className="w-3 h-3" /></button>
+                </span>
+              )}
+              {filterDateTo && (
+                <span className="inline-flex items-center gap-1 px-2 py-1 bg-purple-500/20 text-purple-400 rounded text-sm">
+                  Before: {filterDateTo}
+                  <button onClick={() => setFilterDateTo('')} className="hover:text-purple-300"><X className="w-3 h-3" /></button>
+                </span>
+              )}
+              {filterMinSize && (
+                <span className="inline-flex items-center gap-1 px-2 py-1 bg-orange-500/20 text-orange-400 rounded text-sm">
+                  Min: {filterMinSize}
+                  <button onClick={() => setFilterMinSize('')} className="hover:text-orange-300"><X className="w-3 h-3" /></button>
+                </span>
+              )}
+              {filterMaxSize && (
+                <span className="inline-flex items-center gap-1 px-2 py-1 bg-orange-500/20 text-orange-400 rounded text-sm">
+                  Max: {filterMaxSize}
+                  <button onClick={() => setFilterMaxSize('')} className="hover:text-orange-300"><X className="w-3 h-3" /></button>
+                </span>
+              )}
+              {filterMaxDepth && (
+                <span className="inline-flex items-center gap-1 px-2 py-1 bg-cyan-500/20 text-cyan-400 rounded text-sm">
+                  Depth: {filterMaxDepth}
+                  <button onClick={() => setFilterMaxDepth('')} className="hover:text-cyan-300"><X className="w-3 h-3" /></button>
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* Search Results Info */}
+          {isSearchMode && (
+            <div className="mt-3 flex items-center gap-2 text-sm text-dark-textSecondary">
+              <Search className="w-4 h-4" />
+              <span>
+                Showing <span className="text-dark-text font-medium">{browserItems.length}</span> result{browserItems.length !== 1 ? 's' : ''} from entire bucket
+              </span>
+            </div>
+          )}
         </div>
 
       </div>
@@ -756,15 +1162,29 @@ export default function BucketDetails() {
                         className={`hover:bg-dark-surfaceHover transition-colors ${
                           draggedItem?.id === item.id ? 'opacity-50' : ''
                         }`}
-                        draggable
+                        draggable={!isSearchMode}
                         onContextMenu={(e) => handleContextMenu(e, 'file', 'left', item)}
-                        onDragStart={(e) => handleDragStart(e, item)}
+                        onDragStart={(e) => !isSearchMode && handleDragStart(e, item)}
                         onDragEnd={handleDragEnd}
                       >
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-2">
                             <FileIcon className="w-4 h-4 text-blue-500" />
-                            <span className="text-dark-text truncate">{item.key.substring(currentPrefix.length)}</span>
+                            <div className="min-w-0">
+                              <span className="text-dark-text truncate block">{item.key.split('/').pop()}</span>
+                              {isSearchMode && (
+                                <button
+                                  onClick={() => {
+                                    clearFilters()
+                                    navigateToFolder(getFolderPath(item.key) === '/' ? '' : getFolderPath(item.key), 'left')
+                                  }}
+                                  className="block text-xs text-blue-400 hover:text-blue-300 truncate text-left"
+                                  title="Go to folder"
+                                >
+                                  {getFolderPath(item.key) === '/' ? '/' : getFolderPath(item.key)}
+                                </button>
+                              )}
+                            </div>
                           </div>
                         </td>
                         <td className="px-4 py-3 text-dark-textSecondary text-sm">{formatFileSize(item.size)}</td>
@@ -891,15 +1311,29 @@ export default function BucketDetails() {
                         className={`hover:bg-dark-surfaceHover transition-colors ${
                           draggedItem?.id === item.id ? 'opacity-50' : ''
                         }`}
-                        draggable
+                        draggable={!isSearchMode}
                         onContextMenu={(e) => handleContextMenu(e, 'file', 'right', item)}
-                        onDragStart={(e) => handleDragStart(e, item)}
+                        onDragStart={(e) => !isSearchMode && handleDragStart(e, item)}
                         onDragEnd={handleDragEnd}
                       >
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-2">
                             <FileIcon className="w-4 h-4 text-blue-500" />
-                            <span className="text-dark-text truncate">{item.key.substring(rightPrefix.length)}</span>
+                            <div className="min-w-0">
+                              <span className="text-dark-text truncate block">{item.key.split('/').pop()}</span>
+                              {isSearchMode && (
+                                <button
+                                  onClick={() => {
+                                    clearFilters()
+                                    navigateToFolder(getFolderPath(item.key) === '/' ? '' : getFolderPath(item.key), 'right')
+                                  }}
+                                  className="block text-xs text-blue-400 hover:text-blue-300 truncate text-left"
+                                  title="Go to folder"
+                                >
+                                  {getFolderPath(item.key) === '/' ? '/' : getFolderPath(item.key)}
+                                </button>
+                              )}
+                            </div>
                           </div>
                         </td>
                         <td className="px-4 py-3 text-dark-textSecondary text-sm">{formatFileSize(item.size)}</td>
@@ -960,29 +1394,45 @@ export default function BucketDetails() {
           {/* Objects List */}
           {browserItems.length === 0 ? (
             <div className="bg-dark-surface border border-dark-border rounded-lg p-12 text-center">
-              <FileIcon className="w-16 h-16 text-dark-textSecondary mx-auto mb-4 opacity-50" />
-              <h2 className="text-xl font-semibold text-dark-text mb-2">No items yet</h2>
-              <p className="text-dark-textSecondary mb-6">Upload files or create folders to get started</p>
-              <div className="flex gap-3 justify-center">
-                <button
-                  onClick={() => {
-                    setCreateFolderFromContextMenu(false)
-                    setShowCreateFolderModal(true)
-                  }}
-                  className="bg-dark-surface border border-dark-border hover:bg-dark-surfaceHover text-dark-text px-6 py-3 rounded-lg transition-colors"
-                >
-                  Create Folder
-                </button>
-                <button
-                  onClick={() => {
-                    setUploadTargetPane('single')
-                    handleUploadClick()
-                  }}
-                  className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-lg transition-colors"
-                >
-                  Upload Files
-                </button>
-              </div>
+              {isSearchMode ? (
+                <>
+                  <Search className="w-16 h-16 text-dark-textSecondary mx-auto mb-4 opacity-50" />
+                  <h2 className="text-xl font-semibold text-dark-text mb-2">No results found</h2>
+                  <p className="text-dark-textSecondary mb-6">Try adjusting your search or filters</p>
+                  <button
+                    onClick={clearFilters}
+                    className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-lg transition-colors"
+                  >
+                    Clear Search & Filters
+                  </button>
+                </>
+              ) : (
+                <>
+                  <FileIcon className="w-16 h-16 text-dark-textSecondary mx-auto mb-4 opacity-50" />
+                  <h2 className="text-xl font-semibold text-dark-text mb-2">No items yet</h2>
+                  <p className="text-dark-textSecondary mb-6">Upload files or create folders to get started</p>
+                  <div className="flex gap-3 justify-center">
+                    <button
+                      onClick={() => {
+                        setCreateFolderFromContextMenu(false)
+                        setShowCreateFolderModal(true)
+                      }}
+                      className="bg-dark-surface border border-dark-border hover:bg-dark-surfaceHover text-dark-text px-6 py-3 rounded-lg transition-colors"
+                    >
+                      Create Folder
+                    </button>
+                    <button
+                      onClick={() => {
+                        setUploadTargetPane('single')
+                        handleUploadClick()
+                      }}
+                      className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-lg transition-colors"
+                    >
+                      Upload Files
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           ) : (
             <div
@@ -1054,15 +1504,29 @@ export default function BucketDetails() {
                         className={`hover:bg-dark-surfaceHover transition-colors ${
                           draggedItem?.id === item.id ? 'opacity-50' : ''
                         }`}
-                        draggable
+                        draggable={!isSearchMode}
                         onContextMenu={(e) => handleContextMenu(e, 'file', 'single', item)}
-                        onDragStart={(e) => handleDragStart(e, item)}
+                        onDragStart={(e) => !isSearchMode && handleDragStart(e, item)}
                         onDragEnd={handleDragEnd}
                       >
                         <td className="px-6 py-4">
                           <div className="flex items-center gap-3">
                             <FileIcon className="w-5 h-5 text-blue-500" />
-                            <span className="text-dark-text">{item.key.substring(currentPrefix.length)}</span>
+                            <div>
+                              <span className="text-dark-text">{item.key.split('/').pop()}</span>
+                              {isSearchMode && (
+                                <button
+                                  onClick={() => {
+                                    clearFilters()
+                                    navigateToFolder(getFolderPath(item.key) === '/' ? '' : getFolderPath(item.key))
+                                  }}
+                                  className="block text-xs text-blue-400 hover:text-blue-300 mt-0.5 text-left"
+                                  title="Go to folder"
+                                >
+                                  {getFolderPath(item.key) === '/' ? '/' : getFolderPath(item.key)}
+                                </button>
+                              )}
+                            </div>
                           </div>
                         </td>
                         <td className="px-6 py-4 text-dark-textSecondary">{formatFileSize(item.size)}</td>

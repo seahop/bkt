@@ -214,4 +214,4 @@ Use `-k` to accept self-signed certificates in development.
 
 ## License
 
-MIT
+Apache-2.0

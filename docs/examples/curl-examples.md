@@ -1,6 +1,6 @@
 # cURL Examples
 
-Complete examples for interacting with the Object Storage API using cURL.
+Complete examples for interacting with the bkt API using cURL.
 
 ## Authentication
 

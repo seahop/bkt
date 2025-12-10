@@ -1,6 +1,6 @@
 # Production Deployment Checklist
 
-This checklist ensures your Object Storage system is production-ready.
+This checklist ensures your bkt deployment is production-ready.
 
 ## Pre-Deployment
 

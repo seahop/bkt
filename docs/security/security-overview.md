@@ -1,6 +1,6 @@
 # Security Overview
 
-This document provides a comprehensive overview of security features and best practices for the Object Storage system.
+This document provides a comprehensive overview of security features and best practices for bkt.
 
 ## Security Architecture
 

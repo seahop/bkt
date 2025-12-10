@@ -1,6 +1,6 @@
 # Getting Started
 
-This guide will help you get up and running with the Object Storage system in minutes.
+This guide will help you get up and running with bkt in minutes.
 
 ## Prerequisites
 
@@ -101,7 +101,7 @@ cat downloaded.txt
 ```
 
 Congratulations! 🎉 You've successfully:
-- ✅ Set up the object storage system with security
+- ✅ Set up bkt with security
 - ✅ Logged in as admin
 - ✅ Created a bucket
 - ✅ Uploaded and downloaded a file
@@ -109,8 +109,8 @@ Congratulations! 🎉 You've successfully:
 ## Next Steps
 
 ### For Users
-- [User Guide](user-guide.md) - Learn about access keys, policies, and more
-- [API Documentation](../api/README.md) - Explore all available endpoints
+- [Admin Guide](admin-guide.md) - Learn about access keys, policies, and more
+- [API Documentation](../api/API.md) - Explore all available endpoints
 
 ### For Administrators
 - [Admin Guide](admin-guide.md) - User management, policies, and system configuration

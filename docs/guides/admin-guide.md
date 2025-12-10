@@ -1,6 +1,6 @@
 # Administrator Guide
 
-This guide covers administrative tasks for managing the Object Storage system.
+This guide covers administrative tasks for managing bkt.
 
 ## Table of Contents
 

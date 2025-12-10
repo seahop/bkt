@@ -1,20 +1,19 @@
 # Documentation Index
 
-Complete index of all documentation files for the Object Storage system.
+Complete index of all documentation files for bkt.
 
 ## Quick Reference
 
 - **Getting Started:** [docs/guides/getting-started.md](guides/getting-started.md)
-- **API Overview:** [docs/README.md](README.md)
+- **Full API Reference:** [docs/api/API.md](api/API.md)
+- **S3fs Mounting:** [docs/guides/MOUNTING.md](guides/MOUNTING.md)
 - **Security:** [docs/security/security-overview.md](security/security-overview.md)
 - **Production:** [docs/deployment/production-checklist.md](deployment/production-checklist.md)
 
 ## Documentation Files
 
-### Main Documentation
-- [docs/README.md](README.md) - Main documentation index and overview
-
 ### API Reference
+- [docs/api/API.md](api/API.md) - **Complete API reference** (all 60+ endpoints)
 - [docs/api/authentication.md](api/authentication.md) - User registration, login, tokens
 - [docs/api/access-keys.md](api/access-keys.md) - API access key management
 - [docs/api/policies.md](api/policies.md) - IAM-style policy management
@@ -23,6 +22,7 @@ Complete index of all documentation files for the Object Storage system.
 ### User Guides
 - [docs/guides/getting-started.md](guides/getting-started.md) - Quick start guide
 - [docs/guides/admin-guide.md](guides/admin-guide.md) - Administrator's guide
+- [docs/guides/MOUNTING.md](guides/MOUNTING.md) - S3fs mounting guide
 
 ### Security
 - [docs/security/security-overview.md](security/security-overview.md) - Comprehensive security documentation
@@ -50,9 +50,10 @@ Complete index of all documentation files for the Object Storage system.
 4. [Production Checklist](deployment/production-checklist.md)
 
 ### For Developers
-1. [API Documentation](api/)
+1. [Full API Reference](api/API.md)
 2. [cURL Examples](examples/curl-examples.md)
-3. [Security Overview](security/security-overview.md)
+3. [S3fs Mounting](guides/MOUNTING.md)
+4. [Security Overview](security/security-overview.md)
 
 ### For Security Teams
 1. [Security Overview](security/security-overview.md)
@@ -85,16 +86,17 @@ Complete index of all documentation files for the Object Storage system.
 
 ```
 docs/
-├── README.md                          # Main index
 ├── DOCUMENTATION_INDEX.md             # This file
 ├── api/                               # API reference
+│   ├── API.md                         # Complete API reference (all endpoints)
 │   ├── authentication.md
 │   ├── access-keys.md
 │   ├── policies.md
 │   └── buckets-and-objects.md
 ├── guides/                            # User guides
 │   ├── getting-started.md
-│   └── admin-guide.md
+│   ├── admin-guide.md
+│   └── MOUNTING.md                    # S3fs mounting guide
 ├── security/                          # Security docs
 │   └── security-overview.md
 ├── deployment/                        # Deployment guides
@@ -154,4 +156,4 @@ Found an issue or want to improve documentation?
 
 ---
 
-**Last Updated:** 2025-12-08
+**Last Updated:** 2025-12-10

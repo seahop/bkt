@@ -756,6 +756,43 @@ func (h *BucketHandler) ListObjects(c *gin.Context) {
 		return
 	}
 
+	// Sync with actual storage backend to remove stale entries
+	// This ensures objects deleted directly from S3 are reflected in the response
+	if bucket.StorageBackend == "s3" && len(objects) > 0 {
+		storageBackend, err := h.getStorageBackend(&bucket)
+		if err == nil {
+			// Get actual objects from S3
+			s3Objects, err := storageBackend.ListObjects(bucketName, prefix)
+			if err == nil {
+				// Build a set of keys that exist in S3
+				s3Keys := make(map[string]bool)
+				for _, obj := range s3Objects {
+					s3Keys[obj.Key] = true
+				}
+
+				// Filter out objects that no longer exist in S3 and delete stale DB records
+				validObjects := make([]models.Object, 0, len(objects))
+				staleIDs := make([]uuid.UUID, 0)
+				for _, obj := range objects {
+					if s3Keys[obj.Key] {
+						validObjects = append(validObjects, obj)
+					} else {
+						staleIDs = append(staleIDs, obj.ID)
+					}
+				}
+
+				// Delete stale records from database in background
+				if len(staleIDs) > 0 {
+					go func(ids []uuid.UUID) {
+						database.DB.Where("id IN ?", ids).Delete(&models.Object{})
+					}(staleIDs)
+				}
+
+				objects = validObjects
+			}
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"bucket":  bucketName,
 		"objects": objects,

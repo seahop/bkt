@@ -2,18 +2,85 @@
 
 Complete API reference for bkt.
 
-## Table of Contents
+## Quick Reference
 
-- [Authentication](#authentication)
-- [Users](#users)
-- [Access Keys](#access-keys)
-- [Buckets](#buckets)
-- [Objects](#objects)
-- [Upload Status](#upload-status)
-- [Policies](#policies)
-- [S3 Configurations](#s3-configurations)
-- [S3-Compatible API](#s3-compatible-api)
-- [Error Handling](#error-handling)
+### Public Endpoints (No Authentication)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/auth/register` | Register new account |
+| POST | `/api/auth/login` | Login |
+| POST | `/api/auth/refresh` | Refresh token |
+| GET | `/api/auth/sso/config` | Get SSO configuration |
+| GET | `/api/auth/google/login` | Initiate Google OAuth |
+| GET | `/api/auth/google/callback` | Google OAuth callback |
+| POST | `/api/auth/vault/login` | Vault JWT login |
+
+### User Endpoints (Authentication Required)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/auth/logout` | Logout |
+| GET | `/api/users/me` | Get current user |
+| PUT | `/api/users/me` | Update current user |
+| GET | `/api/access-keys` | List access keys |
+| POST | `/api/access-keys` | Create access key |
+| DELETE | `/api/access-keys/:id` | Revoke access key |
+| GET | `/api/access-keys/stats` | Get key stats |
+| GET | `/api/buckets` | List buckets |
+| GET | `/api/buckets/:name` | Get bucket |
+| GET | `/api/buckets/:name/policy` | Get bucket policy |
+| GET | `/api/buckets/:name/objects` | List objects |
+| POST | `/api/buckets/:name/objects` | Upload object |
+| POST | `/api/buckets/:name/objects/async` | Upload async |
+| GET | `/api/buckets/:name/objects/*key` | Download object |
+| HEAD | `/api/buckets/:name/objects/*key` | Head object |
+| DELETE | `/api/buckets/:name/objects/*key` | Delete object |
+| POST | `/api/buckets/:name/objects/move` | Move object |
+| POST | `/api/buckets/:name/objects/rename` | Rename object |
+| POST | `/api/buckets/:name/folders/move` | Move folder |
+| GET | `/api/uploads` | List uploads |
+| GET | `/api/uploads/:id/status` | Get upload status |
+| GET | `/api/policies` | List policies |
+
+### Admin Endpoints (Admin Required)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/users` | List all users |
+| POST | `/api/users` | Create user |
+| DELETE | `/api/users/:id` | Delete user |
+| POST | `/api/users/:id/lock` | Lock user |
+| POST | `/api/users/:id/unlock` | Unlock user |
+| GET | `/api/users/:id/access-keys` | List user's keys |
+| DELETE | `/api/users/:id/access-keys/:key_id` | Delete user's key |
+| POST | `/api/buckets` | Create bucket |
+| DELETE | `/api/buckets/:name` | Delete bucket |
+| PUT | `/api/buckets/:name/policy` | Set bucket policy |
+| POST | `/api/policies` | Create policy |
+| GET | `/api/policies/:id` | Get policy |
+| PUT | `/api/policies/:id` | Update policy |
+| DELETE | `/api/policies/:id` | Delete policy |
+| POST | `/api/policies/users/:user_id/attach` | Attach policy |
+| DELETE | `/api/policies/users/:user_id/detach/:policy_id` | Detach policy |
+| GET | `/api/s3-configs` | List S3 configs |
+| POST | `/api/s3-configs` | Create S3 config |
+| GET | `/api/s3-configs/:id` | Get S3 config |
+| PUT | `/api/s3-configs/:id` | Update S3 config |
+| DELETE | `/api/s3-configs/:id` | Delete S3 config |
+
+### S3-Compatible API (Access Key Auth)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/` | List buckets |
+| HEAD | `/:bucket` | Head bucket |
+| GET | `/:bucket` | List objects |
+| PUT | `/:bucket` | Create bucket (disabled) |
+| HEAD | `/:bucket/*key` | Head object |
+| GET | `/:bucket/*key` | Get object |
+| PUT | `/:bucket/*key` | Put object |
+| DELETE | `/:bucket/*key` | Delete object |
 
 ---
 
@@ -29,21 +96,14 @@ All protected endpoints require a JWT token in the Authorization header:
 Authorization: Bearer <token>
 ```
 
-### Rate Limiting
-
-Authentication endpoints are rate-limited to **5 requests per minute per IP** to prevent brute force attacks.
+Authentication endpoints are rate-limited to **5 requests per minute per IP**.
 
 ---
 
 ## Authentication Endpoints
 
-### Register
-
-Create a new user account.
-
-```
-POST /api/auth/register
-```
+<details>
+<summary><code>POST /api/auth/register</code> - Register new account</summary>
 
 **Rate Limited:** Yes (5 req/min)
 
@@ -74,15 +134,10 @@ POST /api/auth/register
 - `403` - Registration disabled by administrator
 - `409` - Username or email already exists
 
----
+</details>
 
-### Login
-
-Authenticate and receive JWT tokens.
-
-```
-POST /api/auth/login
-```
+<details>
+<summary><code>POST /api/auth/login</code> - Authenticate user</summary>
 
 **Rate Limited:** Yes (5 req/min)
 
@@ -112,15 +167,10 @@ POST /api/auth/login
 - `401` - Invalid credentials
 - `403` - Account locked by administrator
 
----
+</details>
 
-### Refresh Token
-
-Generate a new access token using a refresh token.
-
-```
-POST /api/auth/refresh
-```
+<details>
+<summary><code>POST /api/auth/refresh</code> - Refresh access token</summary>
 
 **Rate Limited:** Yes (5 req/min)
 
@@ -140,15 +190,10 @@ POST /api/auth/refresh
 - `400` - Invalid request format
 - `401` - Invalid or expired refresh token
 
----
+</details>
 
-### Logout
-
-Invalidate the current session.
-
-```
-POST /api/auth/logout
-```
+<details>
+<summary><code>POST /api/auth/logout</code> - Invalidate session</summary>
 
 **Authentication:** Required
 
@@ -159,15 +204,10 @@ POST /api/auth/logout
 }
 ```
 
----
+</details>
 
-### Get SSO Configuration
-
-Get SSO provider configuration for the frontend.
-
-```
-GET /api/auth/sso/config
-```
+<details>
+<summary><code>GET /api/auth/sso/config</code> - Get SSO configuration</summary>
 
 **Response (200 OK):**
 ```json
@@ -178,54 +218,38 @@ GET /api/auth/sso/config
 }
 ```
 
----
+</details>
 
-### Google OAuth Login
-
-Initiate Google OAuth login flow.
-
-```
-GET /api/auth/google/login
-```
+<details>
+<summary><code>GET /api/auth/google/login</code> - Initiate Google OAuth</summary>
 
 Redirects to Google's OAuth consent page.
 
----
+</details>
 
-### Google OAuth Callback
+<details>
+<summary><code>GET /api/auth/google/callback</code> - Google OAuth callback</summary>
 
-Handle Google OAuth callback (called by Google).
+Called by Google after authentication. Redirects to frontend with token.
 
-```
-GET /api/auth/google/callback
-```
+</details>
 
----
-
-### Vault JWT Login
-
-Login using HashiCorp Vault JWT.
-
-```
-POST /api/auth/vault/login
-```
+<details>
+<summary><code>POST /api/auth/vault/login</code> - Login with Vault JWT</summary>
 
 **Request Body:**
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | jwt | string | Yes | Vault-issued JWT token |
 
+</details>
+
 ---
 
-## Users
+## User Endpoints
 
-### Get Current User
-
-Get the authenticated user's profile.
-
-```
-GET /api/users/me
-```
+<details>
+<summary><code>GET /api/users/me</code> - Get current user profile</summary>
 
 **Authentication:** Required
 
@@ -242,15 +266,10 @@ GET /api/users/me
 }
 ```
 
----
+</details>
 
-### Update Current User
-
-Update the authenticated user's profile.
-
-```
-PUT /api/users/me
-```
+<details>
+<summary><code>PUT /api/users/me</code> - Update current user</summary>
 
 **Authentication:** Required
 
@@ -265,15 +284,10 @@ PUT /api/users/me
 **Error Codes:**
 - `400` - Invalid email format
 
----
+</details>
 
-### List Users
-
-List all users (admin only).
-
-```
-GET /api/users
-```
+<details>
+<summary><code>GET /api/users</code> - List all users <strong>[Admin]</strong></summary>
 
 **Authentication:** Required (Admin)
 
@@ -291,15 +305,10 @@ GET /api/users
 ]
 ```
 
----
+</details>
 
-### Create User
-
-Create a new user (admin only).
-
-```
-POST /api/users
-```
+<details>
+<summary><code>POST /api/users</code> - Create user <strong>[Admin]</strong></summary>
 
 **Authentication:** Required (Admin)
 
@@ -317,15 +326,10 @@ POST /api/users
 - `400` - Validation failed
 - `409` - Username or email already exists
 
----
+</details>
 
-### Delete User
-
-Delete a user account (admin only).
-
-```
-DELETE /api/users/:id
-```
+<details>
+<summary><code>DELETE /api/users/:id</code> - Delete user <strong>[Admin]</strong></summary>
 
 **Authentication:** Required (Admin)
 
@@ -341,15 +345,10 @@ DELETE /api/users/:id
 }
 ```
 
----
+</details>
 
-### Lock User
-
-Lock a user account to prevent login (admin only).
-
-```
-POST /api/users/:id/lock
-```
+<details>
+<summary><code>POST /api/users/:id/lock</code> - Lock user account <strong>[Admin]</strong></summary>
 
 **Authentication:** Required (Admin)
 
@@ -368,15 +367,10 @@ POST /api/users/:id/lock
 **Error Codes:**
 - `403` - Cannot lock admin users
 
----
+</details>
 
-### Unlock User
-
-Unlock a user account (admin only).
-
-```
-POST /api/users/:id/unlock
-```
+<details>
+<summary><code>POST /api/users/:id/unlock</code> - Unlock user account <strong>[Admin]</strong></summary>
 
 **Authentication:** Required (Admin)
 
@@ -392,15 +386,10 @@ POST /api/users/:id/unlock
 }
 ```
 
----
+</details>
 
-### List User's Access Keys
-
-List all access keys for a specific user (admin only).
-
-```
-GET /api/users/:id/access-keys
-```
+<details>
+<summary><code>GET /api/users/:id/access-keys</code> - List user's access keys <strong>[Admin]</strong></summary>
 
 **Authentication:** Required (Admin)
 
@@ -411,15 +400,10 @@ GET /api/users/:id/access-keys
 
 **Response (200 OK):** Array of access key objects
 
----
+</details>
 
-### Delete User's Access Key
-
-Delete a specific user's access key (admin only).
-
-```
-DELETE /api/users/:id/access-keys/:key_id
-```
+<details>
+<summary><code>DELETE /api/users/:id/access-keys/:key_id</code> - Delete user's access key <strong>[Admin]</strong></summary>
 
 **Authentication:** Required (Admin)
 
@@ -436,23 +420,18 @@ DELETE /api/users/:id/access-keys/:key_id
 }
 ```
 
+</details>
+
 ---
 
 ## Access Keys
 
 Access keys are used for S3-compatible API authentication. Each user can have up to **5 active access keys**.
 
-### Generate Access Key
-
-Create a new access key pair.
-
-```
-POST /api/access-keys
-```
+<details>
+<summary><code>POST /api/access-keys</code> - Generate access key</summary>
 
 **Authentication:** Required
-
-**Request Body:** None
 
 **Response (201 Created):**
 ```json
@@ -465,20 +444,15 @@ POST /api/access-keys
 }
 ```
 
-> **Important:** The `secret_key` is only shown once at creation time. Store it securely.
+> **Important:** The `secret_key` is only shown once at creation time.
 
 **Error Codes:**
 - `400` - Maximum access keys reached (5 limit)
 
----
+</details>
 
-### List Access Keys
-
-List the authenticated user's access keys.
-
-```
-GET /api/access-keys
-```
+<details>
+<summary><code>GET /api/access-keys</code> - List access keys</summary>
 
 **Authentication:** Required
 
@@ -495,17 +469,12 @@ GET /api/access-keys
 ]
 ```
 
-> Note: Only the last 4 characters of the access key are visible for security.
+> Note: Only the last 4 characters of the access key are visible.
 
----
+</details>
 
-### Revoke Access Key
-
-Revoke (soft delete) an access key.
-
-```
-DELETE /api/access-keys/:id
-```
+<details>
+<summary><code>DELETE /api/access-keys/:id</code> - Revoke access key</summary>
 
 **Authentication:** Required
 
@@ -525,15 +494,10 @@ DELETE /api/access-keys/:id
 - `403` - Cannot revoke another user's keys (unless admin)
 - `404` - Key not found
 
----
+</details>
 
-### Get Access Key Stats
-
-Get statistics about the user's access keys.
-
-```
-GET /api/access-keys/stats
-```
+<details>
+<summary><code>GET /api/access-keys/stats</code> - Get access key statistics</summary>
 
 **Authentication:** Required
 
@@ -546,17 +510,14 @@ GET /api/access-keys/stats
 }
 ```
 
+</details>
+
 ---
 
 ## Buckets
 
-### List Buckets
-
-List buckets accessible to the user.
-
-```
-GET /api/buckets
-```
+<details>
+<summary><code>GET /api/buckets</code> - List buckets</summary>
 
 **Authentication:** Required
 
@@ -576,15 +537,10 @@ GET /api/buckets
 ]
 ```
 
----
+</details>
 
-### Create Bucket
-
-Create a new bucket (admin only).
-
-```
-POST /api/buckets
-```
+<details>
+<summary><code>POST /api/buckets</code> - Create bucket <strong>[Admin]</strong></summary>
 
 **Authentication:** Required (Admin)
 
@@ -610,15 +566,10 @@ POST /api/buckets
 - `400` - Invalid bucket name or region
 - `409` - Bucket already exists
 
----
+</details>
 
-### Get Bucket
-
-Get bucket details.
-
-```
-GET /api/buckets/:name
-```
+<details>
+<summary><code>GET /api/buckets/:name</code> - Get bucket details</summary>
 
 **Authentication:** Required
 
@@ -633,15 +584,10 @@ GET /api/buckets/:name
 - `403` - Permission denied
 - `404` - Bucket not found
 
----
+</details>
 
-### Delete Bucket
-
-Delete a bucket (admin only, must be empty).
-
-```
-DELETE /api/buckets/:name
-```
+<details>
+<summary><code>DELETE /api/buckets/:name</code> - Delete bucket <strong>[Admin]</strong></summary>
 
 **Authentication:** Required (Admin)
 
@@ -660,15 +606,10 @@ DELETE /api/buckets/:name
 **Error Codes:**
 - `409` - Bucket not empty
 
----
+</details>
 
-### Set Bucket Policy
-
-Set the bucket's access policy (admin only).
-
-```
-PUT /api/buckets/:name/policy
-```
+<details>
+<summary><code>PUT /api/buckets/:name/policy</code> - Set bucket policy <strong>[Admin]</strong></summary>
 
 **Authentication:** Required (Admin)
 
@@ -689,15 +630,10 @@ PUT /api/buckets/:name/policy
 }
 ```
 
----
+</details>
 
-### Get Bucket Policy
-
-Get the bucket's access policy.
-
-```
-GET /api/buckets/:name/policy
-```
+<details>
+<summary><code>GET /api/buckets/:name/policy</code> - Get bucket policy</summary>
 
 **Authentication:** Required
 
@@ -713,17 +649,14 @@ GET /api/buckets/:name/policy
 }
 ```
 
+</details>
+
 ---
 
 ## Objects
 
-### List Objects
-
-List objects in a bucket.
-
-```
-GET /api/buckets/:name/objects
-```
+<details>
+<summary><code>GET /api/buckets/:name/objects</code> - List objects</summary>
 
 **Authentication:** Required
 
@@ -757,15 +690,10 @@ GET /api/buckets/:name/objects
 }
 ```
 
----
+</details>
 
-### Upload Object (Synchronous)
-
-Upload a file synchronously.
-
-```
-POST /api/buckets/:name/objects
-```
+<details>
+<summary><code>POST /api/buckets/:name/objects</code> - Upload object (synchronous)</summary>
 
 **Authentication:** Required
 
@@ -796,15 +724,12 @@ POST /api/buckets/:name/objects
 - `400` - Missing key, invalid key, forbidden file type
 - `413` - File too large
 
----
+</details>
 
-### Upload Object (Asynchronous)
+<details>
+<summary><code>POST /api/buckets/:name/objects/async</code> - Upload object (asynchronous)</summary>
 
-Upload a file asynchronously with progress tracking. Recommended for large files.
-
-```
-POST /api/buckets/:name/objects/async
-```
+Recommended for large files with progress tracking.
 
 **Authentication:** Required
 
@@ -828,15 +753,10 @@ POST /api/buckets/:name/objects/async
 }
 ```
 
----
+</details>
 
-### Download Object
-
-Download or stream an object.
-
-```
-GET /api/buckets/:name/objects/*key
-```
+<details>
+<summary><code>GET /api/buckets/:name/objects/*key</code> - Download object</summary>
 
 **Authentication:** Required
 
@@ -861,15 +781,10 @@ GET /api/buckets/:name/objects/*key
 
 **Response:** Binary file stream
 
----
+</details>
 
-### Head Object
-
-Get object metadata without downloading.
-
-```
-HEAD /api/buckets/:name/objects/*key
-```
+<details>
+<summary><code>HEAD /api/buckets/:name/objects/*key</code> - Get object metadata</summary>
 
 **Authentication:** Required
 
@@ -885,15 +800,10 @@ HEAD /api/buckets/:name/objects/*key
 - `200` - Object exists
 - `404` - Not found
 
----
+</details>
 
-### Delete Object
-
-Delete an object.
-
-```
-DELETE /api/buckets/:name/objects/*key
-```
+<details>
+<summary><code>DELETE /api/buckets/:name/objects/*key</code> - Delete object</summary>
 
 **Authentication:** Required
 
@@ -910,15 +820,12 @@ DELETE /api/buckets/:name/objects/*key
 }
 ```
 
----
+</details>
 
-### Move Object
+<details>
+<summary><code>POST /api/buckets/:name/objects/move</code> - Move object</summary>
 
 Move an object to a different location within the same bucket.
-
-```
-POST /api/buckets/:name/objects/move
-```
 
 **Authentication:** Required
 
@@ -946,15 +853,12 @@ POST /api/buckets/:name/objects/move
 - `404` - Source object not found
 - `409` - Destination already exists
 
----
+</details>
 
-### Rename Object
+<details>
+<summary><code>POST /api/buckets/:name/objects/rename</code> - Rename object</summary>
 
-Rename an object (within the same folder).
-
-```
-POST /api/buckets/:name/objects/rename
-```
+Rename an object within the same folder.
 
 **Authentication:** Required
 
@@ -981,15 +885,12 @@ POST /api/buckets/:name/objects/rename
 - `400` - New name contains slashes
 - `409` - Object with new name already exists
 
----
+</details>
 
-### Move Folder
+<details>
+<summary><code>POST /api/buckets/:name/folders/move</code> - Move folder</summary>
 
-Recursively move all objects with a prefix (folder).
-
-```
-POST /api/buckets/:name/folders/move
-```
+Recursively move all objects with a prefix.
 
 **Authentication:** Required
 
@@ -1012,17 +913,14 @@ POST /api/buckets/:name/folders/move
 }
 ```
 
+</details>
+
 ---
 
 ## Upload Status
 
-### List Uploads
-
-List the user's async uploads.
-
-```
-GET /api/uploads
-```
+<details>
+<summary><code>GET /api/uploads</code> - List uploads</summary>
 
 **Authentication:** Required
 
@@ -1051,15 +949,10 @@ GET /api/uploads
 ]
 ```
 
----
+</details>
 
-### Get Upload Status
-
-Get real-time status of a specific upload.
-
-```
-GET /api/uploads/:id/status
-```
+<details>
+<summary><code>GET /api/uploads/:id/status</code> - Get upload status</summary>
 
 **Authentication:** Required
 
@@ -1068,22 +961,21 @@ GET /api/uploads/:id/status
 |-----------|------|-------------|
 | id | UUID | Upload ID |
 
-**Response (200 OK):** Upload status object (same format as list)
+**Response (200 OK):** Upload status object
 
 **Error Codes:**
 - `404` - Upload not found or doesn't belong to user
+
+</details>
 
 ---
 
 ## Policies
 
-### List Policies
+<details>
+<summary><code>GET /api/policies</code> - List policies</summary>
 
-List policies. Admins see all policies; users see only their attached policies.
-
-```
-GET /api/policies
-```
+Admins see all policies; users see only their attached policies.
 
 **Authentication:** Required
 
@@ -1101,15 +993,10 @@ GET /api/policies
 ]
 ```
 
----
+</details>
 
-### Create Policy
-
-Create a new policy (admin only).
-
-```
-POST /api/policies
-```
+<details>
+<summary><code>POST /api/policies</code> - Create policy <strong>[Admin]</strong></summary>
 
 **Authentication:** Required (Admin)
 
@@ -1136,15 +1023,10 @@ POST /api/policies
 
 **Response (201 Created):** Policy object
 
----
+</details>
 
-### Get Policy
-
-Get policy details (admin only).
-
-```
-GET /api/policies/:id
-```
+<details>
+<summary><code>GET /api/policies/:id</code> - Get policy <strong>[Admin]</strong></summary>
 
 **Authentication:** Required (Admin)
 
@@ -1155,15 +1037,10 @@ GET /api/policies/:id
 
 **Response (200 OK):** Policy object
 
----
+</details>
 
-### Update Policy
-
-Update a policy (admin only).
-
-```
-PUT /api/policies/:id
-```
+<details>
+<summary><code>PUT /api/policies/:id</code> - Update policy <strong>[Admin]</strong></summary>
 
 **Authentication:** Required (Admin)
 
@@ -1181,15 +1058,10 @@ PUT /api/policies/:id
 
 **Response (200 OK):** Updated policy object
 
----
+</details>
 
-### Delete Policy
-
-Delete a policy (admin only).
-
-```
-DELETE /api/policies/:id
-```
+<details>
+<summary><code>DELETE /api/policies/:id</code> - Delete policy <strong>[Admin]</strong></summary>
 
 **Authentication:** Required (Admin)
 
@@ -1208,15 +1080,10 @@ DELETE /api/policies/:id
 **Error Codes:**
 - `409` - Policy is attached to users (detach first)
 
----
+</details>
 
-### Attach Policy to User
-
-Attach a policy to a user (admin only).
-
-```
-POST /api/policies/users/:user_id/attach
-```
+<details>
+<summary><code>POST /api/policies/users/:user_id/attach</code> - Attach policy to user <strong>[Admin]</strong></summary>
 
 **Authentication:** Required (Admin)
 
@@ -1237,15 +1104,10 @@ POST /api/policies/users/:user_id/attach
 }
 ```
 
----
+</details>
 
-### Detach Policy from User
-
-Detach a policy from a user (admin only).
-
-```
-DELETE /api/policies/users/:user_id/detach/:policy_id
-```
+<details>
+<summary><code>DELETE /api/policies/users/:user_id/detach/:policy_id</code> - Detach policy <strong>[Admin]</strong></summary>
 
 **Authentication:** Required (Admin)
 
@@ -1262,17 +1124,16 @@ DELETE /api/policies/users/:user_id/detach/:policy_id
 }
 ```
 
+</details>
+
 ---
 
 ## S3 Configurations
 
 Manage external S3-compatible storage backends (admin only).
 
-### List S3 Configurations
-
-```
-GET /api/s3-configs
-```
+<details>
+<summary><code>GET /api/s3-configs</code> - List S3 configurations <strong>[Admin]</strong></summary>
 
 **Authentication:** Required (Admin)
 
@@ -1294,13 +1155,10 @@ GET /api/s3-configs
 ]
 ```
 
----
+</details>
 
-### Create S3 Configuration
-
-```
-POST /api/s3-configs
-```
+<details>
+<summary><code>POST /api/s3-configs</code> - Create S3 configuration <strong>[Admin]</strong></summary>
 
 **Authentication:** Required (Admin)
 
@@ -1317,20 +1175,17 @@ POST /api/s3-configs
 | force_path_style | boolean | No | Use path-style URLs (default: false) |
 | is_default | boolean | No | Set as default configuration |
 
-> **Note:** Credentials are encrypted before storage.
+> Credentials are encrypted before storage.
 
 **Response (201 Created):** S3 configuration object
 
 **Error Codes:**
 - `409` - Configuration name already exists
 
----
+</details>
 
-### Get S3 Configuration
-
-```
-GET /api/s3-configs/:id
-```
+<details>
+<summary><code>GET /api/s3-configs/:id</code> - Get S3 configuration <strong>[Admin]</strong></summary>
 
 **Authentication:** Required (Admin)
 
@@ -1341,13 +1196,10 @@ GET /api/s3-configs/:id
 
 **Response (200 OK):** S3 configuration object
 
----
+</details>
 
-### Update S3 Configuration
-
-```
-PUT /api/s3-configs/:id
-```
+<details>
+<summary><code>PUT /api/s3-configs/:id</code> - Update S3 configuration <strong>[Admin]</strong></summary>
 
 **Authentication:** Required (Admin)
 
@@ -1360,13 +1212,10 @@ PUT /api/s3-configs/:id
 
 **Response (200 OK):** Updated configuration object
 
----
+</details>
 
-### Delete S3 Configuration
-
-```
-DELETE /api/s3-configs/:id
-```
+<details>
+<summary><code>DELETE /api/s3-configs/:id</code> - Delete S3 configuration <strong>[Admin]</strong></summary>
 
 **Authentication:** Required (Admin)
 
@@ -1385,26 +1234,25 @@ DELETE /api/s3-configs/:id
 **Error Codes:**
 - `409` - Configuration is in use by buckets
 
+</details>
+
 ---
 
 ## S3-Compatible API
 
-The S3-compatible API enables tools like `s3fs-fuse`, AWS CLI, and other S3 clients to interact with BKT.
+The S3-compatible API enables tools like `s3fs-fuse`, AWS CLI, and other S3 clients to interact with bkt.
 
 ### Authentication
 
-Uses **AWS Signature V4** authentication with access keys generated from the BKT API.
+Uses **AWS Signature V4** with access keys generated from the bkt API.
 
 **Required Headers:**
 - `Authorization`: AWS4-HMAC-SHA256 signature
 - `X-Amz-Date`: Request timestamp
 - `X-Amz-Content-Sha256`: Content hash
 
-### List Buckets
-
-```
-GET /
-```
+<details>
+<summary><code>GET /</code> - List buckets (S3)</summary>
 
 **Response (200 OK):** XML
 ```xml
@@ -1423,28 +1271,20 @@ GET /
 </ListAllMyBucketsResult>
 ```
 
----
+</details>
 
-### Head Bucket
-
-Check if bucket exists and is accessible.
-
-```
-HEAD /:bucket
-```
+<details>
+<summary><code>HEAD /:bucket</code> - Check bucket exists (S3)</summary>
 
 **Status Codes:**
 - `200` - Bucket exists
 - `403` - Access denied
 - `404` - Bucket not found
 
----
+</details>
 
-### List Objects (S3)
-
-```
-GET /:bucket
-```
+<details>
+<summary><code>GET /:bucket</code> - List objects (S3)</summary>
 
 **Query Parameters:**
 | Parameter | Type | Description |
@@ -1455,13 +1295,10 @@ GET /:bucket
 
 **Response (200 OK):** XML ListBucketResult
 
----
+</details>
 
-### Put Object (S3)
-
-```
-PUT /:bucket/:key
-```
+<details>
+<summary><code>PUT /:bucket/:key</code> - Put object (S3)</summary>
 
 **Required Headers:**
 - `Content-Length`: File size
@@ -1474,48 +1311,38 @@ PUT /:bucket/:key
 - `411` - Missing Content-Length
 - `413` - Entity too large
 
----
+</details>
 
-### Get Object (S3)
-
-```
-GET /:bucket/:key
-```
+<details>
+<summary><code>GET /:bucket/:key</code> - Get object (S3)</summary>
 
 **Response:** Binary file stream with appropriate headers
 
----
+</details>
 
-### Head Object (S3)
-
-```
-HEAD /:bucket/:key
-```
+<details>
+<summary><code>HEAD /:bucket/:key</code> - Head object (S3)</summary>
 
 **Response Headers:**
 - `Content-Type`, `Content-Length`, `ETag`, `Last-Modified`
 
----
+</details>
 
-### Delete Object (S3)
+<details>
+<summary><code>DELETE /:bucket/:key</code> - Delete object (S3)</summary>
 
-```
-DELETE /:bucket/:key
-```
+**Status:** `204 No Content`
 
-**Status:** `204 No Content` (per S3 specification)
+</details>
 
----
-
-### Create Bucket (S3)
-
-```
-PUT /:bucket
-```
+<details>
+<summary><code>PUT /:bucket</code> - Create bucket (S3) - DISABLED</summary>
 
 **Status:** `403 Forbidden`
 
-> **Note:** Bucket creation via S3 API is disabled. Use the web UI or REST API.
+Bucket creation via S3 API is disabled. Use the web UI or REST API.
+
+</details>
 
 ---
 

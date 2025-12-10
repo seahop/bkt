@@ -109,6 +109,8 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 				buckets.GET("/:name/objects", bucketHandler.ListObjects)
 				buckets.POST("/:name/objects", bucketHandler.UploadObject)
 				buckets.POST("/:name/objects/async", bucketHandler.UploadObjectAsync) // Async upload
+				buckets.POST("/:name/objects/move", bucketHandler.MoveObject)         // Move object
+				buckets.POST("/:name/objects/rename", bucketHandler.RenameObject)     // Rename object
 				buckets.GET("/:name/objects/*key", bucketHandler.DownloadObject)
 				buckets.DELETE("/:name/objects/*key", bucketHandler.DeleteObject)
 				buckets.HEAD("/:name/objects/*key", bucketHandler.HeadObject)

@@ -26,6 +26,9 @@ type StorageBackend interface {
 
 	// GetObjectInfo gets metadata about an object
 	GetObjectInfo(bucketName, objectKey string) (*ObjectInfo, error)
+
+	// CopyObject copies an object within the same bucket
+	CopyObject(bucketName, srcKey, dstKey string) error
 }
 
 // ObjectInfo contains metadata about a stored object

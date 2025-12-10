@@ -195,6 +195,22 @@ export const bucketApi = {
     })
     return data
   },
+
+  moveObject: async (bucketName: string, sourceKey: string, destinationKey: string): Promise<StorageObject> => {
+    const { data } = await api.post<StorageObject>(`/buckets/${bucketName}/objects/move`, {
+      source_key: sourceKey,
+      destination_key: destinationKey,
+    })
+    return data
+  },
+
+  renameObject: async (bucketName: string, sourceKey: string, newName: string): Promise<StorageObject> => {
+    const { data } = await api.post<StorageObject>(`/buckets/${bucketName}/objects/rename`, {
+      source_key: sourceKey,
+      new_name: newName,
+    })
+    return data
+  },
 }
 
 // Access Key API

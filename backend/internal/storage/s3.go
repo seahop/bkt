@@ -310,3 +310,23 @@ func (s3s *S3Storage) GetObjectInfo(bucketName, objectKey string) (*ObjectInfo, 
 		ETag:         etag,
 	}, nil
 }
+
+// CopyObject copies an object within the same bucket using S3 CopyObject API
+func (s3s *S3Storage) CopyObject(bucketName, srcKey, dstKey string) error {
+	ctx := context.Background()
+	actualBucketName := s3s.getBucketName(bucketName)
+
+	// CopySource format: bucket/key
+	copySource := fmt.Sprintf("%s/%s", actualBucketName, srcKey)
+
+	_, err := s3s.client.CopyObject(ctx, &s3.CopyObjectInput{
+		Bucket:     aws.String(actualBucketName),
+		Key:        aws.String(dstKey),
+		CopySource: aws.String(copySource),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to copy object: %w", err)
+	}
+
+	return nil
+}

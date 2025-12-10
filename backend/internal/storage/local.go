@@ -194,6 +194,47 @@ func (ls *LocalStorage) GetObjectInfo(bucketName, objectKey string) (*ObjectInfo
 	}, nil
 }
 
+// CopyObject copies an object within the same bucket
+func (ls *LocalStorage) CopyObject(bucketName, srcKey, dstKey string) error {
+	srcPath := filepath.Join(ls.rootPath, bucketName, srcKey)
+	dstPath := filepath.Join(ls.rootPath, bucketName, dstKey)
+
+	// Check source exists
+	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
+		return fmt.Errorf("source object not found")
+	}
+
+	// Create destination directory if needed
+	dstDir := filepath.Dir(dstPath)
+	if err := os.MkdirAll(dstDir, 0755); err != nil {
+		return fmt.Errorf("failed to create destination directory: %w", err)
+	}
+
+	// Try rename first (atomic and efficient for same filesystem)
+	if err := os.Rename(srcPath, dstPath); err == nil {
+		return nil
+	}
+
+	// Fallback to copy if rename fails (e.g., cross-device)
+	srcFile, err := os.Open(srcPath)
+	if err != nil {
+		return fmt.Errorf("failed to open source file: %w", err)
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.Create(dstPath)
+	if err != nil {
+		return fmt.Errorf("failed to create destination file: %w", err)
+	}
+	defer dstFile.Close()
+
+	if _, err := io.Copy(dstFile, srcFile); err != nil {
+		return fmt.Errorf("failed to copy file: %w", err)
+	}
+
+	return nil
+}
+
 // calculateMD5 calculates the MD5 hash of a file
 func calculateMD5(filePath string) (string, error) {
 	file, err := os.Open(filePath)

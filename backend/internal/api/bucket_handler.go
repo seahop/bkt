@@ -1229,3 +1229,325 @@ func (h *BucketHandler) HeadObject(c *gin.Context) {
 
 	c.Status(http.StatusOK)
 }
+
+// MoveObjectRequest represents the request body for moving an object
+type MoveObjectRequest struct {
+	SourceKey      string `json:"source_key" binding:"required"`
+	DestinationKey string `json:"destination_key" binding:"required"`
+}
+
+// RenameObjectRequest represents the request body for renaming an object
+type RenameObjectRequest struct {
+	SourceKey string `json:"source_key" binding:"required"`
+	NewName   string `json:"new_name" binding:"required"`
+}
+
+func (h *BucketHandler) MoveObject(c *gin.Context) {
+	bucketName := c.Param("name")
+	userID, _ := c.Get("user_id")
+	userUUID := userID.(uuid.UUID)
+
+	var req MoveObjectRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Invalid request",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	// Validate keys
+	if req.SourceKey == req.DestinationKey {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error: "Source and destination keys cannot be the same",
+		})
+		return
+	}
+
+	// Get bucket from database
+	var bucket models.Bucket
+	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{
+			Error: "Bucket not found",
+		})
+		return
+	}
+
+	// Check permission to read source object
+	allowed, err := h.policyService.CheckObjectAccess(userUUID, bucketName, req.SourceKey, services.ActionGetObject)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Policy check failed",
+			Message: err.Error(),
+		})
+		return
+	}
+	if !allowed {
+		c.JSON(http.StatusForbidden, models.ErrorResponse{
+			Error:   "Permission denied",
+			Message: "You don't have permission to read the source object",
+		})
+		return
+	}
+
+	// Check permission to write destination object
+	allowed, err = h.policyService.CheckObjectAccess(userUUID, bucketName, req.DestinationKey, services.ActionPutObject)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Policy check failed",
+			Message: err.Error(),
+		})
+		return
+	}
+	if !allowed {
+		c.JSON(http.StatusForbidden, models.ErrorResponse{
+			Error:   "Permission denied",
+			Message: "You don't have permission to write to the destination",
+		})
+		return
+	}
+
+	// Check permission to delete source object
+	allowed, err = h.policyService.CheckObjectAccess(userUUID, bucketName, req.SourceKey, services.ActionDeleteObject)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Policy check failed",
+			Message: err.Error(),
+		})
+		return
+	}
+	if !allowed {
+		c.JSON(http.StatusForbidden, models.ErrorResponse{
+			Error:   "Permission denied",
+			Message: "You don't have permission to delete the source object",
+		})
+		return
+	}
+
+	// Get source object from database
+	var sourceObject models.Object
+	if err := database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, req.SourceKey).First(&sourceObject).Error; err != nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{
+			Error: "Source object not found",
+		})
+		return
+	}
+
+	// Check if destination already exists
+	var existingObject models.Object
+	if err := database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, req.DestinationKey).First(&existingObject).Error; err == nil {
+		c.JSON(http.StatusConflict, models.ErrorResponse{
+			Error: "Destination object already exists",
+		})
+		return
+	}
+
+	// Get storage backend
+	storageBackend, err := h.getStorageBackend(&bucket)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to initialize storage backend",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	// Copy object in storage backend
+	if err := storageBackend.CopyObject(bucketName, req.SourceKey, req.DestinationKey); err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to copy object",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	// Delete source from storage backend
+	if err := storageBackend.DeleteObject(bucketName, req.SourceKey); err != nil {
+		// Try to rollback - delete the copy
+		storageBackend.DeleteObject(bucketName, req.DestinationKey)
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to delete source object",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	// Update database record with new key
+	sourceObject.Key = req.DestinationKey
+	sourceObject.UpdatedAt = time.Now()
+	if err := database.DB.Save(&sourceObject).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to update object metadata",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Object moved successfully",
+		"object":  sourceObject,
+	})
+}
+
+func (h *BucketHandler) RenameObject(c *gin.Context) {
+	bucketName := c.Param("name")
+	userID, _ := c.Get("user_id")
+	userUUID := userID.(uuid.UUID)
+
+	var req RenameObjectRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Invalid request",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	// Validate new name (no slashes allowed - it's just a filename)
+	if strings.Contains(req.NewName, "/") {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error: "New name cannot contain slashes. Use move operation to change folders.",
+		})
+		return
+	}
+
+	// Build destination key (same folder, new filename)
+	var destinationKey string
+	lastSlash := strings.LastIndex(req.SourceKey, "/")
+	if lastSlash >= 0 {
+		destinationKey = req.SourceKey[:lastSlash+1] + req.NewName
+	} else {
+		destinationKey = req.NewName
+	}
+
+	if req.SourceKey == destinationKey {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error: "New name is the same as the current name",
+		})
+		return
+	}
+
+	// Get bucket from database
+	var bucket models.Bucket
+	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{
+			Error: "Bucket not found",
+		})
+		return
+	}
+
+	// Check permission to read source object
+	allowed, err := h.policyService.CheckObjectAccess(userUUID, bucketName, req.SourceKey, services.ActionGetObject)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Policy check failed",
+			Message: err.Error(),
+		})
+		return
+	}
+	if !allowed {
+		c.JSON(http.StatusForbidden, models.ErrorResponse{
+			Error:   "Permission denied",
+			Message: "You don't have permission to read the source object",
+		})
+		return
+	}
+
+	// Check permission to write destination
+	allowed, err = h.policyService.CheckObjectAccess(userUUID, bucketName, destinationKey, services.ActionPutObject)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Policy check failed",
+			Message: err.Error(),
+		})
+		return
+	}
+	if !allowed {
+		c.JSON(http.StatusForbidden, models.ErrorResponse{
+			Error:   "Permission denied",
+			Message: "You don't have permission to write to the destination",
+		})
+		return
+	}
+
+	// Check permission to delete source
+	allowed, err = h.policyService.CheckObjectAccess(userUUID, bucketName, req.SourceKey, services.ActionDeleteObject)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Policy check failed",
+			Message: err.Error(),
+		})
+		return
+	}
+	if !allowed {
+		c.JSON(http.StatusForbidden, models.ErrorResponse{
+			Error:   "Permission denied",
+			Message: "You don't have permission to delete the source object",
+		})
+		return
+	}
+
+	// Get source object from database
+	var sourceObject models.Object
+	if err := database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, req.SourceKey).First(&sourceObject).Error; err != nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{
+			Error: "Source object not found",
+		})
+		return
+	}
+
+	// Check if destination already exists
+	var existingObject models.Object
+	if err := database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, destinationKey).First(&existingObject).Error; err == nil {
+		c.JSON(http.StatusConflict, models.ErrorResponse{
+			Error: "An object with that name already exists",
+		})
+		return
+	}
+
+	// Get storage backend
+	storageBackend, err := h.getStorageBackend(&bucket)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to initialize storage backend",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	// Copy object in storage backend
+	if err := storageBackend.CopyObject(bucketName, req.SourceKey, destinationKey); err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to copy object",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	// Delete source from storage backend
+	if err := storageBackend.DeleteObject(bucketName, req.SourceKey); err != nil {
+		// Try to rollback - delete the copy
+		storageBackend.DeleteObject(bucketName, destinationKey)
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to delete source object",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	// Update database record with new key
+	sourceObject.Key = destinationKey
+	sourceObject.UpdatedAt = time.Now()
+	if err := database.DB.Save(&sourceObject).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to update object metadata",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Object renamed successfully",
+		"object":  sourceObject,
+	})
+}

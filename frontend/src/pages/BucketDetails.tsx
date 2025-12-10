@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { FolderOpen, Upload, Download, Trash2, File as FileIcon, ArrowLeft, RefreshCw, Folder, FolderPlus, Home, Loader2 } from 'lucide-react'
+import { FolderOpen, Upload, Download, Trash2, File as FileIcon, ArrowLeft, RefreshCw, Folder, FolderPlus, Home, Loader2, Pencil } from 'lucide-react'
 import { bucketApi } from '../services/api'
 import type { Object as StorageObject } from '../types'
 
@@ -35,6 +35,15 @@ export default function BucketDetails() {
   const [newFolderName, setNewFolderName] = useState('')
   const [activeUploads, setActiveUploads] = useState<ActiveUpload[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // Rename state
+  const [showRenameModal, setShowRenameModal] = useState(false)
+  const [renameTarget, setRenameTarget] = useState<StorageObject | null>(null)
+  const [newFileName, setNewFileName] = useState('')
+
+  // Drag and drop state
+  const [draggedItem, setDraggedItem] = useState<FileItem | null>(null)
+  const [dropTarget, setDropTarget] = useState<string | null>(null)
 
   useEffect(() => {
     if (bucketName) {
@@ -311,6 +320,83 @@ export default function BucketDetails() {
     }
   }
 
+  const handleRenameClick = (object: StorageObject) => {
+    setRenameTarget(object)
+    // Extract just the filename from the key
+    const filename = object.key.substring(currentPrefix.length)
+    setNewFileName(filename)
+    setShowRenameModal(true)
+  }
+
+  const handleRename = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!bucketName || !renameTarget || !newFileName.trim()) return
+
+    try {
+      setError('')
+      await bucketApi.renameObject(bucketName, renameTarget.key, newFileName.trim())
+      setShowRenameModal(false)
+      setRenameTarget(null)
+      setNewFileName('')
+      await loadObjects()
+    } catch (error: any) {
+      console.error('Failed to rename object:', error)
+      setError(error.response?.data?.message || 'Failed to rename object')
+    }
+  }
+
+  // Drag and drop handlers
+  const handleDragStart = (e: React.DragEvent, item: FileItem) => {
+    setDraggedItem(item)
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('text/plain', item.key)
+  }
+
+  const handleDragOver = (e: React.DragEvent, targetPrefix: string) => {
+    e.preventDefault()
+    if (draggedItem) {
+      e.dataTransfer.dropEffect = 'move'
+      setDropTarget(targetPrefix)
+    }
+  }
+
+  const handleDragLeave = () => {
+    setDropTarget(null)
+  }
+
+  const handleDrop = async (e: React.DragEvent, targetPrefix: string) => {
+    e.preventDefault()
+    setDropTarget(null)
+
+    if (!draggedItem || !bucketName) return
+
+    // Get just the filename from the dragged item
+    const filename = draggedItem.key.split('/').pop() || draggedItem.key
+    const destinationKey = targetPrefix + filename
+
+    // Don't move if it's the same location
+    if (draggedItem.key === destinationKey) {
+      setDraggedItem(null)
+      return
+    }
+
+    try {
+      setError('')
+      await bucketApi.moveObject(bucketName, draggedItem.key, destinationKey)
+      await loadObjects()
+    } catch (error: any) {
+      console.error('Failed to move object:', error)
+      setError(error.response?.data?.message || 'Failed to move object')
+    } finally {
+      setDraggedItem(null)
+    }
+  }
+
+  const handleDragEnd = () => {
+    setDraggedItem(null)
+    setDropTarget(null)
+  }
+
   const formatFileSize = (bytes: number): string => {
     if (bytes === 0) return '0 Bytes'
     const k = 1024
@@ -481,10 +567,18 @@ export default function BucketDetails() {
             <tbody className="divide-y divide-dark-border">
               {browserItems.map((item, index) => (
                 item.isFolder ? (
-                  <tr key={`folder-${index}`} className="hover:bg-dark-surfaceHover transition-colors cursor-pointer">
+                  <tr
+                    key={`folder-${index}`}
+                    className={`hover:bg-dark-surfaceHover transition-colors cursor-pointer ${
+                      dropTarget === item.prefix ? 'bg-blue-500/20 ring-2 ring-blue-500 ring-inset' : ''
+                    }`}
+                    onDragOver={(e) => handleDragOver(e, item.prefix)}
+                    onDragLeave={handleDragLeave}
+                    onDrop={(e) => handleDrop(e, item.prefix)}
+                  >
                     <td className="px-6 py-4" onClick={() => navigateToFolder(item.prefix)}>
                       <div className="flex items-center gap-3">
-                        <Folder className="w-5 h-5 text-yellow-500" />
+                        <Folder className={`w-5 h-5 ${dropTarget === item.prefix ? 'text-blue-500' : 'text-yellow-500'}`} />
                         <span className="text-dark-text font-medium">{item.name}/</span>
                       </div>
                     </td>
@@ -494,7 +588,15 @@ export default function BucketDetails() {
                     <td className="px-6 py-4"></td>
                   </tr>
                 ) : (
-                  <tr key={item.id} className="hover:bg-dark-surfaceHover transition-colors">
+                  <tr
+                    key={item.id}
+                    className={`hover:bg-dark-surfaceHover transition-colors ${
+                      draggedItem?.id === item.id ? 'opacity-50' : ''
+                    }`}
+                    draggable
+                    onDragStart={(e) => handleDragStart(e, item)}
+                    onDragEnd={handleDragEnd}
+                  >
                     <td className="px-6 py-4">
                       <div className="flex items-center gap-3">
                         <FileIcon className="w-5 h-5 text-blue-500" />
@@ -508,6 +610,13 @@ export default function BucketDetails() {
                     </td>
                     <td className="px-6 py-4">
                       <div className="flex items-center justify-end gap-2">
+                        <button
+                          onClick={() => handleRenameClick(item)}
+                          className="p-2 hover:bg-yellow-600 hover:text-white text-yellow-500 rounded transition-colors"
+                          title="Rename"
+                        >
+                          <Pencil className="w-4 h-4" />
+                        </button>
                         <button
                           onClick={() => handleDownload(item)}
                           className="p-2 hover:bg-blue-600 hover:text-white text-blue-500 rounded transition-colors"
@@ -571,6 +680,52 @@ export default function BucketDetails() {
                   className="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
                 >
                   Create
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Rename Modal */}
+      {showRenameModal && renameTarget && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+          <div className="bg-dark-surface border border-dark-border rounded-lg p-6 w-full max-w-md">
+            <h2 className="text-2xl font-bold text-dark-text mb-6">Rename File</h2>
+            <form onSubmit={handleRename} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-dark-text mb-2">New Name</label>
+                <input
+                  type="text"
+                  value={newFileName}
+                  onChange={(e) => setNewFileName(e.target.value)}
+                  className="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="new-filename.txt"
+                  required
+                  autoFocus
+                />
+                <p className="text-xs text-dark-textSecondary mt-1">
+                  Enter the new name for the file (without path)
+                </p>
+              </div>
+
+              <div className="flex gap-3 pt-4">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowRenameModal(false)
+                    setRenameTarget(null)
+                    setNewFileName('')
+                  }}
+                  className="flex-1 px-4 py-2 border border-dark-border text-dark-text rounded-lg hover:bg-dark-surfaceHover transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
+                >
+                  Rename
                 </button>
               </div>
             </form>

@@ -123,6 +123,30 @@ func (s3s *S3Storage) DeleteBucket(bucketName string) error {
 	return nil
 }
 
+// BucketExists checks if a bucket exists and is accessible in S3
+func (s3s *S3Storage) BucketExists(bucketName string) (bool, error) {
+	ctx := context.Background()
+	actualBucketName := s3s.getBucketName(bucketName)
+
+	_, err := s3s.client.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String(actualBucketName),
+	})
+	if err != nil {
+		// Check if it's a "not found" error vs permission error
+		errStr := err.Error()
+		if strings.Contains(errStr, "NotFound") || strings.Contains(errStr, "404") {
+			return false, nil
+		}
+		// Could be permission denied - bucket may exist but not accessible
+		if strings.Contains(errStr, "Forbidden") || strings.Contains(errStr, "403") {
+			return false, fmt.Errorf("bucket may exist but access denied")
+		}
+		return false, fmt.Errorf("failed to check bucket: %w", err)
+	}
+
+	return true, nil
+}
+
 // PutObject stores an object in S3
 func (s3s *S3Storage) PutObject(bucketName, objectKey string, data io.Reader, size int64, contentType string) error {
 	ctx := context.Background()
@@ -207,6 +231,7 @@ func (s3s *S3Storage) DeleteObject(bucketName, objectKey string) error {
 }
 
 // ListObjects lists all objects in a bucket with the given prefix
+// Limited to 10,000 objects to prevent memory exhaustion on huge buckets
 func (s3s *S3Storage) ListObjects(bucketName, prefix string) ([]ObjectInfo, error) {
 	ctx := context.Background()
 	actualBucketName := s3s.getBucketName(bucketName)
@@ -220,10 +245,13 @@ func (s3s *S3Storage) ListObjects(bucketName, prefix string) ([]ObjectInfo, erro
 		return objects, nil // Return empty list if bucket doesn't exist
 	}
 
-	// List objects
+	// List objects with a reasonable limit to prevent memory exhaustion
+	// S3 returns up to 1000 per page, we'll fetch up to 10 pages (10,000 objects)
+	const maxObjects = 10000
 	paginator := s3.NewListObjectsV2Paginator(s3s.client, &s3.ListObjectsV2Input{
-		Bucket: aws.String(actualBucketName),
-		Prefix: aws.String(prefix),
+		Bucket:  aws.String(actualBucketName),
+		Prefix:  aws.String(prefix),
+		MaxKeys: aws.Int32(1000), // Max per page
 	})
 
 	for paginator.HasMorePages() {
@@ -233,6 +261,10 @@ func (s3s *S3Storage) ListObjects(bucketName, prefix string) ([]ObjectInfo, erro
 		}
 
 		for _, obj := range page.Contents {
+			// Stop if we've reached the limit
+			if len(objects) >= maxObjects {
+				return objects, nil
+			}
 			// Infer content type from file extension (avoids N+1 HeadObject calls)
 			contentType := mime.TypeByExtension(filepath.Ext(*obj.Key))
 			if contentType == "" {

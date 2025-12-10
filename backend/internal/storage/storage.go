@@ -12,6 +12,9 @@ type StorageBackend interface {
 	// DeleteBucket removes a bucket from the storage backend (must be empty)
 	DeleteBucket(bucketName string) error
 
+	// BucketExists checks if a bucket exists and is accessible in the storage backend
+	BucketExists(bucketName string) (bool, error)
+
 	// PutObject stores an object in the given bucket
 	PutObject(bucketName, objectKey string, data io.Reader, size int64, contentType string) error
 

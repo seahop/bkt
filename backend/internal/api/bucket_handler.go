@@ -303,16 +303,16 @@ func (h *BucketHandler) CreateBucket(c *gin.Context) {
 		return
 	}
 
-	// Check if bucket already exists
+	// Check if bucket already exists in our database
 	var existing models.Bucket
 	if err := database.DB.Where("name = ?", req.Name).First(&existing).Error; err == nil {
 		c.JSON(http.StatusConflict, models.ErrorResponse{
-			Error: "Bucket already exists",
+			Error: "Bucket already exists in this system",
 		})
 		return
 	}
 
-	// Create bucket
+	// Create bucket struct (for storage backend check)
 	bucket := models.Bucket{
 		Name:           req.Name,
 		OwnerID:        userUUID,
@@ -342,6 +342,24 @@ func (h *BucketHandler) CreateBucket(c *gin.Context) {
 		bucket.StorageBackend = "local"
 	}
 
+	// Check if bucket already exists in storage backend (S3 or local)
+	// If it exists and we can access it, we'll "link" to it instead of creating a new one
+	var linkedToExisting bool
+	storageBackend, err := h.getStorageBackend(&bucket)
+	if err == nil {
+		exists, checkErr := storageBackend.BucketExists(bucket.Name)
+		if checkErr != nil {
+			// Permission issue - bucket might exist but we can't access it
+			c.JSON(http.StatusForbidden, models.ErrorResponse{
+				Error:   "Cannot access bucket in storage backend",
+				Message: checkErr.Error(),
+			})
+			return
+		}
+		linkedToExisting = exists
+	}
+
+	// Create bucket record in database
 	if err := database.DB.Create(&bucket).Error; err != nil {
 		// Get user info for audit log
 		username, _ := c.Get("username")
@@ -366,15 +384,13 @@ func (h *BucketHandler) CreateBucket(c *gin.Context) {
 
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to create bucket",
-			Message: err.Error(),
+			Message: "An internal error occurred. Please try again.",
 		})
 		return
 	}
 
-	// Create bucket in storage backend (local filesystem or S3)
-	// This ensures the bucket exists in the storage backend immediately
-	storageBackend, err := h.getStorageBackend(&bucket)
-	if err == nil {
+	// If bucket doesn't exist in storage backend, create it
+	if !linkedToExisting && storageBackend != nil {
 		if err := storageBackend.CreateBucket(bucket.Name, bucket.Region); err != nil {
 			logger.Warn("Failed to create bucket in storage backend", map[string]interface{}{
 				"bucket_name":     bucket.Name,
@@ -390,10 +406,10 @@ func (h *BucketHandler) CreateBucket(c *gin.Context) {
 				"region":          bucket.Region,
 			})
 		}
-	} else {
-		logger.Warn("Failed to initialize storage backend for bucket creation", map[string]interface{}{
-			"bucket_name": bucket.Name,
-			"error":       err.Error(),
+	} else if linkedToExisting {
+		logger.Info("Bucket linked to existing storage backend bucket", map[string]interface{}{
+			"bucket_name":     bucket.Name,
+			"storage_backend": bucket.StorageBackend,
 		})
 	}
 
@@ -410,14 +426,32 @@ func (h *BucketHandler) CreateBucket(c *gin.Context) {
 		bucket.ID.String(),
 		bucket.Name,
 		map[string]interface{}{
-			"bucket_name":     bucket.Name,
-			"region":          bucket.Region,
-			"storage_backend": bucket.StorageBackend,
-			"is_public":       bucket.IsPublic,
+			"bucket_name":       bucket.Name,
+			"region":            bucket.Region,
+			"storage_backend":   bucket.StorageBackend,
+			"is_public":         bucket.IsPublic,
+			"linked_to_existing": linkedToExisting,
 		},
 	)
 
-	c.JSON(http.StatusCreated, bucket)
+	// Return response with indication of whether bucket was linked or created
+	response := gin.H{
+		"id":              bucket.ID,
+		"name":            bucket.Name,
+		"owner_id":        bucket.OwnerID,
+		"is_public":       bucket.IsPublic,
+		"region":          bucket.Region,
+		"storage_backend": bucket.StorageBackend,
+		"created_at":      bucket.CreatedAt,
+		"updated_at":      bucket.UpdatedAt,
+	}
+
+	if linkedToExisting {
+		response["message"] = "Bucket linked to existing storage. Any existing contents will be accessible."
+		response["linked"] = true
+	}
+
+	c.JSON(http.StatusCreated, response)
 }
 
 func (h *BucketHandler) ListBuckets(c *gin.Context) {
@@ -785,35 +819,118 @@ func (h *BucketHandler) ListObjects(c *gin.Context) {
 		return
 	}
 
-	// Sync with actual storage backend to remove stale entries
-	// This ensures objects deleted directly from S3 are reflected in the response
-	if bucket.StorageBackend == "s3" && len(objects) > 0 {
+	// Sync with actual storage backend (S3 or local)
+	// This handles both:
+	// 1. Removing stale DB entries (objects deleted directly from S3)
+	// 2. Adding new entries (objects in S3 that aren't in DB, e.g., from linked buckets)
+	if bucket.StorageBackend == "s3" {
 		storageBackend, err := h.getStorageBackend(&bucket)
 		if err == nil {
 			// Get actual objects from S3
 			s3Objects, err := storageBackend.ListObjects(bucketName, prefix)
 			if err == nil {
-				// Build a set of keys that exist in S3
-				s3Keys := make(map[string]bool)
+				// Build maps for comparison
+				s3KeysMap := make(map[string]storage.ObjectInfo)
 				for _, obj := range s3Objects {
-					s3Keys[obj.Key] = true
+					s3KeysMap[obj.Key] = obj
 				}
 
-				// Filter out objects that no longer exist in S3 and delete stale DB records
+				dbKeysMap := make(map[string]bool)
+				for _, obj := range objects {
+					dbKeysMap[obj.Key] = true
+				}
+
+				// Find objects in S3 but not in database (need to add)
+				// Limit sync to prevent overwhelming DB on huge buckets
+				// Users can paginate/navigate to sync more incrementally
+				const maxSyncPerRequest = 1000
+				newObjects := make([]models.Object, 0)
+				for key, s3Obj := range s3KeysMap {
+					if !dbKeysMap[key] {
+						// Parse LastModified time
+						lastModified := time.Now()
+						if s3Obj.LastModified != "" {
+							if parsed, err := time.Parse(time.RFC3339, s3Obj.LastModified); err == nil {
+								lastModified = parsed
+							}
+						}
+
+						newObjects = append(newObjects, models.Object{
+							BucketID:    bucket.ID,
+							Key:         key,
+							Size:        s3Obj.Size,
+							ContentType: s3Obj.ContentType,
+							ETag:        s3Obj.ETag,
+							StoragePath: key,
+							CreatedAt:   lastModified,
+							UpdatedAt:   lastModified,
+						})
+
+						// Cap sync to avoid memory/DB overload on massive buckets
+						if len(newObjects) >= maxSyncPerRequest {
+							break
+						}
+					}
+				}
+
+				// Add new objects to database in background using batch inserts
+				// Batch size of 100 balances memory usage vs query count
+				const batchSize = 100
+				if len(newObjects) > 0 {
+					go func(objs []models.Object) {
+						// Process in batches to avoid huge queries
+						for i := 0; i < len(objs); i += batchSize {
+							end := i + batchSize
+							if end > len(objs) {
+								end = len(objs)
+							}
+							batch := objs[i:end]
+
+							// Build batch insert query
+							valueStrings := make([]string, 0, len(batch))
+							valueArgs := make([]interface{}, 0, len(batch)*8)
+							for _, obj := range batch {
+								valueStrings = append(valueStrings, "(gen_random_uuid(), ?, ?, ?, ?, ?, ?, '', ?, ?)")
+								valueArgs = append(valueArgs, obj.BucketID, obj.Key, obj.Size, obj.ContentType, obj.ETag, obj.StoragePath, obj.CreatedAt, obj.UpdatedAt)
+							}
+
+							query := fmt.Sprintf(`
+								INSERT INTO objects (id, bucket_id, key, size, content_type, e_tag, storage_path, sha256, created_at, updated_at)
+								VALUES %s
+								ON CONFLICT (bucket_id, key) DO NOTHING
+							`, strings.Join(valueStrings, ","))
+
+							database.DB.Exec(query, valueArgs...)
+						}
+					}(newObjects)
+
+					// Add to response immediately (don't wait for DB)
+					objects = append(objects, newObjects...)
+				}
+
+				// Find objects in database but not in S3 (need to remove)
 				validObjects := make([]models.Object, 0, len(objects))
 				staleIDs := make([]uuid.UUID, 0)
 				for _, obj := range objects {
-					if s3Keys[obj.Key] {
+					if _, exists := s3KeysMap[obj.Key]; exists {
 						validObjects = append(validObjects, obj)
-					} else {
+					} else if obj.ID != uuid.Nil {
+						// Only mark for deletion if it has a DB ID (not a newly added object)
 						staleIDs = append(staleIDs, obj.ID)
 					}
 				}
 
-				// Delete stale records from database in background
+				// Delete stale records from database in background (batched)
 				if len(staleIDs) > 0 {
 					go func(ids []uuid.UUID) {
-						database.DB.Where("id IN ?", ids).Delete(&models.Object{})
+						// Delete in batches of 100 to avoid huge IN clauses
+						for i := 0; i < len(ids); i += batchSize {
+							end := i + batchSize
+							if end > len(ids) {
+								end = len(ids)
+							}
+							database.DB.Where("id IN ?", ids[i:end]).Delete(&models.Object{})
+						}
 					}(staleIDs)
 				}
 

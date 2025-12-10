@@ -48,6 +48,22 @@ func (ls *LocalStorage) DeleteBucket(bucketName string) error {
 	return nil
 }
 
+// BucketExists checks if a bucket directory exists in the local filesystem
+func (ls *LocalStorage) BucketExists(bucketName string) (bool, error) {
+	bucketPath := filepath.Join(ls.rootPath, bucketName)
+
+	info, err := os.Stat(bucketPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to check bucket: %w", err)
+	}
+
+	// Ensure it's a directory
+	return info.IsDir(), nil
+}
+
 // PutObject stores an object in the local filesystem
 func (ls *LocalStorage) PutObject(bucketName, objectKey string, data io.Reader, size int64, contentType string) error {
 	bucketPath := filepath.Join(ls.rootPath, bucketName)

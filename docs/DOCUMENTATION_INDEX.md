@@ -6,6 +6,7 @@ Complete index of all documentation files for bkt.
 
 - **Getting Started:** [docs/guides/getting-started.md](guides/getting-started.md)
 - **Full API Reference:** [docs/api/API.md](api/API.md)
+- **SSO Setup:** [docs/guides/sso-setup.md](guides/sso-setup.md)
 - **S3fs Mounting:** [docs/guides/MOUNTING.md](guides/MOUNTING.md)
 - **Security:** [docs/security/security-overview.md](security/security-overview.md)
 - **Production:** [docs/deployment/production-checklist.md](deployment/production-checklist.md)
@@ -22,6 +23,7 @@ Complete index of all documentation files for bkt.
 ### User Guides
 - [docs/guides/getting-started.md](guides/getting-started.md) - Quick start guide
 - [docs/guides/admin-guide.md](guides/admin-guide.md) - Administrator's guide
+- [docs/guides/sso-setup.md](guides/sso-setup.md) - SSO configuration and policy integration
 - [docs/guides/MOUNTING.md](guides/MOUNTING.md) - S3fs mounting guide
 
 ### Security
@@ -45,9 +47,10 @@ Complete index of all documentation files for bkt.
 
 ### For Administrators
 1. [Admin Guide](guides/admin-guide.md)
-2. [Policies API](api/policies.md)
-3. [Security Overview](security/security-overview.md)
-4. [Production Checklist](deployment/production-checklist.md)
+2. [SSO Setup](guides/sso-setup.md)
+3. [Policies API](api/policies.md)
+4. [Security Overview](security/security-overview.md)
+5. [Production Checklist](deployment/production-checklist.md)
 
 ### For Developers
 1. [Full API Reference](api/API.md)
@@ -65,6 +68,7 @@ Complete index of all documentation files for bkt.
 
 ### Authentication & Authorization
 - [Authentication API](api/authentication.md) - JWT tokens
+- [SSO Setup](guides/sso-setup.md) - Vault JWT and Google OAuth SSO
 - [Access Keys API](api/access-keys.md) - Access/secret keys
 - [Policies API](api/policies.md) - IAM policies
 - [Security Overview](security/security-overview.md) - Complete security model
@@ -96,6 +100,7 @@ docs/
 ├── guides/                            # User guides
 │   ├── getting-started.md
 │   ├── admin-guide.md
+│   ├── sso-setup.md                   # SSO and policy integration
 │   └── MOUNTING.md                    # S3fs mounting guide
 ├── security/                          # Security docs
 │   └── security-overview.md
@@ -156,4 +161,4 @@ Found an issue or want to improve documentation?
 
 ---
 
-**Last Updated:** 2025-12-10
+**Last Updated:** 2025-12-11

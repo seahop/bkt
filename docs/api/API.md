@@ -209,13 +209,27 @@ Authentication endpoints are rate-limited to **5 requests per minute per IP**.
 <details>
 <summary><code>GET /api/auth/sso/config</code> - Get SSO configuration</summary>
 
+Returns the enabled SSO providers and their configuration. Use this to determine which login options to display in the UI.
+
 **Response (200 OK):**
 ```json
 {
   "google_enabled": true,
-  "google_auth_url": "https://accounts.google.com/o/oauth2/...",
-  "vault_enabled": false
+  "google_auth_url": "https://accounts.google.com/o/oauth2/v2/auth?client_id=...&redirect_uri=...&scope=openid%20email%20profile&response_type=code",
+  "vault_enabled": true
 }
+```
+
+**Response Fields:**
+| Field | Type | Description |
+|-------|------|-------------|
+| google_enabled | boolean | Whether Google OAuth is configured |
+| google_auth_url | string | Full OAuth URL for Google login (only if enabled) |
+| vault_enabled | boolean | Whether Vault JWT is configured |
+
+**Example:**
+```bash
+curl -k https://localhost:9443/api/auth/sso/config
 ```
 
 </details>
@@ -223,24 +237,111 @@ Authentication endpoints are rate-limited to **5 requests per minute per IP**.
 <details>
 <summary><code>GET /api/auth/google/login</code> - Initiate Google OAuth</summary>
 
-Redirects to Google's OAuth consent page.
+Redirects the browser to Google's OAuth consent page. After user approval, Google redirects back to the callback URL.
+
+**Response:** `302 Redirect` to Google OAuth consent page
+
+**Error Codes:**
+- `500` - Google SSO not configured
+
+**Example (browser redirect):**
+```
+https://localhost:9443/api/auth/google/login
+```
 
 </details>
 
 <details>
 <summary><code>GET /api/auth/google/callback</code> - Google OAuth callback</summary>
 
-Called by Google after authentication. Redirects to frontend with token.
+Handles the OAuth callback from Google after user authentication. Creates or updates the user account and redirects to the frontend with tokens.
+
+**Query Parameters (from Google):**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| code | string | Authorization code from Google |
+| state | string | CSRF state parameter |
+
+**Success Behavior:**
+- Creates user account if first login
+- Updates user info on subsequent logins
+- Redirects to frontend with token in URL fragment
+
+**Error Codes:**
+- `400` - Invalid or missing authorization code
+- `500` - Failed to exchange code for token
+
+> **Note:** Google OAuth does not support automatic policy assignment. Policies must be assigned manually by an administrator after the user's first login. For automatic policy sync, use Vault JWT SSO instead.
 
 </details>
 
 <details>
 <summary><code>POST /api/auth/vault/login</code> - Login with Vault JWT</summary>
 
+Authenticate using a JWT token from HashiCorp Vault. Supports automatic policy assignment from JWT claims.
+
 **Request Body:**
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| jwt | string | Yes | Vault-issued JWT token |
+| token | string | Yes | Vault-issued JWT token |
+
+**JWT Claims:**
+| Claim | Required | Description |
+|-------|----------|-------------|
+| sub | Yes | Unique user identifier |
+| email | Yes | User's email address |
+| name | No | Display name |
+| groups | No | Group memberships (array) |
+| policies | No | Policy names to assign (array) |
+
+**Example JWT Payload:**
+```json
+{
+  "sub": "12345-abcde-67890",
+  "email": "alice@company.com",
+  "name": "Alice Smith",
+  "groups": ["engineering", "platform-team"],
+  "policies": ["team-engineering-access", "project-alpha-readonly"]
+}
+```
+
+**Response (200 OK):**
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiIs...",
+  "refresh_token": "eyJhbGciOiJIUzI1NiIs...",
+  "user": {
+    "id": "uuid",
+    "username": "alice",
+    "email": "alice@company.com",
+    "is_admin": false,
+    "sso_provider": "vault",
+    "created_at": "timestamp"
+  }
+}
+```
+
+**Policy Sync Behavior:**
+- Policies in the `policies` JWT claim are matched by name against existing policies
+- On each login, user's policies are synced from SSO (SSO is source of truth)
+- Unknown policy names in JWT are silently ignored
+- Policy names are **case-sensitive** and must match exactly
+
+**Error Codes:**
+- `400` - Invalid or missing JWT token
+- `401` - JWT validation failed (expired, invalid signature)
+- `500` - Policy sync failed
+
+**Example:**
+```bash
+curl -k -X POST https://localhost:9443/api/auth/vault/login \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+  }'
+```
+
+> **Note:** See [SSO Setup Guide](../guides/sso-setup.md) for complete Vault JWT configuration.
 
 </details>
 
@@ -1383,11 +1484,13 @@ Bucket creation via S3 API is disabled. Use the web UI or REST API.
 - JWT tokens with configurable expiration
 - Refresh token rotation
 - Account locking capability
+- SSO support (Google OAuth, Vault JWT)
 
 ### Authorization
 - Role-based access (admin/user)
 - Policy-based bucket and object permissions
 - Per-resource access control
+- Automatic policy sync from SSO JWT claims (Vault)
 
 ### Data Protection
 - Passwords hashed with bcrypt
@@ -1405,3 +1508,13 @@ Bucket creation via S3 API is disabled. Use the web UI or REST API.
 - Idempotency support via `Idempotency-Key` header
 - Cache control for sensitive responses
 - CORS configuration support
+
+---
+
+## Related Documentation
+
+- [SSO Setup Guide](../guides/sso-setup.md) - Configure Vault JWT and Google OAuth SSO
+- [Policies API](policies.md) - Detailed policy management documentation
+- [Access Keys API](access-keys.md) - S3-compatible access key management
+- [Security Overview](../security/security-overview.md) - Comprehensive security architecture
+- [Production Checklist](../deployment/production-checklist.md) - Deployment preparation

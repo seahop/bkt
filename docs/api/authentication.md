@@ -297,8 +297,114 @@ async function apiRequest(url, options = {}) {
 - Refresh tokens have longer expiration for better UX
 - Failed login attempts should be rate-limited (see Rate Limiting section)
 
+---
+
+## Single Sign-On (SSO)
+
+### SSO Configuration
+
+**Endpoint:** `GET /auth/sso/config`
+
+**Authentication:** None required
+
+Check which SSO providers are enabled:
+
+```bash
+curl -k https://localhost:9443/api/auth/sso/config
+```
+
+**Response:**
+```json
+{
+  "google_enabled": true,
+  "google_auth_url": "https://accounts.google.com/o/oauth2/v2/auth?...",
+  "vault_enabled": true
+}
+```
+
+---
+
+### Vault JWT Login
+
+**Endpoint:** `POST /auth/vault/login`
+
+**Authentication:** None required (JWT in body)
+
+Login using a JWT token from HashiCorp Vault with automatic policy sync.
+
+**Request Body:**
+```json
+{
+  "token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+}
+```
+
+**JWT Claims for Policy Sync:**
+
+Your JWT can include a `policies` claim with an array of policy names:
+
+```json
+{
+  "sub": "user-12345",
+  "email": "alice@company.com",
+  "name": "Alice Smith",
+  "policies": ["team-engineering-access", "project-x-readonly"]
+}
+```
+
+**Response (200 OK):**
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiIs...",
+  "refresh_token": "eyJhbGciOiJIUzI1NiIs...",
+  "user": {
+    "id": "uuid",
+    "username": "alice",
+    "email": "alice@company.com",
+    "is_admin": false,
+    "sso_provider": "vault"
+  }
+}
+```
+
+**Policy Sync Rules:**
+- Policy names must match exactly (case-sensitive)
+- Unknown policies are silently ignored
+- SSO is the source of truth - policies sync on every login
+- Changes in SSO propagate immediately on next login
+
+**Example:**
+```bash
+curl -k -X POST https://localhost:9443/api/auth/vault/login \
+  -H 'Content-Type: application/json' \
+  -d '{"token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."}'
+```
+
+> See [SSO Setup Guide](../guides/sso-setup.md) for complete Vault configuration.
+
+---
+
+### Google OAuth
+
+**Endpoint:** `GET /auth/google/login`
+
+Initiates Google OAuth flow. Redirects browser to Google consent screen.
+
+```
+https://localhost:9443/api/auth/google/login
+```
+
+After authentication, Google redirects to `/api/auth/google/callback` which:
+1. Creates user account on first login
+2. Returns tokens to the frontend
+
+> **Note:** Google OAuth does not support automatic policy assignment. Use Vault JWT SSO for teams that need policy sync.
+
+---
+
 ## Related Documentation
 
+- [SSO Setup Guide](../guides/sso-setup.md) - Complete SSO configuration guide
 - [Access Keys API](access-keys.md) - Alternative authentication method for API access
 - [Users API](users.md) - User management endpoints
 - [Security Overview](../security/security-overview.md) - Comprehensive security documentation

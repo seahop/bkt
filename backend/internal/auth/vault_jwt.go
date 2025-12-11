@@ -102,6 +102,19 @@ func (h *VaultJWTHandler) LoginWithVaultJWT(c *gin.Context) {
 		return
 	}
 
+	// Sync policies from SSO claims (on every login, SSO is source of truth)
+	if len(claims.Policies) > 0 {
+		if err := h.syncUserPoliciesFromClaims(user, claims.Policies); err != nil {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+				Error:   "Failed to sync policies",
+				Message: err.Error(),
+			})
+			return
+		}
+		// Reload user with updated policies
+		database.DB.Preload("Policies").First(user, user.ID)
+	}
+
 	// Check if account is locked
 	if user.IsLocked {
 		c.JSON(http.StatusForbidden, models.ErrorResponse{
@@ -268,4 +281,28 @@ func (h *VaultJWTHandler) GetVaultJWKS() (*VaultJWKS, error) {
 	}
 
 	return &jwks, nil
+}
+
+// syncUserPoliciesFromClaims syncs the user's policies based on SSO JWT claims.
+// Policy names in the JWT must match policy names in the database exactly.
+// This replaces the user's current policies with those from SSO (SSO is source of truth).
+func (h *VaultJWTHandler) syncUserPoliciesFromClaims(user *models.User, policyNames []string) error {
+	if len(policyNames) == 0 {
+		return nil
+	}
+
+	// Look up policies by name
+	var policies []models.Policy
+	result := database.DB.Where("name IN ?", policyNames).Find(&policies)
+	if result.Error != nil {
+		return fmt.Errorf("failed to look up policies: %w", result.Error)
+	}
+
+	// Replace user's policies with those from SSO
+	// This uses GORM's Replace association mode which clears existing and sets new
+	if err := database.DB.Model(user).Association("Policies").Replace(policies); err != nil {
+		return fmt.Errorf("failed to sync policies: %w", err)
+	}
+
+	return nil
 }

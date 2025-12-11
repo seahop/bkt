@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"bkt/internal/config"
@@ -91,10 +92,17 @@ func (h *GoogleOAuthHandler) InitiateGoogleLogin(c *gin.Context) {
 // HandleGoogleCallback handles the callback from Google OAuth
 func (h *GoogleOAuthHandler) HandleGoogleCallback(c *gin.Context) {
 	if !h.config.GoogleSSO.Enabled {
-		c.JSON(http.StatusNotImplemented, models.ErrorResponse{
-			Error:   "Google SSO not enabled",
-			Message: "Google SSO is not configured on this server",
-		})
+		h.redirectWithError(c, "not_enabled", "Google SSO is not configured")
+		return
+	}
+
+	// Check for error from Google
+	if errMsg := c.Query("error"); errMsg != "" {
+		errDesc := c.Query("error_description")
+		if errDesc == "" {
+			errDesc = "Google authentication was cancelled or failed"
+		}
+		h.redirectWithError(c, errMsg, errDesc)
 		return
 	}
 
@@ -102,10 +110,7 @@ func (h *GoogleOAuthHandler) HandleGoogleCallback(c *gin.Context) {
 	state := c.Query("state")
 	cookieState, err := c.Cookie("oauth_state")
 	if err != nil || state == "" || state != cookieState {
-		c.JSON(http.StatusBadRequest, models.ErrorResponse{
-			Error:   "Invalid state",
-			Message: "State token mismatch - possible CSRF attack",
-		})
+		h.redirectWithError(c, "invalid_state", "State mismatch - possible CSRF attack")
 		return
 	}
 
@@ -115,58 +120,40 @@ func (h *GoogleOAuthHandler) HandleGoogleCallback(c *gin.Context) {
 	// Get authorization code
 	code := c.Query("code")
 	if code == "" {
-		c.JSON(http.StatusBadRequest, models.ErrorResponse{
-			Error:   "Missing code",
-			Message: "Authorization code not provided",
-		})
+		h.redirectWithError(c, "missing_code", "Authorization code not provided")
 		return
 	}
 
 	// Exchange code for token
 	token, err := h.exchangeCodeForToken(code)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Failed to exchange code",
-			Message: err.Error(),
-		})
+		h.redirectWithError(c, "token_exchange_failed", err.Error())
 		return
 	}
 
 	// Get user info from Google
 	userInfo, err := h.getUserInfo(token.AccessToken)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Failed to get user info",
-			Message: err.Error(),
-		})
+		h.redirectWithError(c, "user_info_failed", err.Error())
 		return
 	}
 
 	// Verify email is verified
 	if !userInfo.VerifiedEmail {
-		c.JSON(http.StatusUnauthorized, models.ErrorResponse{
-			Error:   "Email not verified",
-			Message: "Your Google email must be verified to use SSO",
-		})
+		h.redirectWithError(c, "email_not_verified", "Your Google email must be verified to use SSO")
 		return
 	}
 
 	// Find or create user
-	user, isNewUser, err := h.findOrCreateUser(userInfo)
+	user, _, err := h.findOrCreateUser(userInfo)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Failed to create user",
-			Message: err.Error(),
-		})
+		h.redirectWithError(c, "user_error", err.Error())
 		return
 	}
 
 	// Check if account is locked
 	if user.IsLocked {
-		c.JSON(http.StatusForbidden, models.ErrorResponse{
-			Error:   "Account locked",
-			Message: "This account has been locked. Please contact an administrator.",
-		})
+		h.redirectWithError(c, "account_locked", "This account has been locked")
 		return
 	}
 
@@ -176,20 +163,14 @@ func (h *GoogleOAuthHandler) HandleGoogleCallback(c *gin.Context) {
 
 		// Fetch user's groups from Google Workspace
 		groups, err := h.workspaceService.GetUserGroups(ctx, userInfo.Email)
-		if err != nil {
-			// Debug logging (uncomment for troubleshooting)
-			// fmt.Printf("[GoogleSSO] Warning: Failed to fetch groups for %s: %v\n", userInfo.Email, err)
-		} else if len(groups) > 0 {
+		if err == nil && len(groups) > 0 {
 			// Map groups to policy names
 			policyNames := h.workspaceService.GetPolicyNamesFromGroups(groups)
 
 			// Sync policies
 			if len(policyNames) > 0 {
 				if err := h.workspaceService.SyncUserPoliciesFromGroups(user, policyNames); err != nil {
-					c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-						Error:   "Failed to sync policies",
-						Message: err.Error(),
-					})
+					h.redirectWithError(c, "policy_sync_failed", err.Error())
 					return
 				}
 				// Reload user with updated policies
@@ -198,24 +179,11 @@ func (h *GoogleOAuthHandler) HandleGoogleCallback(c *gin.Context) {
 		}
 	}
 
-	// Check if user has any policies (after potential sync)
-	// If no policies, deny access with clear message
-	if !user.IsAdmin && len(user.Policies) == 0 {
-		c.JSON(http.StatusForbidden, models.ErrorResponse{
-			Error:   "No permissions",
-			Message: "Your account has been created but has no permissions. Please contact your administrator to grant access.",
-		})
-		return
-	}
-
 	// Generate JWT token for our system
 	accessTokenDuration, _ := time.ParseDuration(h.config.Auth.AccessTokenExpiry)
 	jwtToken, err := GenerateToken(user.ID, user.Username, user.IsAdmin, h.config.Auth.JWTSecret, accessTokenDuration)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Failed to generate token",
-			Message: err.Error(),
-		})
+		h.redirectWithError(c, "token_generation_failed", err.Error())
 		return
 	}
 
@@ -223,27 +191,24 @@ func (h *GoogleOAuthHandler) HandleGoogleCallback(c *gin.Context) {
 	refreshTokenDuration, _ := time.ParseDuration(h.config.Auth.RefreshTokenExpiry)
 	refreshToken, err := GenerateToken(user.ID, user.Username, user.IsAdmin, h.config.Auth.JWTSecret, refreshTokenDuration)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Failed to generate refresh token",
-			Message: err.Error(),
-		})
+		h.redirectWithError(c, "token_generation_failed", err.Error())
 		return
 	}
 
-	// Return success response with redirect
-	response := struct {
-		Token        string       `json:"token"`
-		RefreshToken string       `json:"refresh_token"`
-		User         *models.User `json:"user"`
-		IsNewUser    bool         `json:"is_new_user"`
-	}{
-		Token:        jwtToken,
-		RefreshToken: refreshToken,
-		User:         user,
-		IsNewUser:    isNewUser,
-	}
+	// Redirect to frontend with tokens in URL fragment (keeps them out of server logs)
+	frontendURL := strings.TrimSuffix(h.config.Server.FrontendURL, "/")
+	redirectURL := frontendURL + "/auth/google/callback#token=" + url.QueryEscape(jwtToken) +
+		"&refresh_token=" + url.QueryEscape(refreshToken)
 
-	c.JSON(http.StatusOK, response)
+	c.Redirect(http.StatusTemporaryRedirect, redirectURL)
+}
+
+// redirectWithError redirects to frontend callback with error in URL fragment
+func (h *GoogleOAuthHandler) redirectWithError(c *gin.Context, errCode, errDesc string) {
+	frontendURL := strings.TrimSuffix(h.config.Server.FrontendURL, "/")
+	redirectURL := frontendURL + "/auth/google/callback#error=" + url.QueryEscape(errCode) +
+		"&error_description=" + url.QueryEscape(errDesc)
+	c.Redirect(http.StatusTemporaryRedirect, redirectURL)
 }
 
 // findOrCreateUser finds an existing SSO user or creates a new one

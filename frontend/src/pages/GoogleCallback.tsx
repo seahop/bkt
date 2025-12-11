@@ -1,69 +1,74 @@
 import { useEffect, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { Database } from 'lucide-react';
+import { useAuthStore } from '../store/authStore';
+import { userApi } from '../services/api';
 
 export default function GoogleCallback() {
-  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
+  const { setAuth } = useAuthStore();
   const [error, setError] = useState('');
   const [processing, setProcessing] = useState(true);
 
   useEffect(() => {
     const handleCallback = async () => {
-      // Check for error from Google
-      const errorParam = searchParams.get('error');
-      if (errorParam) {
-        setError('Google authentication was cancelled or failed');
+      // Get data from URL fragment (hash)
+      const hash = window.location.hash.substring(1); // Remove the #
+      const params = new URLSearchParams(hash);
+
+      // Check for error from backend
+      const errorCode = params.get('error');
+      const errorDesc = params.get('error_description');
+      if (errorCode) {
+        setError(errorDesc || errorCode || 'Authentication failed');
         setProcessing(false);
         setTimeout(() => navigate('/login'), 3000);
         return;
       }
 
-      // Get authorization code
-      const code = searchParams.get('code');
-      const state = searchParams.get('state');
+      const token = params.get('token');
+      const refreshToken = params.get('refresh_token');
 
-      if (!code || !state) {
-        setError('Invalid callback parameters');
+      if (!token || !refreshToken) {
+        setError('Authentication failed - missing tokens');
         setProcessing(false);
         setTimeout(() => navigate('/login'), 3000);
         return;
       }
+
+      // Clear the hash from URL for security
+      window.history.replaceState(null, '', window.location.pathname);
 
       try {
-        // The backend handles the full OAuth flow
-        // Exchange code for token by calling the callback endpoint
-        const response = await fetch(
-          `${import.meta.env.VITE_API_URL}/auth/google/callback?code=${code}&state=${state}`,
-          {
-            method: 'GET',
-            credentials: 'include', // Important for cookies
-          }
-        );
+        // Temporarily store token so we can make authenticated API call
+        localStorage.setItem('token', token);
+        localStorage.setItem('refresh_token', refreshToken);
 
-        if (!response.ok) {
-          const data = await response.json();
-          throw new Error(data.message || 'Failed to authenticate with Google');
-        }
+        // Fetch user info
+        const user = await userApi.getCurrentUser();
 
-        const data = await response.json();
-
-        // Store tokens
-        localStorage.setItem('token', data.token);
-        localStorage.setItem('refreshToken', data.refresh_token);
+        // Update auth store with full auth data
+        setAuth({
+          token,
+          refresh_token: refreshToken,
+          user
+        });
 
         // Redirect to home
         navigate('/');
       } catch (err: any) {
-        console.error('Google callback error:', err);
-        setError(err.message || 'Failed to complete Google authentication');
+        console.error('Failed to fetch user info:', err);
+        // Clear invalid tokens
+        localStorage.removeItem('token');
+        localStorage.removeItem('refresh_token');
+        setError('Failed to complete authentication');
         setProcessing(false);
         setTimeout(() => navigate('/login'), 3000);
       }
     };
 
     handleCallback();
-  }, [searchParams, navigate]);
+  }, [navigate, setAuth]);
 
   return (
     <div className="min-h-screen bg-dark-bg flex items-center justify-center p-4">

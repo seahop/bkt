@@ -265,13 +265,18 @@ Handles the OAuth callback from Google after user authentication. Creates or upd
 **Success Behavior:**
 - Creates user account if first login
 - Updates user info on subsequent logins
+- If Google Workspace enabled: syncs policies from user's groups
 - Redirects to frontend with token in URL fragment
 
 **Error Codes:**
 - `400` - Invalid or missing authorization code
 - `500` - Failed to exchange code for token
 
-> **Note:** Google OAuth does not support automatic policy assignment. Policies must be assigned manually by an administrator after the user's first login. For automatic policy sync, use Vault JWT SSO instead.
+**Google Workspace Integration:**
+
+Enable `GOOGLE_WORKSPACE_ENABLED=true` for automatic policy sync from Google Workspace groups. Requires a service account with domain-wide delegation.
+
+> **Note:** See [SSO Setup Guide](../guides/sso-setup.md) for complete Google Workspace configuration.
 
 </details>
 

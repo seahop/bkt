@@ -396,9 +396,22 @@ https://localhost:9443/api/auth/google/login
 
 After authentication, Google redirects to `/api/auth/google/callback` which:
 1. Creates user account on first login
-2. Returns tokens to the frontend
+2. If Google Workspace is enabled: fetches user's groups and syncs policies
+3. Returns tokens to the frontend
 
-> **Note:** Google OAuth does not support automatic policy assignment. Use Vault JWT SSO for teams that need policy sync.
+**With Google Workspace Integration:**
+
+When `GOOGLE_WORKSPACE_ENABLED=true`, the system automatically syncs policies based on the user's Google Workspace group memberships. Group names are mapped to policy names using the configured sync mode.
+
+| Environment Variable | Description |
+|---------------------|-------------|
+| `GOOGLE_WORKSPACE_ENABLED` | Enable group-based policy sync |
+| `GOOGLE_SERVICE_ACCOUNT_KEY_FILE` | Path to service account JSON |
+| `GOOGLE_WORKSPACE_ADMIN_EMAIL` | Admin email for delegation |
+| `GOOGLE_POLICY_SYNC_MODE` | `direct` or `prefix` |
+| `GOOGLE_POLICY_GROUP_PREFIX` | Filter groups by prefix |
+
+> See [SSO Setup Guide](../guides/sso-setup.md) for complete Google Workspace configuration.
 
 ---
 

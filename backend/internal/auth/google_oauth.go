@@ -9,21 +9,30 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"time"
+
 	"bkt/internal/config"
 	"bkt/internal/database"
 	"bkt/internal/models"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
 type GoogleOAuthHandler struct {
-	config *config.Config
+	config           *config.Config
+	workspaceService *GoogleWorkspaceService
 }
 
 func NewGoogleOAuthHandler(cfg *config.Config) *GoogleOAuthHandler {
-	return &GoogleOAuthHandler{config: cfg}
+	handler := &GoogleOAuthHandler{config: cfg}
+
+	// Initialize workspace service if enabled
+	if cfg.GoogleSSO.WorkspaceEnabled {
+		handler.workspaceService = NewGoogleWorkspaceService(cfg)
+	}
+
+	return handler
 }
 
 // GoogleUserInfo represents the user info returned by Google
@@ -161,7 +170,35 @@ func (h *GoogleOAuthHandler) HandleGoogleCallback(c *gin.Context) {
 		return
 	}
 
-	// MinIO-style: Check if user has any policies
+	// Sync policies from Google Workspace groups (if enabled)
+	if h.workspaceService != nil {
+		ctx := c.Request.Context()
+
+		// Fetch user's groups from Google Workspace
+		groups, err := h.workspaceService.GetUserGroups(ctx, userInfo.Email)
+		if err != nil {
+			// Log the error but don't fail - fall back to manual policy assignment
+			fmt.Printf("[GoogleSSO] Warning: Failed to fetch groups for %s: %v\n", userInfo.Email, err)
+		} else if len(groups) > 0 {
+			// Map groups to policy names
+			policyNames := h.workspaceService.GetPolicyNamesFromGroups(groups)
+
+			// Sync policies
+			if len(policyNames) > 0 {
+				if err := h.workspaceService.SyncUserPoliciesFromGroups(user, policyNames); err != nil {
+					c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+						Error:   "Failed to sync policies",
+						Message: err.Error(),
+					})
+					return
+				}
+				// Reload user with updated policies
+				database.DB.Preload("Policies").First(user, user.ID)
+			}
+		}
+	}
+
+	// Check if user has any policies (after potential sync)
 	// If no policies, deny access with clear message
 	if !user.IsAdmin && len(user.Policies) == 0 {
 		c.JSON(http.StatusForbidden, models.ErrorResponse{

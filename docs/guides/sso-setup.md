@@ -9,7 +9,8 @@ The system supports two SSO providers:
 | Provider | Protocol | Policy Support | Use Case |
 |----------|----------|----------------|----------|
 | **HashiCorp Vault** | JWT/OIDC | Full (via claims) | Enterprise environments with Vault |
-| **Google OAuth** | OAuth 2.0 | Manual only | Simple Google Workspace integration |
+| **Google OAuth** | OAuth 2.0 | Full (via Workspace groups) | Google Workspace environments |
+| **Google OAuth** | OAuth 2.0 | Manual only | Personal Gmail accounts |
 
 ### Key Features
 
@@ -205,7 +206,7 @@ Your JWT must include:
 
 ## Google OAuth Configuration
 
-### Environment Variables
+### Basic Environment Variables
 
 ```bash
 # Enable Google SSO
@@ -237,16 +238,168 @@ GOOGLE_REDIRECT_URL=https://your-domain.com/api/auth/google/callback
 4. Google redirects back with authorization code
 5. System exchanges code for user info
 6. User account created/updated
+7. If Workspace enabled: policies synced from groups
 
-### Policy Assignment
+---
 
-Google OAuth does **not** support custom JWT claims, so policies must be assigned manually:
+## Google Workspace Integration (Automatic Policy Sync)
+
+For automatic policy assignment with Google, enable Google Workspace integration. This uses the Admin SDK to fetch user group memberships and sync them to policies.
+
+### Requirements
+
+- Google Workspace account (not personal Gmail)
+- Service account with domain-wide delegation
+- Admin SDK API enabled
+
+### Environment Variables
+
+```bash
+# Enable Google Workspace integration
+GOOGLE_WORKSPACE_ENABLED=true
+
+# Path to service account JSON key file
+GOOGLE_SERVICE_ACCOUNT_KEY_FILE=/path/to/service-account.json
+
+# Admin email for domain-wide delegation (must be a Workspace admin)
+GOOGLE_WORKSPACE_ADMIN_EMAIL=admin@your-domain.com
+
+# Policy sync mode: "direct" or "prefix"
+GOOGLE_POLICY_SYNC_MODE=direct
+
+# Optional: Only sync groups starting with this prefix
+GOOGLE_POLICY_GROUP_PREFIX=bkt-
+```
+
+### Step 1: Create Service Account
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+2. Select your project (same as OAuth credentials)
+3. Navigate to **IAM & Admin** → **Service Accounts**
+4. Click **Create Service Account**
+5. Name it (e.g., "bkt-workspace-integration")
+6. Click **Create and Continue**
+7. Skip role assignment (not needed)
+8. Click **Done**
+9. Click on the new service account
+10. Go to **Keys** tab → **Add Key** → **Create new key** → **JSON**
+11. Save the downloaded JSON file securely
+
+### Step 2: Enable Admin SDK API
+
+1. In Google Cloud Console, go to **APIs & Services** → **Library**
+2. Search for "Admin SDK API"
+3. Click **Enable**
+
+### Step 3: Configure Domain-Wide Delegation
+
+1. In Google Cloud Console, go to **IAM & Admin** → **Service Accounts**
+2. Click on your service account
+3. Note the **Client ID** (numerical ID)
+4. Go to [Google Workspace Admin Console](https://admin.google.com/)
+5. Navigate to **Security** → **Access and data control** → **API controls**
+6. Click **Manage Domain-wide Delegation**
+7. Click **Add new**
+8. Enter the **Client ID** from step 3
+9. Add OAuth scope: `https://www.googleapis.com/auth/admin.directory.group.readonly`
+10. Click **Authorize**
+
+### Step 4: Create Groups and Policies
+
+Create Google Workspace groups that match your policy names:
+
+| Google Group | Policy Name | Access |
+|--------------|-------------|--------|
+| `engineering@company.com` | `engineering` | Team engineering buckets |
+| `devops@company.com` | `devops` | DevOps buckets |
+| `bkt-readonly@company.com` | `bkt-readonly` | Read-only access |
+
+**With prefix mode (`GOOGLE_POLICY_SYNC_MODE=prefix`):**
+
+| Google Group | Policy Name | Access |
+|--------------|-------------|--------|
+| `bkt-engineering@company.com` | `engineering` | Prefix stripped |
+| `bkt-devops@company.com` | `devops` | Prefix stripped |
+
+### Policy Sync Modes
+
+**Direct Mode (default):**
+- Group name = policy name
+- `engineering@company.com` → policy `engineering`
+- If `GOOGLE_POLICY_GROUP_PREFIX` is set, only groups with that prefix are synced
+
+**Prefix Mode:**
+- Strips the prefix from group name to get policy name
+- `bkt-engineering@company.com` → policy `engineering`
+- Only groups starting with the prefix are synced
+
+### Example Setup
+
+```bash
+# .env configuration for Google Workspace
+GOOGLE_SSO_ENABLED=true
+GOOGLE_CLIENT_ID=123456789.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your-client-secret
+GOOGLE_REDIRECT_URL=https://storage.company.com/api/auth/google/callback
+
+# Workspace integration
+GOOGLE_WORKSPACE_ENABLED=true
+GOOGLE_SERVICE_ACCOUNT_KEY_FILE=/etc/bkt/google-service-account.json
+GOOGLE_WORKSPACE_ADMIN_EMAIL=admin@company.com
+GOOGLE_POLICY_SYNC_MODE=direct
+GOOGLE_POLICY_GROUP_PREFIX=bkt-
+```
+
+With this configuration:
+- Users in `bkt-engineering@company.com` get policy `bkt-engineering`
+- Users in `bkt-readonly@company.com` get policy `bkt-readonly`
+- Users in `marketing@company.com` (no prefix) are ignored
+
+### Login Flow with Workspace
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│   User/Client   │     │     Google      │     │  Object Store   │
+└────────┬────────┘     └────────┬────────┘     └────────┬────────┘
+         │                       │                       │
+         │  1. Click "Sign in with Google"              │
+         │──────────────────────────────────────────────>│
+         │                       │                       │
+         │  2. Redirect to Google consent               │
+         │<──────────────────────────────────────────────│
+         │                       │                       │
+         │  3. Authenticate      │                       │
+         │──────────────────────>│                       │
+         │                       │                       │
+         │  4. Authorization code│                       │
+         │<──────────────────────│                       │
+         │                       │                       │
+         │  5. Callback with code                       │
+         │──────────────────────────────────────────────>│
+         │                       │                       │
+         │                       │  6. Fetch groups      │
+         │                       │  (via Admin SDK)      │
+         │                       │<──────────────────────│
+         │                       │                       │
+         │                       │  7. Groups list       │
+         │                       │──────────────────────>│
+         │                       │                       │
+         │                       │  8. Create/update user│
+         │                       │  9. Sync policies     │
+         │                       │                       │
+         │  10. Access token + user info                │
+         │<──────────────────────────────────────────────│
+```
+
+### Manual Policy Assignment (Without Workspace)
+
+If you don't have Google Workspace or prefer manual assignment:
 
 1. User logs in via Google (account created with no policies)
 2. Admin assigns policies via UI or API
 3. User has access based on assigned policies
 
-> **Note**: For automatic policy assignment, use Vault JWT SSO instead.
+> **Tip**: For automatic policy assignment without Workspace, consider using Vault JWT SSO instead.
 
 ---
 

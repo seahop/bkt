@@ -72,6 +72,12 @@ type GoogleSSOConfig struct {
 	ClientID     string
 	ClientSecret string
 	RedirectURL  string
+	// Google Workspace integration for group-based policy sync
+	WorkspaceEnabled        bool
+	ServiceAccountKeyFile   string // Path to service account JSON key
+	WorkspaceAdminEmail     string // Admin email for domain-wide delegation
+	PolicySyncMode          string // "direct" (group name = policy name) or "prefix" (group name with prefix)
+	PolicyGroupPrefix       string // Prefix to filter groups (e.g., "bkt-" to only use groups starting with "bkt-")
 }
 
 type VaultSSOConfig struct {
@@ -134,10 +140,15 @@ func Load() *Config {
 		},
 		CORS: loadCORSConfig(),
 		GoogleSSO: GoogleSSOConfig{
-			Enabled:      getEnv("GOOGLE_SSO_ENABLED", "false") == "true",
-			ClientID:     getEnv("GOOGLE_CLIENT_ID", ""),
-			ClientSecret: getEnv("GOOGLE_CLIENT_SECRET", ""),
-			RedirectURL:  getEnv("GOOGLE_REDIRECT_URL", "https://localhost:9443/api/auth/google/callback"),
+			Enabled:                 getEnv("GOOGLE_SSO_ENABLED", "false") == "true",
+			ClientID:                getEnv("GOOGLE_CLIENT_ID", ""),
+			ClientSecret:            getEnv("GOOGLE_CLIENT_SECRET", ""),
+			RedirectURL:             getEnv("GOOGLE_REDIRECT_URL", "https://localhost:9443/api/auth/google/callback"),
+			WorkspaceEnabled:        getEnv("GOOGLE_WORKSPACE_ENABLED", "false") == "true",
+			ServiceAccountKeyFile:   getEnv("GOOGLE_SERVICE_ACCOUNT_KEY_FILE", ""),
+			WorkspaceAdminEmail:     getEnv("GOOGLE_WORKSPACE_ADMIN_EMAIL", ""),
+			PolicySyncMode:          getEnv("GOOGLE_POLICY_SYNC_MODE", "direct"), // "direct" or "prefix"
+			PolicyGroupPrefix:       getEnv("GOOGLE_POLICY_GROUP_PREFIX", ""),    // e.g., "bkt-" to use groups like "bkt-engineering"
 		},
 		VaultSSO: VaultSSOConfig{
 			Enabled:  getEnv("VAULT_SSO_ENABLED", "false") == "true",
@@ -194,6 +205,16 @@ func (c *Config) Validate() error {
 	// If Google SSO is enabled, credentials must be set
 	if c.GoogleSSO.Enabled && (c.GoogleSSO.ClientID == "" || c.GoogleSSO.ClientSecret == "") {
 		errors = append(errors, "Google SSO enabled but GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET not set")
+	}
+
+	// If Google Workspace integration is enabled, service account must be configured
+	if c.GoogleSSO.WorkspaceEnabled {
+		if c.GoogleSSO.ServiceAccountKeyFile == "" {
+			errors = append(errors, "Google Workspace enabled but GOOGLE_SERVICE_ACCOUNT_KEY_FILE not set")
+		}
+		if c.GoogleSSO.WorkspaceAdminEmail == "" {
+			errors = append(errors, "Google Workspace enabled but GOOGLE_WORKSPACE_ADMIN_EMAIL not set")
+		}
 	}
 
 	if len(errors) > 0 {

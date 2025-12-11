@@ -69,7 +69,7 @@ type S3Config struct {
 }
 
 type GoogleSSOConfig struct {
-	Enabled      bool
+	OIDCEnabled  bool
 	ClientID     string
 	ClientSecret string
 	RedirectURL  string
@@ -149,7 +149,7 @@ func Load() *Config {
 		},
 		CORS: loadCORSConfig(),
 		GoogleSSO: GoogleSSOConfig{
-			Enabled:                 getEnv("GOOGLE_SSO_ENABLED", "false") == "true",
+			OIDCEnabled:             getEnv("GOOGLE_OIDC_ENABLED", "false") == "true",
 			ClientID:                getEnv("GOOGLE_CLIENT_ID", ""),
 			ClientSecret:            getEnv("GOOGLE_CLIENT_SECRET", ""),
 			RedirectURL:             getEnv("GOOGLE_REDIRECT_URL", "https://localhost:9443/api/auth/google/callback"),
@@ -216,9 +216,9 @@ func (c *Config) Validate() error {
 		errors = append(errors, "TLS_ENABLED must be true in production (TLS is required for secure communication)")
 	}
 
-	// If Google SSO is enabled, credentials must be set
-	if c.GoogleSSO.Enabled && (c.GoogleSSO.ClientID == "" || c.GoogleSSO.ClientSecret == "") {
-		errors = append(errors, "Google SSO enabled but GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET not set")
+	// If Google OIDC is enabled, credentials must be set
+	if c.GoogleSSO.OIDCEnabled && (c.GoogleSSO.ClientID == "" || c.GoogleSSO.ClientSecret == "") {
+		errors = append(errors, "Google OIDC enabled but GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET not set")
 	}
 
 	// If Google Workspace integration is enabled, service account must be configured

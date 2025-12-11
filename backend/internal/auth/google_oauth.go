@@ -58,7 +58,7 @@ type GoogleTokenResponse struct {
 
 // InitiateGoogleLogin redirects the user to Google's OAuth consent page
 func (h *GoogleOAuthHandler) InitiateGoogleLogin(c *gin.Context) {
-	if !h.config.GoogleSSO.Enabled {
+	if !h.config.GoogleSSO.OIDCEnabled {
 		c.JSON(http.StatusNotImplemented, models.ErrorResponse{
 			Error:   "Google SSO not enabled",
 			Message: "Google SSO is not configured on this server",
@@ -91,7 +91,7 @@ func (h *GoogleOAuthHandler) InitiateGoogleLogin(c *gin.Context) {
 
 // HandleGoogleCallback handles the callback from Google OAuth
 func (h *GoogleOAuthHandler) HandleGoogleCallback(c *gin.Context) {
-	if !h.config.GoogleSSO.Enabled {
+	if !h.config.GoogleSSO.OIDCEnabled {
 		h.redirectWithError(c, "not_enabled", "Google SSO is not configured")
 		return
 	}

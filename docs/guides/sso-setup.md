@@ -209,8 +209,8 @@ Your JWT must include:
 ### Basic Environment Variables
 
 ```bash
-# Enable Google SSO
-GOOGLE_SSO_ENABLED=true
+# Enable Google OIDC
+GOOGLE_OIDC_ENABLED=true
 
 # OAuth credentials from Google Cloud Console
 GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
@@ -337,7 +337,7 @@ Create Google Workspace groups that match your policy names:
 
 ```bash
 # .env configuration for Google Workspace
-GOOGLE_SSO_ENABLED=true
+GOOGLE_OIDC_ENABLED=true
 GOOGLE_CLIENT_ID=123456789.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-client-secret
 GOOGLE_REDIRECT_URL=https://storage.company.com/api/auth/google/callback

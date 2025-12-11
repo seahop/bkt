@@ -52,18 +52,13 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@localhost}
       ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-false}
-      # Google SSO Configuration
-      GOOGLE_SSO_ENABLED: ${GOOGLE_SSO_ENABLED:-false}
+      # Google OIDC Configuration (browser-based SSO)
+      GOOGLE_OIDC_ENABLED: ${GOOGLE_OIDC_ENABLED:-false}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_REDIRECT_URL: ${GOOGLE_REDIRECT_URL:-https://localhost:9443/api/auth/google/callback}
-      # Vault SSO Configuration (legacy JWT)
-      VAULT_SSO_ENABLED: ${VAULT_SSO_ENABLED:-false}
-      VAULT_ADDR: ${VAULT_ADDR:-https://vault.example.com:8200}
-      VAULT_JWT_PATH: ${VAULT_JWT_PATH:-auth/jwt}
-      VAULT_JWT_ROLE: ${VAULT_JWT_ROLE:-object-storage-users}
-      VAULT_JWT_AUDIENCE: ${VAULT_JWT_AUDIENCE:-object-storage}
       # Vault OIDC Configuration (browser-based SSO with PKCE)
+      VAULT_ADDR: ${VAULT_ADDR:-https://vault.example.com:8200}
       VAULT_OIDC_ENABLED: ${VAULT_OIDC_ENABLED:-false}
       VAULT_OIDC_CLIENT_ID: ${VAULT_OIDC_CLIENT_ID:-}
       VAULT_OIDC_PROVIDER_URL: ${VAULT_OIDC_PROVIDER_URL:-}

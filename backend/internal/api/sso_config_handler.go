@@ -29,12 +29,12 @@ func (h *SSOConfigHandler) GetSSOConfig(c *gin.Context) {
 	vaultEnabled := h.config.VaultSSO.Enabled || h.config.VaultSSO.OIDCEnabled
 
 	response := SSOConfigResponse{
-		GoogleEnabled: h.config.GoogleSSO.Enabled,
+		GoogleEnabled: h.config.GoogleSSO.OIDCEnabled,
 		VaultEnabled:  vaultEnabled,
 	}
 
-	// Only include auth URL if Google SSO is enabled
-	if h.config.GoogleSSO.Enabled {
+	// Only include auth URL if Google OIDC is enabled
+	if h.config.GoogleSSO.OIDCEnabled {
 		response.GoogleAuthURL = "/api/auth/google/login"
 	}
 

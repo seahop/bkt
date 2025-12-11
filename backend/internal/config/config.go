@@ -27,8 +27,9 @@ type DatabaseConfig struct {
 }
 
 type ServerConfig struct {
-	Port string
-	Host string
+	Port        string
+	Host        string
+	FrontendURL string // URL where frontend is served (for SSO redirects)
 }
 
 type TLSConfig struct {
@@ -81,11 +82,18 @@ type GoogleSSOConfig struct {
 }
 
 type VaultSSOConfig struct {
+	// Legacy JWT-based login
 	Enabled  bool
 	Address  string
 	JWTPath  string
 	Role     string
 	Audience string
+	// OIDC with PKCE (public client - no secret needed)
+	OIDCEnabled bool
+	ClientID    string
+	ProviderURL string // e.g., https://vault.example.com/v1/identity/oidc/provider/default
+	RedirectURL string
+	Scopes      string // space-separated, e.g., "openid profile"
 }
 
 type CORSConfig struct {
@@ -104,8 +112,9 @@ func Load() *Config {
 			SSLMode:  getEnv("DB_SSL_MODE", "disable"),
 		},
 		Server: ServerConfig{
-			Port: getEnv("SERVER_PORT", "9000"),
-			Host: getEnv("SERVER_HOST", "0.0.0.0"),
+			Port:        getEnv("SERVER_PORT", "9000"),
+			Host:        getEnv("SERVER_HOST", "0.0.0.0"),
+			FrontendURL: getEnv("FRONTEND_URL", "https://localhost"),
 		},
 		Auth: AuthConfig{
 			JWTSecret:          getEnv("JWT_SECRET", "dev_jwt_secret_change_in_production"),
@@ -151,11 +160,16 @@ func Load() *Config {
 			PolicyGroupPrefix:       getEnv("GOOGLE_POLICY_GROUP_PREFIX", ""),    // e.g., "bkt-" to use groups like "bkt-engineering"
 		},
 		VaultSSO: VaultSSOConfig{
-			Enabled:  getEnv("VAULT_SSO_ENABLED", "false") == "true",
-			Address:  getEnv("VAULT_ADDR", "https://vault.example.com:8200"),
-			JWTPath:  getEnv("VAULT_JWT_PATH", "auth/jwt"),
-			Role:     getEnv("VAULT_JWT_ROLE", "object-storage-users"),
-			Audience: getEnv("VAULT_JWT_AUDIENCE", "object-storage"),
+			Enabled:     getEnv("VAULT_SSO_ENABLED", "false") == "true",
+			Address:     getEnv("VAULT_ADDR", "https://vault.example.com:8200"),
+			JWTPath:     getEnv("VAULT_JWT_PATH", "auth/jwt"),
+			Role:        getEnv("VAULT_JWT_ROLE", "object-storage-users"),
+			Audience:    getEnv("VAULT_JWT_AUDIENCE", "object-storage"),
+			OIDCEnabled: getEnv("VAULT_OIDC_ENABLED", "false") == "true",
+			ClientID:    getEnv("VAULT_OIDC_CLIENT_ID", ""),
+			ProviderURL: getEnv("VAULT_OIDC_PROVIDER_URL", ""),
+			RedirectURL: getEnv("VAULT_OIDC_REDIRECT_URL", "https://localhost:9443/api/auth/vault/callback"),
+			Scopes:      getEnv("VAULT_OIDC_SCOPES", "openid profile"),
 		},
 	}
 

@@ -57,12 +57,20 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_REDIRECT_URL: ${GOOGLE_REDIRECT_URL:-https://localhost:9443/api/auth/google/callback}
-      # Vault SSO Configuration
+      # Vault SSO Configuration (legacy JWT)
       VAULT_SSO_ENABLED: ${VAULT_SSO_ENABLED:-false}
       VAULT_ADDR: ${VAULT_ADDR:-https://vault.example.com:8200}
       VAULT_JWT_PATH: ${VAULT_JWT_PATH:-auth/jwt}
       VAULT_JWT_ROLE: ${VAULT_JWT_ROLE:-object-storage-users}
       VAULT_JWT_AUDIENCE: ${VAULT_JWT_AUDIENCE:-object-storage}
+      # Vault OIDC Configuration (browser-based SSO with PKCE)
+      VAULT_OIDC_ENABLED: ${VAULT_OIDC_ENABLED:-false}
+      VAULT_OIDC_CLIENT_ID: ${VAULT_OIDC_CLIENT_ID:-}
+      VAULT_OIDC_PROVIDER_URL: ${VAULT_OIDC_PROVIDER_URL:-}
+      VAULT_OIDC_REDIRECT_URL: ${VAULT_OIDC_REDIRECT_URL:-https://localhost:9443/api/auth/vault/callback}
+      VAULT_OIDC_SCOPES: ${VAULT_OIDC_SCOPES:-openid profile}
+      # Frontend URL (for SSO redirects back to frontend)
+      FRONTEND_URL: ${FRONTEND_URL:-https://localhost}
       # Storage Configuration
       STORAGE_BACKEND: ${STORAGE_BACKEND:-local}  # "local" or "s3"
       STORAGE_ROOT: ${STORAGE_ROOT:-/data/buckets}

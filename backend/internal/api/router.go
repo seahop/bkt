@@ -59,9 +59,14 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			auth.GET("/google/login", googleHandler.InitiateGoogleLogin)
 			auth.GET("/google/callback", googleHandler.HandleGoogleCallback)
 
-			// Vault JWT routes
-			vaultHandler := authpkg.NewVaultJWTHandler(cfg)
-			auth.POST("/vault/login", vaultHandler.LoginWithVaultJWT)
+			// Vault JWT routes (legacy token-based login)
+			vaultJWTHandler := authpkg.NewVaultJWTHandler(cfg)
+			auth.POST("/vault/login", vaultJWTHandler.LoginWithVaultJWT)
+
+			// Vault OIDC routes (browser-based SSO with PKCE)
+			vaultOIDCHandler := authpkg.NewVaultOIDCHandler(cfg)
+			auth.GET("/vault/login", vaultOIDCHandler.InitiateVaultLogin)
+			auth.GET("/vault/callback", vaultOIDCHandler.HandleVaultCallback)
 		}
 
 		// Protected routes (require authentication)

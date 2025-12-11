@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { useAuthStore } from './store/authStore'
 import Login from './pages/Login'
 import GoogleCallback from './pages/GoogleCallback'
+import VaultCallback from './pages/VaultCallback'
 import Dashboard from './pages/Dashboard'
 import Buckets from './pages/Buckets'
 import BucketDetails from './pages/BucketDetails'
@@ -51,6 +52,7 @@ function App() {
       <Routes>
         <Route path="/login" element={isAuthenticated ? <Navigate to="/" /> : <Login />} />
         <Route path="/auth/google/callback" element={<GoogleCallback />} />
+        <Route path="/auth/vault/callback" element={<VaultCallback />} />
 
         <Route
           path="/"

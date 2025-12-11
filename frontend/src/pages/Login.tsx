@@ -4,7 +4,7 @@ import { useAuthStore } from '../store/authStore'
 import { Database } from 'lucide-react'
 import GoogleSignInButton from '../components/GoogleSignInButton'
 import VaultLoginModal from '../components/VaultLoginModal'
-import { getSSOConfig, SSOConfig } from '../services/sso'
+import { getSSOConfig, SSOConfig, loginWithVaultOIDC } from '../services/sso'
 
 export default function Login() {
   const [username, setUsername] = useState('')
@@ -122,7 +122,14 @@ export default function Login() {
 
                 {ssoConfig.vault_enabled && (
                   <button
-                    onClick={() => setVaultModalOpen(true)}
+                    onClick={() => {
+                      // Use OIDC redirect if available, otherwise fall back to JWT modal
+                      if (ssoConfig.vault_auth_url) {
+                        loginWithVaultOIDC();
+                      } else {
+                        setVaultModalOpen(true);
+                      }
+                    }}
                     disabled={loading}
                     className="w-full flex items-center justify-center gap-3 px-4 py-2 border border-dark-border rounded-md shadow-sm bg-dark-bg hover:bg-dark-bg/80 text-dark-text focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                   >

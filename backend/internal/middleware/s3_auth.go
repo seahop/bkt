@@ -84,8 +84,8 @@ func S3AuthMiddleware() gin.HandlerFunc {
 
 		// Validate signature
 		if err := validateSignature(c, authHeader, accessKey, secretKey); err != nil {
-			// Log method and path for debugging, but NOT credentials or auth header
-			fmt.Printf("[S3Auth] Signature validation failed: %s %s\n", c.Request.Method, c.Request.URL.Path)
+			// Debug logging (uncomment for troubleshooting)
+			// fmt.Printf("[S3Auth] Signature validation failed: %s %s\n", c.Request.Method, c.Request.URL.Path)
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"Code":    "SignatureDoesNotMatch",
 				"Message": "The request signature we calculated does not match the signature you provided",

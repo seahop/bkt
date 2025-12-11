@@ -138,9 +138,9 @@ func (s *GoogleWorkspaceService) SyncUserPoliciesFromGroups(user *models.User, p
 		for i, p := range policies {
 			foundNames[i] = p.Name
 		}
-		// This is informational - we continue with whatever policies we found
-		fmt.Printf("[GoogleWorkspace] Policy sync for %s: requested %v, found %v\n",
-			user.Email, policyNames, foundNames)
+		// Debug logging (uncomment for troubleshooting)
+		// fmt.Printf("[GoogleWorkspace] Policy sync for %s: requested %v, found %v\n",
+		// 	user.Email, policyNames, foundNames)
 	}
 
 	// Replace user's policies with those from Google Workspace groups

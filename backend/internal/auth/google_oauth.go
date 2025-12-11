@@ -177,8 +177,8 @@ func (h *GoogleOAuthHandler) HandleGoogleCallback(c *gin.Context) {
 		// Fetch user's groups from Google Workspace
 		groups, err := h.workspaceService.GetUserGroups(ctx, userInfo.Email)
 		if err != nil {
-			// Log the error but don't fail - fall back to manual policy assignment
-			fmt.Printf("[GoogleSSO] Warning: Failed to fetch groups for %s: %v\n", userInfo.Email, err)
+			// Debug logging (uncomment for troubleshooting)
+			// fmt.Printf("[GoogleSSO] Warning: Failed to fetch groups for %s: %v\n", userInfo.Email, err)
 		} else if len(groups) > 0 {
 			// Map groups to policy names
 			policyNames := h.workspaceService.GetPolicyNamesFromGroups(groups)

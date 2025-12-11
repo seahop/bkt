@@ -30,10 +30,10 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		AllowCredentials: cfg.CORS.AllowCredentials,
 	}))
 
-	// Health check endpoint
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "healthy"})
-	})
+	// Health check endpoints
+	router.GET("/health", HealthHandler)     // Full health with DB check
+	router.GET("/ready", ReadinessHandler)   // Readiness probe (for k8s)
+	router.GET("/live", LivenessHandler)     // Liveness probe (for k8s)
 
 	// API routes group
 	api := router.Group("/api")

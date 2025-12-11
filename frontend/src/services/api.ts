@@ -32,6 +32,7 @@ api.interceptors.response.use(
       localStorage.removeItem('token')
       localStorage.removeItem('refresh_token')
       localStorage.removeItem('auth-storage') // Clear persisted Zustand state
+      sessionStorage.removeItem('auth_timestamp')
 
       // Import authStore dynamically to avoid circular dependency
       const { useAuthStore } = await import('../store/authStore')
@@ -40,11 +41,13 @@ api.interceptors.response.use(
       useAuthStore.setState({
         user: null,
         token: null,
-        isAuthenticated: false
+        isAuthenticated: false,
+        lastAuthTime: null
       })
 
-      // Only redirect if not already on login page
-      if (!window.location.pathname.includes('/login')) {
+      // Only redirect if not already on login page and not on callback pages
+      const path = window.location.pathname
+      if (!path.includes('/login') && !path.includes('/callback')) {
         window.location.href = '/login'
       }
     }

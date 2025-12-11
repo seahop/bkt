@@ -7,6 +7,7 @@ interface AuthState {
   user: User | null
   token: string | null
   isAuthenticated: boolean
+  lastAuthTime: number | null  // Timestamp when auth was last set (to avoid redundant validation)
   login: (username: string, password: string) => Promise<void>
   register: (username: string, email: string, password: string) => Promise<void>
   logout: () => Promise<void>
@@ -21,13 +22,16 @@ export const useAuthStore = create<AuthState>()(
       user: null,
       token: null,
       isAuthenticated: false,
+      lastAuthTime: null,
 
       setAuth: (data: AuthResponse) => {
         localStorage.setItem('token', data.token)
         if (data.refresh_token) {
           localStorage.setItem('refresh_token', data.refresh_token)
         }
-        set({ user: data.user, token: data.token, isAuthenticated: true })
+        // Mark fresh authentication in sessionStorage (more reliable than zustand state for timing)
+        sessionStorage.setItem('auth_timestamp', Date.now().toString())
+        set({ user: data.user, token: data.token, isAuthenticated: true, lastAuthTime: Date.now() })
       },
 
       login: async (username: string, password: string) => {
@@ -50,7 +54,8 @@ export const useAuthStore = create<AuthState>()(
         localStorage.removeItem('token')
         localStorage.removeItem('refresh_token')
         localStorage.removeItem('auth-storage') // Clear persisted Zustand state
-        set({ user: null, token: null, isAuthenticated: false })
+        sessionStorage.removeItem('auth_timestamp')
+        set({ user: null, token: null, isAuthenticated: false, lastAuthTime: null })
       },
 
       refreshUser: async () => {
@@ -72,14 +77,31 @@ export const useAuthStore = create<AuthState>()(
           localStorage.removeItem('token')
           localStorage.removeItem('refresh_token')
           localStorage.removeItem('auth-storage')
-          set({ user: null, token: null, isAuthenticated: false })
+          sessionStorage.removeItem('auth_timestamp')
+          set({ user: null, token: null, isAuthenticated: false, lastAuthTime: null })
           return false
+        }
+
+        // Skip validation if auth was just set (within last 10 seconds)
+        // This prevents redundant API calls after SSO callbacks
+        // Check both zustand state and sessionStorage for reliability
+        const authTimestamp = sessionStorage.getItem('auth_timestamp')
+        const isRecentAuth = (state.lastAuthTime && Date.now() - state.lastAuthTime < 10000) ||
+                            (authTimestamp && Date.now() - parseInt(authTimestamp, 10) < 10000)
+
+        if (isRecentAuth) {
+          return true
         }
 
         try {
           // Try to fetch current user to validate token
           const user = await userApi.getCurrentUser()
-          set({ user })
+          // Only update state if user data actually changed (prevents unnecessary re-renders)
+          const currentUser = useAuthStore.getState().user
+          if (!currentUser || currentUser.id !== user.id || currentUser.username !== user.username ||
+              currentUser.email !== user.email || currentUser.is_admin !== user.is_admin) {
+            set({ user })
+          }
           return true
         } catch (error) {
           // Token is invalid, clear everything
@@ -87,7 +109,8 @@ export const useAuthStore = create<AuthState>()(
           localStorage.removeItem('token')
           localStorage.removeItem('refresh_token')
           localStorage.removeItem('auth-storage')
-          set({ user: null, token: null, isAuthenticated: false })
+          sessionStorage.removeItem('auth_timestamp')
+          set({ user: null, token: null, isAuthenticated: false, lastAuthTime: null })
           return false
         }
       },

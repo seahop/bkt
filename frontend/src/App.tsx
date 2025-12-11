@@ -31,15 +31,24 @@ function App() {
     // Validate token on app load
     const validate = async () => {
       if (isAuthenticated) {
-        await validateToken()
+        // Skip validation if we just authenticated (SSO callback already validated)
+        const authTimestamp = sessionStorage.getItem('auth_timestamp')
+        const isRecentAuth = authTimestamp && Date.now() - parseInt(authTimestamp, 10) < 30000
+
+        if (!isRecentAuth) {
+          await validateToken()
+        }
       }
       setIsValidating(false)
     }
     validate()
   }, [])
 
-  // Show loading state while validating token
-  if (isValidating && isAuthenticated) {
+  // Show loading state while validating token (only for stale sessions)
+  const authTimestamp = sessionStorage.getItem('auth_timestamp')
+  const isRecentAuth = authTimestamp && Date.now() - parseInt(authTimestamp, 10) < 30000
+
+  if (isValidating && isAuthenticated && !isRecentAuth) {
     return (
       <div className="flex items-center justify-center h-screen bg-dark-bg">
         <div className="text-dark-textSecondary">Validating session...</div>

@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="bkt - Self-hosted S3-compatible object storage with enterprise SSO, IAM-style policies, and multi-backend support.">
+  <meta name="keywords" content="s3, object storage, self-hosted, storage gateway, minio, aws s3, oidc, sso, iam policies">
+  <meta property="og:title" content="bkt - Self-Hosted S3-Compatible Object Storage">
+  <meta property="og:description" content="A privacy-first storage gateway with enterprise authentication, fine-grained access control, and support for multiple storage backends.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://bkt.tips">
+  <title>bkt - Self-Hosted S3-Compatible Object Storage</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <nav class="nav">
+    <div class="nav-container">
+      <a href="/" class="nav-logo">
+        <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <ellipse cx="12" cy="5" rx="9" ry="3"/>
+          <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+          <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+        </svg>
+        <span class="logo-text">bkt</span>
+      </a>
+      <div class="nav-links">
+        <a href="#features">Features</a>
+        <a href="#getting-started">Get Started</a>
+        <a href="https://github.com/seahop/bkt" target="_blank" rel="noopener">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <main>
+    <section class="hero">
+      <div class="hero-content">
+        <h1>Self-hosted object storage<br>that just works</h1>
+        <p class="hero-subtitle">
+          An S3-compatible storage gateway with enterprise SSO, IAM-style policies,
+          and support for multiple backends. Your data, your infrastructure.
+        </p>
+        <div class="hero-actions">
+          <a href="#getting-started" class="btn btn-primary">Get Started</a>
+          <a href="https://github.com/seahop/bkt" class="btn btn-secondary" target="_blank" rel="noopener">View Source</a>
+        </div>
+        <p class="hero-note">Deploy with Docker Compose in minutes</p>
+      </div>
+    </section>
+
+    <section id="features" class="features-overview">
+      <div class="container">
+        <h2>Everything you need for file storage</h2>
+        <div class="feature-grid">
+          <div class="feature-card">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+              </svg>
+            </div>
+            <h3>S3 Compatible</h3>
+            <p>Full AWS SDK compatibility. Use existing tools like aws-cli, s3fs, or any S3 client. Mount buckets as local drives.</p>
+          </div>
+          <div class="feature-card">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
+                <polyline points="22,6 12,13 2,6"/>
+              </svg>
+            </div>
+            <h3>Multi-Backend</h3>
+            <p>Store files locally, on AWS S3, MinIO, or DigitalOcean Spaces. Different buckets can use different backends.</p>
+          </div>
+          <div class="feature-card">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+              </svg>
+            </div>
+            <h3>IAM Policies</h3>
+            <p>Fine-grained access control with familiar AWS-style policy syntax. Deny-by-default with explicit allow rules.</p>
+          </div>
+          <div class="feature-card">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                <circle cx="12" cy="7" r="4"/>
+              </svg>
+            </div>
+            <h3>Enterprise SSO</h3>
+            <p>Google OAuth and HashiCorp Vault OIDC with PKCE. Automatic user provisioning and policy sync from groups.</p>
+          </div>
+          <div class="feature-card">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+              </svg>
+            </div>
+            <h3>Security First</h3>
+            <p>TLS everywhere, bcrypt password hashing, JWT authentication, and access keys with AWS Signature V4.</p>
+          </div>
+          <div class="feature-card">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+                <line x1="8" y1="21" x2="16" y2="21"/>
+                <line x1="12" y1="17" x2="12" y2="21"/>
+              </svg>
+            </div>
+            <h3>Modern Web UI</h3>
+            <p>Dual-pane file browser with drag-and-drop, search filters, context menus, and real-time upload progress.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="technical">
+      <div class="container">
+        <h2>Built for production</h2>
+        <div class="tech-grid">
+          <div class="tech-item">
+            <h4>Go Backend</h4>
+            <p>High-performance API server with Gin framework. Handles concurrent uploads and streaming efficiently.</p>
+          </div>
+          <div class="tech-item">
+            <h4>React Frontend</h4>
+            <p>TypeScript, Vite, and Tailwind CSS. Fast builds and a responsive interface that works everywhere.</p>
+          </div>
+          <div class="tech-item">
+            <h4>PostgreSQL</h4>
+            <p>Reliable data storage with SSL connections. GORM handles migrations automatically.</p>
+          </div>
+          <div class="tech-item">
+            <h4>Enterprise SSO</h4>
+            <p>Google OAuth and HashiCorp Vault OIDC with PKCE. Automatic user provisioning from identity providers.</p>
+          </div>
+          <div class="tech-item">
+            <h4>IAM Policies</h4>
+            <p>AWS-style policy documents for fine-grained access control. Deny-by-default with explicit allow rules.</p>
+          </div>
+          <div class="tech-item">
+            <h4>Docker Native</h4>
+            <p>Compose-based deployment with isolated networking. Production-ready out of the box.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="use-cases">
+      <div class="container">
+        <div class="use-cases-content">
+          <h2>Who it's for</h2>
+          <p>
+            bkt is designed for teams that need control over their file storage without
+            vendor lock-in. Run it on your own infrastructure with your own authentication.
+          </p>
+          <ul class="use-case-list">
+            <li>Teams needing a unified S3 interface across local and cloud storage</li>
+            <li>Organizations with data residency or compliance requirements</li>
+            <li>Hybrid cloud environments spanning multiple providers</li>
+            <li>Self-hosted infrastructure with existing identity providers</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="getting-started" class="getting-started">
+      <div class="container">
+        <h2>Quick Start</h2>
+        <p class="section-intro">Get up and running with local storage in under 5 minutes. Requires Docker, Docker Compose, and Python 3.</p>
+        <div class="steps">
+          <div class="step">
+            <div class="step-number">1</div>
+            <div class="step-content">
+              <h4>Clone the repository</h4>
+              <pre><code>git clone https://github.com/seahop/bkt.git
+cd bkt</code></pre>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-number">2</div>
+            <div class="step-content">
+              <h4>Run the setup script</h4>
+              <pre><code>python3 setup.py</code></pre>
+              <p class="step-note">Generates SSL certificates, admin credentials, and .env file. <strong>Save the admin password displayed in the output.</strong></p>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-number">3</div>
+            <div class="step-content">
+              <h4>Start the services</h4>
+              <pre><code>docker compose up --build -d</code></pre>
+              <p class="step-note">First run builds the containers. Access the UI at <strong>https://localhost:5173</strong></p>
+            </div>
+          </div>
+        </div>
+        <p class="getting-started-note">
+          The application uses self-signed certificates. Your browser will show a warning - accept it to continue, or import the CA certificate from <code>certs/ca/ca.crt</code>.
+        </p>
+      </div>
+    </section>
+
+    <section id="advanced" class="advanced-config">
+      <div class="container">
+        <h2>Advanced Configuration</h2>
+        <p class="section-intro">Configure SSO, external storage backends, and production settings by editing the <code>.env</code> file.</p>
+
+        <div class="config-grid">
+          <div class="config-card">
+            <h3>S3 Storage Backend</h3>
+            <p>Store objects on AWS S3, MinIO, or any S3-compatible service instead of local disk.</p>
+            <pre><code>STORAGE_BACKEND=s3
+S3_ENDPOINT=s3.amazonaws.com
+S3_REGION=us-east-1
+S3_ACCESS_KEY_ID=your-key
+S3_SECRET_ACCESS_KEY=your-secret</code></pre>
+          </div>
+
+          <div class="config-card">
+            <h3>Google SSO</h3>
+            <p>Enable browser-based single sign-on with Google OAuth. Users are auto-provisioned on first login.</p>
+            <pre><code>GOOGLE_OIDC_ENABLED=true
+GOOGLE_CLIENT_ID=your-client-id
+GOOGLE_CLIENT_SECRET=your-secret
+GOOGLE_REDIRECT_URL=https://your-domain/api/auth/google/callback
+FRONTEND_URL=https://your-domain</code></pre>
+          </div>
+
+          <div class="config-card">
+            <h3>Vault OIDC</h3>
+            <p>Enterprise SSO with HashiCorp Vault using PKCE. Supports automatic policy sync from Vault groups.</p>
+            <pre><code>VAULT_OIDC_ENABLED=true
+VAULT_ADDR=https://vault.example.com
+VAULT_OIDC_CLIENT_ID=your-client-id
+VAULT_OIDC_PROVIDER_URL=https://vault.example.com/v1/identity/oidc/provider/default
+VAULT_OIDC_REDIRECT_URL=https://your-domain/api/auth/vault/callback
+FRONTEND_URL=https://your-domain</code></pre>
+          </div>
+
+          <div class="config-card">
+            <h3>Production Settings</h3>
+            <p>Key settings to review before deploying to production.</p>
+            <pre><code># Disable self-registration
+ALLOW_REGISTRATION=false
+
+# Use real SSL certificates
+# Replace certs/ with CA-signed certs
+
+# Set your domain for CORS
+CORS_ALLOWED_ORIGINS=https://your-domain</code></pre>
+          </div>
+        </div>
+
+        <p class="getting-started-note">
+          See the <a href="https://github.com/seahop/bkt/tree/main/docs" target="_blank" rel="noopener">full documentation</a> for detailed guides on SSO setup, S3 backend configuration, and production deployment.
+        </p>
+      </div>
+    </section>
+
+    <section class="cta">
+      <div class="container">
+        <h2>Open source and self-hosted</h2>
+        <p>No cloud dependencies, no usage fees. Your storage, your rules.</p>
+        <div class="cta-actions">
+          <a href="https://github.com/seahop/bkt" class="btn btn-primary" target="_blank" rel="noopener">View on GitHub</a>
+          <a href="https://github.com/seahop/bkt/tree/main/docs" class="btn btn-secondary" target="_blank" rel="noopener">Read the Docs</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-content">
+        <div class="footer-brand">
+          <svg class="footer-logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <ellipse cx="12" cy="5" rx="9" ry="3"/>
+            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+          </svg>
+          <span>bkt</span>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/seahop/bkt" target="_blank" rel="noopener">GitHub</a>
+          <a href="https://github.com/seahop/bkt/issues" target="_blank" rel="noopener">Issues</a>
+          <a href="https://github.com/seahop/bkt/tree/main/docs" target="_blank" rel="noopener">Docs</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

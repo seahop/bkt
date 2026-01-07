@@ -2,6 +2,7 @@
   <img src="docs/images/logo.png" alt="bkt logo" width="500">
   <h1>bkt</h1>
   <p>A self-hosted S3-compatible object storage gateway with multi-backend support, policy-based access control, and a modern web interface.</p>
+  <p><a href="https://bkt.tips">https://bkt.tips</a></p>
 </div>
 
 ## Overview

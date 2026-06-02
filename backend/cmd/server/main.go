@@ -37,6 +37,17 @@ func main() {
 		log.Fatalf("Failed to create storage directory: %v", err)
 	}
 
+	// Periodically clean up expired revoked tokens (every 15 minutes)
+	go func() {
+		ticker := time.NewTicker(15 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := database.CleanupExpiredTokens(); err != nil {
+				log.Printf("Failed to clean up expired tokens: %v", err)
+			}
+		}
+	}()
+
 	// Setup router
 	router := api.SetupRouter(cfg)
 

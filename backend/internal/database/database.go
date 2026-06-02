@@ -61,6 +61,7 @@ func Initialize(cfg *config.Config) error {
 		&models.AuditLog{},
 		&models.IdempotencyKey{},
 		&models.Upload{},
+		&models.RevokedToken{},
 	)
 
 	if err != nil {
@@ -91,4 +92,9 @@ func Initialize(cfg *config.Config) error {
 // GetDB returns the database instance
 func GetDB() *gorm.DB {
 	return DB
+}
+
+// CleanupExpiredTokens deletes revoked tokens that have passed their expiry time
+func CleanupExpiredTokens() error {
+	return DB.Where("expires_at < NOW()").Delete(&models.RevokedToken{}).Error
 }

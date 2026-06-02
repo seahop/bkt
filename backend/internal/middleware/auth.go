@@ -3,12 +3,14 @@ package middleware
 import (
 	"net/http"
 	"bkt/internal/auth"
+	"bkt/internal/database"
+	"bkt/internal/models"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 )
 
-// AuthMiddleware validates JWT tokens
+// AuthMiddleware validates JWT tokens and checks the revocation blacklist
 func AuthMiddleware(jwtSecret string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
@@ -34,10 +36,22 @@ func AuthMiddleware(jwtSecret string) gin.HandlerFunc {
 			return
 		}
 
+		// Check if token has been revoked (logout blacklist)
+		if claims.ID != "" {
+			var revoked models.RevokedToken
+			if err := database.DB.Where("jti = ?", claims.ID).First(&revoked).Error; err == nil {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired token"})
+				c.Abort()
+				return
+			}
+		}
+
 		// Set user info in context
 		c.Set("user_id", claims.UserID)
 		c.Set("username", claims.Username)
 		c.Set("is_admin", claims.IsAdmin)
+		c.Set("token_jti", claims.ID)
+		c.Set("token_expires_at", claims.ExpiresAt.Time)
 
 		c.Next()
 	}

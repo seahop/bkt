@@ -27,6 +27,7 @@ func GenerateToken(userID uuid.UUID, username string, isAdmin bool, secret strin
 		Username: username,
 		IsAdmin:  isAdmin,
 		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        uuid.New().String(),
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(duration)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			NotBefore: jwt.NewNumericDate(time.Now()),

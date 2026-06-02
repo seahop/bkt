@@ -259,6 +259,22 @@ func (a *AuditLog) BeforeCreate(tx *gorm.DB) error {
 	return nil
 }
 
+// RevokedToken stores JTIs of logged-out tokens until they naturally expire
+type RevokedToken struct {
+	ID        uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
+	JTI       string    `gorm:"uniqueIndex;not null" json:"jti"`
+	UserID    uuid.UUID `gorm:"type:uuid;index;not null" json:"user_id"`
+	ExpiresAt time.Time `gorm:"index;not null" json:"expires_at"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func (r *RevokedToken) BeforeCreate(tx *gorm.DB) error {
+	if r.ID == uuid.Nil {
+		r.ID = uuid.New()
+	}
+	return nil
+}
+
 // IdempotencyKey represents a stored idempotency key for preventing duplicate requests
 type IdempotencyKey struct {
 	ID           uuid.UUID  `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`

@@ -2,13 +2,14 @@ package api
 
 import (
 	"net/http"
+	"time"
 	"bkt/internal/auth"
 	"bkt/internal/config"
 	"bkt/internal/database"
 	"bkt/internal/models"
-	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 type AuthHandler struct {
@@ -231,12 +232,27 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 	})
 }
 
-// Logout invalidates the user's token (in a real implementation, you'd add the token to a blacklist)
+// Logout revokes the current access token by adding its JTI to the blacklist
 func (h *AuthHandler) Logout(c *gin.Context) {
-	// In a production system, you would:
-	// 1. Add the token to a Redis blacklist
-	// 2. Or store token JTI in database with expiry
-	// For now, we'll just return success as the client will discard the token
+	jti, jtiExists := c.Get("token_jti")
+	expiresAt, expiresExists := c.Get("token_expires_at")
+	userID, _ := c.Get("user_id")
+
+	if jtiExists && expiresExists {
+		jtiStr, _ := jti.(string)
+		expTime, _ := expiresAt.(time.Time)
+		uid, _ := userID.(uuid.UUID)
+
+		if jtiStr != "" {
+			revoked := models.RevokedToken{
+				JTI:       jtiStr,
+				UserID:    uid,
+				ExpiresAt: expTime,
+			}
+			// Non-fatal: if DB write fails the client-side token is still discarded
+			database.DB.Create(&revoked)
+		}
+	}
 
 	c.JSON(http.StatusOK, models.SuccessResponse{
 		Message: "Successfully logged out",

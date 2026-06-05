@@ -1,0 +1,150 @@
+name: Build and Publish Docker Images
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*.*.*'
+  pull_request:
+    branches:
+      - main
+
+env:
+  REGISTRY: ghcr.io
+  BACKEND_IMAGE: ghcr.io/seahop/bkt-backend
+  OMNIBUS_IMAGE: ghcr.io/seahop/bkt
+
+jobs:
+  # UI-inclusive backend (no DB) — used by the Helm chart / docker-compose.prod
+  build-backend:
+    name: Build Backend Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (multi-arch support)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for backend image
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.BACKEND_IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
+          labels: |
+            org.opencontainers.image.title=bkt Backend
+            org.opencontainers.image.description=bkt object storage gateway — API server + web UI
+            org.opencontainers.image.vendor=bkt
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.source=https://github.com/seahop/bkt
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v5
+        with:
+          # Root context so the frontend can be built and embedded.
+          context: .
+          file: ./Dockerfile
+          target: backend
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+  # Single-container omnibus (backend + UI + bundled Postgres) — easy self-host
+  build-omnibus:
+    name: Build Omnibus Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (multi-arch support)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for omnibus image
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.OMNIBUS_IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
+          labels: |
+            org.opencontainers.image.title=bkt
+            org.opencontainers.image.description=bkt object storage gateway — single-container (UI + API + Postgres)
+            org.opencontainers.image.vendor=bkt
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.source=https://github.com/seahop/bkt
+
+      - name: Build and push omnibus image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          target: omnibus
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=omnibus
+          cache-to: type=gha,mode=max,scope=omnibus
+
+  # Summary job that requires both builds to pass — useful for branch protection rules
+  images-published:
+    name: Images Published
+    runs-on: ubuntu-latest
+    needs: [build-backend, build-omnibus]
+    if: github.event_name != 'pull_request'
+    steps:
+      - name: Summary
+        run: |
+          echo "## Images Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | Registry |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|----------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Omnibus (1 container) | \`ghcr.io/seahop/bkt\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Backend (UI + API)    | \`ghcr.io/seahop/bkt-backend\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Quickstart: \`docker run -d -p 9000:9000 -p 9443:9443 -v bkt:/data ghcr.io/seahop/bkt\`" >> $GITHUB_STEP_SUMMARY

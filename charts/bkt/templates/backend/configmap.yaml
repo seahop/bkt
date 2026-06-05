@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "bkt.fullname" . }}-backend
+  labels:
+    {{- include "bkt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+data:
+  DB_HOST: {{ include "bkt.databaseHost" . | quote }}
+  DB_PORT: {{ include "bkt.databasePort" . | quote }}
+  DB_NAME: {{ include "bkt.databaseName" . | quote }}
+  DB_USER: {{ include "bkt.databaseUser" . | quote }}
+  DB_SSL_MODE: {{ if .Values.postgresql.enabled }}"disable"{{ else }}"require"{{ end }}
+  SERVER_PORT: "9000"
+  GO_ENV: {{ .Values.backend.env.GO_ENV | default "production" | quote }}
+  TLS_ENABLED: {{ .Values.backend.tls.enabled | toString | quote }}
+  ADMIN_USERNAME: {{ .Values.backend.env.ADMIN_USERNAME | default "admin" | quote }}
+  ADMIN_EMAIL: {{ .Values.backend.env.ADMIN_EMAIL | default "admin@localhost" | quote }}
+  ALLOW_REGISTRATION: {{ .Values.backend.env.ALLOW_REGISTRATION | default "false" | quote }}
+  STORAGE_BACKEND: {{ .Values.backend.env.STORAGE_BACKEND | default "local" | quote }}
+  STORAGE_ROOT: "/data/buckets"
+  S3_ENABLED: {{ .Values.backend.env.S3_ENABLED | default "false" | quote }}
+  S3_ENDPOINT: {{ .Values.backend.env.S3_ENDPOINT | default "" | quote }}
+  S3_REGION: {{ .Values.backend.env.S3_REGION | default "us-east-1" | quote }}
+  S3_BUCKET_PREFIX: {{ .Values.backend.env.S3_BUCKET_PREFIX | default "" | quote }}
+  S3_USE_SSL: {{ .Values.backend.env.S3_USE_SSL | default "true" | quote }}
+  S3_FORCE_PATH_STYLE: {{ .Values.backend.env.S3_FORCE_PATH_STYLE | default "false" | quote }}
+  CORS_ALLOWED_ORIGINS: {{ .Values.backend.env.CORS_ALLOWED_ORIGINS | default "" | quote }}
+  GOOGLE_OIDC_ENABLED: {{ .Values.backend.env.GOOGLE_OIDC_ENABLED | default "false" | quote }}
+  GOOGLE_CLIENT_ID: {{ .Values.backend.env.GOOGLE_CLIENT_ID | default "" | quote }}
+  GOOGLE_REDIRECT_URL: {{ .Values.backend.env.GOOGLE_REDIRECT_URL | default "" | quote }}
+  VAULT_OIDC_ENABLED: {{ .Values.backend.env.VAULT_OIDC_ENABLED | default "false" | quote }}
+  VAULT_OIDC_CLIENT_ID: {{ .Values.backend.env.VAULT_OIDC_CLIENT_ID | default "" | quote }}
+  VAULT_OIDC_PROVIDER_URL: {{ .Values.backend.env.VAULT_OIDC_PROVIDER_URL | default "" | quote }}
+  VAULT_OIDC_REDIRECT_URL: {{ .Values.backend.env.VAULT_OIDC_REDIRECT_URL | default "" | quote }}
+  VAULT_OIDC_SCOPES: {{ .Values.backend.env.VAULT_OIDC_SCOPES | default "openid profile" | quote }}
+  FRONTEND_URL: {{ .Values.backend.env.FRONTEND_URL | default "" | quote }}

@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -29,6 +30,8 @@ type DatabaseConfig struct {
 type ServerConfig struct {
 	Port        string
 	Host        string
+	ConsolePort string // Web UI + REST API listener (browser-facing)
+	S3APIPort   string // S3-compatible API listener (aws-cli/s3fs, root paths)
 	FrontendURL string // URL where frontend is served (for SSO redirects)
 }
 
@@ -48,6 +51,7 @@ type AuthConfig struct {
 	AdminPassword        string
 	AdminEmail           string
 	AllowRegistration    bool
+	AuthRateLimit        int // requests per minute per IP on auth endpoints (default 5)
 }
 
 type StorageConfig struct {
@@ -63,9 +67,10 @@ type S3Config struct {
 	Region          string
 	AccessKeyID     string
 	SecretAccessKey string
-	BucketPrefix    string // Prefix for all bucket names
+	BucketPrefix    string   // Prefix for all bucket names
 	UseSSL          bool
-	ForcePathStyle  bool   // Required for MinIO
+	ForcePathStyle  bool     // Required for MinIO
+	Buckets         []string // Buckets to auto-provision (link or create) on startup
 }
 
 type GoogleSSOConfig struct {
@@ -114,6 +119,8 @@ func Load() *Config {
 		Server: ServerConfig{
 			Port:        getEnv("SERVER_PORT", "9000"),
 			Host:        getEnv("SERVER_HOST", "0.0.0.0"),
+			ConsolePort: getEnv("CONSOLE_PORT", "9443"),
+			S3APIPort:   getEnv("S3_API_PORT", "9000"),
 			FrontendURL: getEnv("FRONTEND_URL", "https://localhost"),
 		},
 		Auth: AuthConfig{
@@ -125,6 +132,7 @@ func Load() *Config {
 			AdminPassword:      getEnv("ADMIN_PASSWORD", ""),
 			AdminEmail:         getEnv("ADMIN_EMAIL", "admin@localhost"),
 			AllowRegistration:  getEnv("ALLOW_REGISTRATION", "false") == "true",
+			AuthRateLimit:      getEnvInt("AUTH_RATE_LIMIT", 5),
 		},
 		Storage: StorageConfig{
 			Backend:     getEnv("STORAGE_BACKEND", "local"), // "local" or "s3"
@@ -139,6 +147,7 @@ func Load() *Config {
 				BucketPrefix:    getEnv("S3_BUCKET_PREFIX", ""),
 				UseSSL:          getEnv("S3_USE_SSL", "true") == "true",
 				ForcePathStyle:  getEnv("S3_FORCE_PATH_STYLE", "false") == "true",
+				Buckets:         splitAndTrim(getEnv("S3_BUCKETS", ""), ","),
 			},
 		},
 		TLS: TLSConfig{
@@ -257,6 +266,15 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
+func getEnvInt(key string, defaultValue int) int {
+	if value := os.Getenv(key); value != "" {
+		if i, err := strconv.Atoi(value); err == nil {
+			return i
+		}
+	}
+	return defaultValue
+}
+
 // loadCORSConfig loads CORS configuration from environment or uses secure defaults
 func loadCORSConfig() CORSConfig {
 	// Check if custom origins are set via environment variable (comma-separated)
@@ -278,6 +296,7 @@ func loadCORSConfig() CORSConfig {
 			"https://localhost:443",
 			"https://localhost:5173",
 			"http://localhost:5173",
+			"https://localhost:8443", // frontend is also published on 8443 (docker-compose)
 			"http://localhost:3000",
 		}
 	}

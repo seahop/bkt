@@ -7,9 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"regexp"
 	"strings"
+
+	"github.com/gabriel-vasile/mimetype"
 )
 
 // S3 bucket naming rules: https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html
@@ -106,26 +107,23 @@ func EscapeLikeWildcards(input string) string {
 	return escaped
 }
 
-// DetectContentType detects the actual content type by reading the first 512 bytes of the file.
-// It uses Go's http.DetectContentType which inspects magic numbers to determine the MIME type.
-// Returns the detected content type and the bytes read (which should be used for upload).
+// DetectContentType detects the actual content type by reading the first 3KB of the file.
+// Uses the mimetype library which correctly identifies executables, archives, and media formats
+// via magic bytes — more accurate than Go's built-in http.DetectContentType.
+// Returns the detected MIME type and the bytes read (caller must prepend them back to the stream).
 func DetectContentType(reader io.Reader) (contentType string, firstBytes []byte, err error) {
-	// Read first 512 bytes (maximum needed for http.DetectContentType)
-	buffer := make([]byte, 512)
+	// mimetype needs up to 3KB for reliable detection
+	buffer := make([]byte, 3072)
 	n, readErr := io.ReadFull(reader, buffer)
-
-	// io.ReadFull returns io.EOF or io.ErrUnexpectedEOF if file is smaller than 512 bytes
-	// This is normal and should not be treated as an error
 	if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
 		return "", nil, fmt.Errorf("failed to read file content: %w", readErr)
 	}
-
-	// Use only the bytes actually read
 	firstBytes = buffer[:n]
-
-	// Detect content type using magic numbers
-	contentType = http.DetectContentType(firstBytes)
-
+	contentType = mimetype.Detect(firstBytes).String()
+	// Normalize: strip any parameters (e.g. "text/plain; charset=utf-8" → "text/plain")
+	if idx := strings.Index(contentType, ";"); idx >= 0 {
+		contentType = strings.TrimSpace(contentType[:idx])
+	}
 	return contentType, firstBytes, nil
 }
 
@@ -138,12 +136,14 @@ func IsSafeContentType(contentType string) bool {
 
 	// Block potentially dangerous executable types
 	dangerousTypes := []string{
-		"application/x-msdownload",           // .exe
-		"application/x-msdos-program",        // .com, .exe
-		"application/x-executable",           // executables
-		"application/x-sharedlib",            // .so shared libraries
-		"application/x-mach-binary",          // Mach-O binaries
+		"application/x-msdownload",                      // .exe (mimetype library)
+		"application/x-msdos-program",                   // .com, .exe
+		"application/x-executable",                      // Linux ELF executables
+		"application/x-sharedlib",                       // .so shared libraries
+		"application/x-mach-binary",                     // Mach-O binaries (macOS)
 		"application/vnd.microsoft.portable-executable", // PE executables
+		"application/x-elf",                             // ELF binaries
+		"application/x-dosexec",                         // DOS executables
 	}
 
 	for _, dangerous := range dangerousTypes {

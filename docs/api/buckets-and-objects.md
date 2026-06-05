@@ -498,7 +498,7 @@ curl -k -X GET "https://localhost:9443/api/buckets/my-bucket/objects?prefix=imag
 
 ### Web Interface
 
-The web interface at https://localhost:5173 provides a user-friendly folder browser with:
+The web interface (the console at `https://localhost:9443`, or `https://localhost:5173` with the dev compose) provides a user-friendly folder browser with:
 - Click-to-navigate folder structure
 - Breadcrumb navigation
 - Create Folder button

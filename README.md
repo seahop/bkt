@@ -9,6 +9,57 @@
 
 bkt is a unified object storage system that provides a single interface to manage files across multiple storage backends (local filesystem, AWS S3, MinIO, DigitalOcean Spaces, etc.). It includes user authentication, fine-grained access policies, and an S3-compatible API that enables filesystem mounting with tools like s3fs-fuse.
 
+## Quick start
+
+The fastest way to run bkt is the single-container **omnibus** image. It bundles the API, the web UI, and PostgreSQL, and boots with zero configuration — local storage, self-signed TLS, and an auto-generated admin password printed to the logs:
+
+```bash
+docker run -d --name bkt \
+  -p 9443:9443 \
+  -p 9000:9000 \
+  -v bkt-data:/data \
+  ghcr.io/seahop/bkt
+```
+
+- **`9443`** — web console + REST API → open **https://localhost:9443** (accept the self-signed cert)
+- **`9000`** — S3-compatible API for `aws` / `s3fs`
+
+Then:
+
+- Get the first-boot admin password: `docker logs bkt | grep -A2 "admin credentials"` — or set your own with `-e ADMIN_PASSWORD=...`.
+- Create an access key in the UI (Settings) and point S3 tools at `https://localhost:9000`.
+
+All state (database, objects, certs, secrets) lives in the `bkt-data` volume, so the container itself is disposable. For multi-node / external-Postgres deployments, use the Helm chart in [`charts/bkt`](charts/bkt) or [docker-compose.prod.yml](docker-compose.prod.yml).
+
+### Configuration
+
+Everything is configured with **environment variables passed at run time** (`docker run -e …`) — never at build time, and you never need a `.env` file for the single container. Anything you omit gets a safe default; secrets are auto-generated on first boot and persisted to the volume. Common ones:
+
+```bash
+docker run -d -p 9443:9443 -p 9000:9000 -v bkt-data:/data \
+  -e ADMIN_PASSWORD='choose-a-strong-password' \
+  -e CORS_ALLOWED_ORIGINS='https://bkt.example.com' \
+  -e TLS_ENABLED=false \                 # serve HTTP behind your own proxy
+  -e S3_ENABLED=true \
+  -e S3_ACCESS_KEY_ID='AKIA...' -e S3_SECRET_ACCESS_KEY='...' \
+  -e S3_BUCKETS='my-existing-bucket' \   # auto-provision a bucket on startup
+  ghcr.io/seahop/bkt
+```
+
+`ADMIN_PASSWORD`, `JWT_SECRET`, and `ENCRYPTION_KEY` are read on **first boot** and then stored in the volume (stored values win on later boots). See the full list in **[docs/deployment/configuration.md](docs/deployment/configuration.md)** and the annotated [.env.example](.env.example).
+
+### Deployment options
+
+The same codebase ships three ways. Full details in **[docs/deployment/deployment-options.md](docs/deployment/deployment-options.md)**.
+
+| | Command | Containers | For |
+|---|---|---|---|
+| **Omnibus** (`docker pull`) | `docker run … ghcr.io/seahop/bkt` | 1 (backend+UI+DB) | single-node self-hosting |
+| **Clone + compose** | `git clone …` → `docker compose up` | 3 (db, backend, frontend) | developing on the code (hot-reload) |
+| **compose.prod / Helm** | pulls `bkt-backend` + Postgres | 2 (backend, external DB) | scale-out / HA |
+
+All three run the same Go binary with the embedded UI — they are different *packagings* of one codebase (built from the same root `Dockerfile`).
+
 ## Features
 
 ### Storage

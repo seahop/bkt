@@ -21,6 +21,18 @@ func NewAuthHandler(cfg *config.Config) *AuthHandler {
 }
 
 // Register creates a new user account
+// @Summary Register a new user
+// @Description Creates a new user account and returns JWT access and refresh tokens. Registration must be enabled in server configuration.
+// @Tags auth
+// @Accept json
+// @Produce json
+// @Param request body models.RegisterRequest true "Registration credentials"
+// @Success 201 {object} models.AuthResponse
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 409 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Router /api/auth/register [post]
 func (h *AuthHandler) Register(c *gin.Context) {
 	// Check if registration is allowed
 	if !h.config.Auth.AllowRegistration {
@@ -106,6 +118,18 @@ func (h *AuthHandler) Register(c *gin.Context) {
 }
 
 // Login authenticates a user and returns JWT tokens
+// @Summary Login with username and password
+// @Description Authenticates a user with username and password and returns JWT access and refresh tokens.
+// @Tags auth
+// @Accept json
+// @Produce json
+// @Param request body models.LoginRequest true "Login credentials"
+// @Success 200 {object} models.AuthResponse
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 401 {object} models.ErrorResponse
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Router /api/auth/login [post]
 func (h *AuthHandler) Login(c *gin.Context) {
 	var req models.LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -126,20 +150,20 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
+	// Check lock before the expensive bcrypt comparison
+	if user.IsLocked {
+		c.JSON(http.StatusForbidden, models.ErrorResponse{
+			Error:   "Account locked",
+			Message: "This account has been locked. Please contact an administrator.",
+		})
+		return
+	}
+
 	// Check password
 	if !auth.CheckPassword(req.Password, user.Password) {
 		c.JSON(http.StatusUnauthorized, models.ErrorResponse{
 			Error:   "Invalid credentials",
 			Message: "Username or password is incorrect",
-		})
-		return
-	}
-
-	// Check if account is locked
-	if user.IsLocked {
-		c.JSON(http.StatusForbidden, models.ErrorResponse{
-			Error:   "Account locked",
-			Message: "This account has been locked. Please contact an administrator.",
 		})
 		return
 	}
@@ -174,6 +198,17 @@ func (h *AuthHandler) Login(c *gin.Context) {
 }
 
 // RefreshToken generates a new access token using a refresh token
+// @Summary Refresh access token
+// @Description Generates a new JWT access token using a valid refresh token.
+// @Tags auth
+// @Accept json
+// @Produce json
+// @Param request body object true "Refresh token" SchemaExample({"refresh_token":"eyJ..."})
+// @Success 200 {object} object "New access token"
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 401 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Router /api/auth/refresh [post]
 func (h *AuthHandler) RefreshToken(c *gin.Context) {
 	var req struct {
 		RefreshToken string `json:"refresh_token" binding:"required"`
@@ -187,7 +222,7 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 		return
 	}
 
-	// Validate refresh token
+	// Validate refresh token signature and expiry
 	claims, err := auth.ValidateToken(req.RefreshToken, h.config.Auth.JWTSecret)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, models.ErrorResponse{
@@ -195,6 +230,18 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 			Message: "Please log in again",
 		})
 		return
+	}
+
+	// Check if refresh token has been revoked (e.g. via logout)
+	if claims.ID != "" {
+		var revoked models.RevokedToken
+		if database.DB.Where("jti = ?", claims.ID).First(&revoked).Error == nil {
+			c.JSON(http.StatusUnauthorized, models.ErrorResponse{
+				Error:   "Invalid refresh token",
+				Message: "Please log in again",
+			})
+			return
+		}
 	}
 
 	// Get user
@@ -232,25 +279,43 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 	})
 }
 
-// Logout revokes the current access token by adding its JTI to the blacklist
+// Logout revokes the current access token (and optionally the refresh token) by blacklisting their JTIs
+// @Summary Logout and revoke tokens
+// @Description Revokes the current access token and optionally the refresh token by blacklisting their JTIs.
+// @Tags auth
+// @Accept json
+// @Produce json
+// @Param request body object false "Optional refresh token to also revoke" SchemaExample({"refresh_token":"eyJ..."})
+// @Success 200 {object} models.SuccessResponse
+// @Security BearerAuth
+// @Router /api/auth/logout [post]
 func (h *AuthHandler) Logout(c *gin.Context) {
 	jti, jtiExists := c.Get("token_jti")
 	expiresAt, expiresExists := c.Get("token_expires_at")
 	userID, _ := c.Get("user_id")
+	uid, _ := userID.(uuid.UUID)
 
+	// Revoke the access token
 	if jtiExists && expiresExists {
 		jtiStr, _ := jti.(string)
 		expTime, _ := expiresAt.(time.Time)
-		uid, _ := userID.(uuid.UUID)
-
 		if jtiStr != "" {
-			revoked := models.RevokedToken{
-				JTI:       jtiStr,
+			database.DB.Create(&models.RevokedToken{JTI: jtiStr, UserID: uid, ExpiresAt: expTime})
+		}
+	}
+
+	// Optionally revoke the refresh token too (client should send it on logout)
+	var body struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := c.ShouldBindJSON(&body); err == nil && body.RefreshToken != "" {
+		// Parse without expiry enforcement — we want to blacklist even if already expired
+		if claims, err := auth.ParseTokenClaims(body.RefreshToken, h.config.Auth.JWTSecret); err == nil && claims.ID != "" {
+			database.DB.Create(&models.RevokedToken{
+				JTI:       claims.ID,
 				UserID:    uid,
-				ExpiresAt: expTime,
-			}
-			// Non-fatal: if DB write fails the client-side token is still discarded
-			database.DB.Create(&revoked)
+				ExpiresAt: claims.ExpiresAt.Time,
+			})
 		}
 	}
 

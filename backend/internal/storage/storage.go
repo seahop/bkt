@@ -2,6 +2,7 @@ package storage
 
 import (
 	"io"
+	"time"
 )
 
 // StorageBackend defines the interface for object storage operations
@@ -35,6 +36,13 @@ type StorageBackend interface {
 
 	// CopyObject copies an object within the same bucket
 	CopyObject(bucketName, srcKey, dstKey string) error
+
+	// Multipart upload operations
+	CreateMultipartUpload(bucketName, objectKey, contentType string) (uploadID string, err error)
+	UploadPart(bucketName, objectKey, uploadID string, partNumber int, data io.Reader, size int64) (etag string, err error)
+	CompleteMultipartUpload(bucketName, objectKey, uploadID string, parts []CompletedPart) error
+	AbortMultipartUpload(bucketName, objectKey, uploadID string) error
+	ListParts(bucketName, objectKey, uploadID string) ([]PartInfo, error)
 }
 
 // ObjectInfo contains metadata about a stored object
@@ -44,6 +52,20 @@ type ObjectInfo struct {
 	ContentType  string
 	LastModified string
 	ETag         string
+}
+
+// CompletedPart represents a completed multipart upload part
+type CompletedPart struct {
+	PartNumber int
+	ETag       string
+}
+
+// PartInfo contains metadata about an uploaded part
+type PartInfo struct {
+	PartNumber   int
+	Size         int64
+	ETag         string
+	LastModified time.Time
 }
 
 // NewStorageBackend creates a new storage backend based on configuration

@@ -3,13 +3,18 @@ package storage
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // LocalStorage implements StorageBackend using local filesystem
@@ -233,18 +238,11 @@ func (ls *LocalStorage) CopyObject(bucketName, srcKey, dstKey string) error {
 		return fmt.Errorf("source object not found")
 	}
 
-	// Create destination directory if needed
-	dstDir := filepath.Dir(dstPath)
-	if err := os.MkdirAll(dstDir, 0755); err != nil {
+	// CopyObject must preserve the source — always use io.Copy, never Rename
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
 		return fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
-	// Try rename first (atomic and efficient for same filesystem)
-	if err := os.Rename(srcPath, dstPath); err == nil {
-		return nil
-	}
-
-	// Fallback to copy if rename fails (e.g., cross-device)
 	srcFile, err := os.Open(srcPath)
 	if err != nil {
 		return fmt.Errorf("failed to open source file: %w", err)
@@ -278,4 +276,127 @@ func calculateMD5(filePath string) (string, error) {
 	}
 
 	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// multipartDir returns the temp directory path for a multipart upload
+func (ls *LocalStorage) multipartDir(uploadID string) string {
+	return filepath.Join(ls.rootPath, ".multipart", uploadID)
+}
+
+type multipartMeta struct {
+	BucketName  string `json:"bucket_name"`
+	ObjectKey   string `json:"object_key"`
+	ContentType string `json:"content_type"`
+}
+
+func (ls *LocalStorage) CreateMultipartUpload(bucketName, objectKey, contentType string) (string, error) {
+	uploadID := uuid.New().String()
+	dir := ls.multipartDir(uploadID)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		return "", fmt.Errorf("failed to create multipart dir: %w", err)
+	}
+	meta := multipartMeta{BucketName: bucketName, ObjectKey: objectKey, ContentType: contentType}
+	data, _ := json.Marshal(meta)
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), data, 0600); err != nil {
+		return "", fmt.Errorf("failed to write multipart meta: %w", err)
+	}
+	return uploadID, nil
+}
+
+func (ls *LocalStorage) UploadPart(bucketName, objectKey, uploadID string, partNumber int, data io.Reader, size int64) (string, error) {
+	dir := ls.multipartDir(uploadID)
+	if _, err := os.Stat(dir); err != nil {
+		return "", fmt.Errorf("multipart upload not found: %s", uploadID)
+	}
+	partPath := filepath.Join(dir, fmt.Sprintf("part.%05d", partNumber))
+	f, err := os.Create(partPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create part file: %w", err)
+	}
+	defer f.Close()
+
+	hash := md5.New()
+	w := io.MultiWriter(f, hash)
+	if _, err := io.Copy(w, data); err != nil {
+		return "", fmt.Errorf("failed to write part: %w", err)
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func (ls *LocalStorage) CompleteMultipartUpload(bucketName, objectKey, uploadID string, parts []CompletedPart) error {
+	dir := ls.multipartDir(uploadID)
+	if _, err := os.Stat(dir); err != nil {
+		return fmt.Errorf("multipart upload not found: %s", uploadID)
+	}
+
+	// Sort parts by part number
+	sorted := make([]CompletedPart, len(parts))
+	copy(sorted, parts)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].PartNumber < sorted[j].PartNumber })
+
+	finalPath := filepath.Join(ls.rootPath, bucketName, objectKey)
+	if err := os.MkdirAll(filepath.Dir(finalPath), 0750); err != nil {
+		return fmt.Errorf("failed to create object dir: %w", err)
+	}
+
+	out, err := os.Create(finalPath)
+	if err != nil {
+		return fmt.Errorf("failed to create final object: %w", err)
+	}
+	defer out.Close()
+
+	for _, part := range sorted {
+		partPath := filepath.Join(dir, fmt.Sprintf("part.%05d", part.PartNumber))
+		f, err := os.Open(partPath)
+		if err != nil {
+			return fmt.Errorf("failed to open part %d: %w", part.PartNumber, err)
+		}
+		_, copyErr := io.Copy(out, f)
+		f.Close()
+		if copyErr != nil {
+			return fmt.Errorf("failed to assemble part %d: %w", part.PartNumber, copyErr)
+		}
+	}
+
+	// Clean up temp dir
+	os.RemoveAll(dir)
+	return nil
+}
+
+func (ls *LocalStorage) AbortMultipartUpload(bucketName, objectKey, uploadID string) error {
+	return os.RemoveAll(ls.multipartDir(uploadID))
+}
+
+func (ls *LocalStorage) ListParts(bucketName, objectKey, uploadID string) ([]PartInfo, error) {
+	dir := ls.multipartDir(uploadID)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("multipart upload not found: %s", uploadID)
+	}
+
+	var parts []PartInfo
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "part.") {
+			continue
+		}
+		numStr := strings.TrimPrefix(entry.Name(), "part.")
+		partNum, err := strconv.Atoi(numStr)
+		if err != nil {
+			continue
+		}
+		partPath := filepath.Join(dir, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		etag, _ := calculateMD5(partPath)
+		parts = append(parts, PartInfo{
+			PartNumber:   partNum,
+			Size:         info.Size(),
+			ETag:         etag,
+			LastModified: info.ModTime(),
+		})
+	}
+	sort.Slice(parts, func(i, j int) bool { return parts[i].PartNumber < parts[j].PartNumber })
+	return parts, nil
 }

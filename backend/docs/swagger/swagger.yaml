@@ -1,0 +1,1952 @@
+definitions:
+  api.MoveFolderRequest:
+    properties:
+      destination_prefix:
+        type: string
+      source_prefix:
+        type: string
+    required:
+    - destination_prefix
+    - source_prefix
+    type: object
+  api.MoveObjectRequest:
+    properties:
+      destination_key:
+        type: string
+      source_key:
+        type: string
+    required:
+    - destination_key
+    - source_key
+    type: object
+  api.RenameObjectRequest:
+    properties:
+      new_name:
+        type: string
+      source_key:
+        type: string
+    required:
+    - new_name
+    - source_key
+    type: object
+  models.AccessKey:
+    properties:
+      access_key:
+        type: string
+      created_at:
+        type: string
+      id:
+        type: string
+      is_active:
+        type: boolean
+      last_used_at:
+        type: string
+      user:
+        allOf:
+        - $ref: '#/definitions/models.User'
+        description: Relationships
+      user_id:
+        type: string
+    type: object
+  models.AuthResponse:
+    properties:
+      refresh_token:
+        type: string
+      token:
+        type: string
+      user:
+        $ref: '#/definitions/models.User'
+    type: object
+  models.Bucket:
+    properties:
+      created_at:
+        type: string
+      id:
+        type: string
+      is_public:
+        type: boolean
+      name:
+        type: string
+      objects:
+        items:
+          $ref: '#/definitions/models.Object'
+        type: array
+      owner:
+        allOf:
+        - $ref: '#/definitions/models.User'
+        description: Relationships
+      owner_id:
+        type: string
+      region:
+        type: string
+      s3_config:
+        $ref: '#/definitions/models.S3Configuration'
+      s3_config_id:
+        description: 'Optional: specific S3 config to use'
+        type: string
+      storage_backend:
+        description: '"local" or "s3"'
+        type: string
+      updated_at:
+        type: string
+    type: object
+  models.CreateBucketRequest:
+    properties:
+      is_public:
+        type: boolean
+      name:
+        maxLength: 63
+        minLength: 3
+        type: string
+      region:
+        type: string
+      s3_config_id:
+        description: 'Optional: specific S3 config to use'
+        type: string
+      storage_backend:
+        description: '"local" or "s3"'
+        type: string
+    required:
+    - name
+    type: object
+  models.CreatePolicyRequest:
+    properties:
+      description:
+        type: string
+      document:
+        type: string
+      name:
+        type: string
+    required:
+    - document
+    - name
+    type: object
+  models.CreateS3ConfigRequest:
+    properties:
+      access_key_id:
+        type: string
+      bucket_prefix:
+        type: string
+      endpoint:
+        type: string
+      force_path_style:
+        type: boolean
+      is_default:
+        type: boolean
+      name:
+        maxLength: 100
+        minLength: 3
+        type: string
+      region:
+        type: string
+      secret_access_key:
+        type: string
+      use_ssl:
+        type: boolean
+    required:
+    - access_key_id
+    - endpoint
+    - name
+    - region
+    - secret_access_key
+    type: object
+  models.ErrorResponse:
+    properties:
+      error:
+        type: string
+      message:
+        type: string
+    type: object
+  models.LoginRequest:
+    properties:
+      password:
+        type: string
+      username:
+        type: string
+    required:
+    - password
+    - username
+    type: object
+  models.Object:
+    properties:
+      bucket:
+        allOf:
+        - $ref: '#/definitions/models.Bucket'
+        description: Relationships
+      bucket_id:
+        type: string
+      content_type:
+        type: string
+      created_at:
+        type: string
+      etag:
+        type: string
+      id:
+        type: string
+      key:
+        description: Object name/path
+        type: string
+      metadata:
+        description: JSON metadata (nullable)
+        type: string
+      sha256:
+        description: SHA256 hash of content
+        type: string
+      size:
+        type: integer
+      updated_at:
+        type: string
+    type: object
+  models.Policy:
+    properties:
+      created_at:
+        type: string
+      description:
+        type: string
+      document:
+        description: IAM policy JSON
+        type: string
+      id:
+        type: string
+      name:
+        type: string
+      updated_at:
+        type: string
+      users:
+        description: Relationships
+        items:
+          $ref: '#/definitions/models.User'
+        type: array
+    type: object
+  models.RegisterRequest:
+    properties:
+      email:
+        type: string
+      password:
+        minLength: 8
+        type: string
+      username:
+        maxLength: 50
+        minLength: 3
+        type: string
+    required:
+    - email
+    - password
+    - username
+    type: object
+  models.S3Configuration:
+    properties:
+      access_key_id:
+        type: string
+      bucket_prefix:
+        type: string
+      buckets:
+        description: Relationships
+        items:
+          $ref: '#/definitions/models.Bucket'
+        type: array
+      created_at:
+        type: string
+      endpoint:
+        type: string
+      force_path_style:
+        type: boolean
+      id:
+        type: string
+      is_default:
+        type: boolean
+      name:
+        type: string
+      region:
+        type: string
+      updated_at:
+        type: string
+      use_ssl:
+        type: boolean
+    type: object
+  models.SuccessResponse:
+    properties:
+      data: {}
+      message:
+        type: string
+    type: object
+  models.UpdatePolicyRequest:
+    properties:
+      description:
+        type: string
+      document:
+        type: string
+      name:
+        type: string
+    type: object
+  models.UpdateS3ConfigRequest:
+    properties:
+      access_key_id:
+        type: string
+      bucket_prefix:
+        type: string
+      endpoint:
+        type: string
+      force_path_style:
+        type: boolean
+      is_default:
+        type: boolean
+      name:
+        type: string
+      region:
+        type: string
+      secret_access_key:
+        description: Only update if provided
+        type: string
+      use_ssl:
+        type: boolean
+    type: object
+  models.User:
+    properties:
+      access_keys:
+        items:
+          $ref: '#/definitions/models.AccessKey'
+        type: array
+      buckets:
+        description: Relationships
+        items:
+          $ref: '#/definitions/models.Bucket'
+        type: array
+      created_at:
+        type: string
+      email:
+        type: string
+      id:
+        type: string
+      is_admin:
+        type: boolean
+      is_locked:
+        description: Account lock status
+        type: boolean
+      policies:
+        items:
+          $ref: '#/definitions/models.Policy'
+        type: array
+      sso_email:
+        description: Email from SSO (may differ from Email)
+        type: string
+      sso_id:
+        description: Unique ID from SSO provider
+        type: string
+      sso_provider:
+        description: SSO fields
+        type: string
+      updated_at:
+        type: string
+      username:
+        type: string
+    type: object
+info:
+  contact: {}
+paths:
+  /api/access-keys:
+    get:
+      consumes:
+      - application/json
+      description: Returns all access keys (active and inactive) belonging to the
+        authenticated user. Secret key hashes are never returned.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.AccessKey'
+            type: array
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: List access keys
+      tags:
+      - access-keys
+    post:
+      consumes:
+      - application/json
+      description: Generates a new cryptographically secure access key and secret
+        key pair for the authenticated user. The secret key is returned only once
+        and cannot be retrieved again. Maximum 5 active keys per user.
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Access key and secret key (secret shown only once)
+          schema:
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Generate a new access key
+      tags:
+      - access-keys
+  /api/access-keys/{id}:
+    delete:
+      consumes:
+      - application/json
+      description: Deactivates an access key (soft delete). Users can revoke their
+        own keys; admins can revoke any key. The key record is retained for audit
+        purposes.
+      parameters:
+      - description: Access Key ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Revoke an access key
+      tags:
+      - access-keys
+  /api/access-keys/stats:
+    get:
+      consumes:
+      - application/json
+      description: Returns the count of active and total access keys for the authenticated
+        user, along with the maximum allowed keys.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Access key statistics
+          schema:
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get access key statistics
+      tags:
+      - access-keys
+  /api/auth/login:
+    post:
+      consumes:
+      - application/json
+      description: Authenticates a user with username and password and returns JWT
+        access and refresh tokens.
+      parameters:
+      - description: Login credentials
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/models.LoginRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.AuthResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      summary: Login with username and password
+      tags:
+      - auth
+  /api/auth/logout:
+    post:
+      consumes:
+      - application/json
+      description: Revokes the current access token and optionally the refresh token
+        by blacklisting their JTIs.
+      parameters:
+      - description: Optional refresh token to also revoke
+        in: body
+        name: request
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+      security:
+      - BearerAuth: []
+      summary: Logout and revoke tokens
+      tags:
+      - auth
+  /api/auth/refresh:
+    post:
+      consumes:
+      - application/json
+      description: Generates a new JWT access token using a valid refresh token.
+      parameters:
+      - description: Refresh token
+        in: body
+        name: request
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: New access token
+          schema:
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      summary: Refresh access token
+      tags:
+      - auth
+  /api/auth/register:
+    post:
+      consumes:
+      - application/json
+      description: Creates a new user account and returns JWT access and refresh tokens.
+        Registration must be enabled in server configuration.
+      parameters:
+      - description: Registration credentials
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/models.RegisterRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.AuthResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      summary: Register a new user
+      tags:
+      - auth
+  /api/buckets:
+    get:
+      consumes:
+      - application/json
+      description: Returns all buckets the authenticated user has access to. Admins
+        see all buckets; regular users see only buckets permitted by their attached
+        policies.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.Bucket'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: List buckets
+      tags:
+      - buckets
+    post:
+      consumes:
+      - application/json
+      description: Admin-only. Creates a new storage bucket. If the bucket already
+        exists in the storage backend, it is linked rather than re-created.
+      parameters:
+      - description: Bucket configuration
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/models.CreateBucketRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.Bucket'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Create a bucket
+      tags:
+      - buckets
+  /api/buckets/{name}:
+    delete:
+      consumes:
+      - application/json
+      description: Admin-only. Deletes a bucket and all its objects from both the
+        database and the storage backend.
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Delete a bucket
+      tags:
+      - buckets
+    get:
+      consumes:
+      - application/json
+      description: Returns the details of a specific bucket by name. Requires GetBucketLocation
+        permission.
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Bucket'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get a bucket
+      tags:
+      - buckets
+  /api/buckets/{name}/folders/move:
+    post:
+      consumes:
+      - application/json
+      description: Moves all objects under the specified source prefix to a new destination
+        prefix within the same bucket. Cannot move a folder into itself.
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Source and destination folder prefixes
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.MoveFolderRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Move result with count of moved objects
+          schema:
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Move a folder
+      tags:
+      - buckets
+  /api/buckets/{name}/objects:
+    get:
+      consumes:
+      - application/json
+      description: Returns objects stored in the specified bucket. Supports prefix
+        filtering and pagination. For S3-backed buckets, automatically syncs new and
+        removed objects from the storage backend.
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Filter objects by key prefix
+        in: query
+        name: prefix
+        type: string
+      - description: Maximum number of objects to return (default 1000, max 1000)
+        in: query
+        name: max-keys
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: List of objects with count
+          schema:
+            type: object
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: List objects in a bucket
+      tags:
+      - buckets
+    post:
+      consumes:
+      - multipart/form-data
+      description: Uploads a file to the specified bucket. The content type is detected
+        from file magic bytes. Requires PutObject permission.
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Object key (path within bucket)
+        in: formData
+        name: key
+        required: true
+        type: string
+      - description: File to upload
+        in: formData
+        name: file
+        required: true
+        type: file
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Upload result with ETag and content type
+          schema:
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: Request Entity Too Large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Upload an object
+      tags:
+      - buckets
+  /api/buckets/{name}/objects/{key}:
+    delete:
+      description: Deletes an object and its metadata from the specified bucket. Requires
+        DeleteObject permission.
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Object key
+        in: path
+        name: key
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Delete an object
+      tags:
+      - buckets
+    get:
+      description: Streams the content of an object from the specified bucket. Add
+        ?download=true to force a download attachment. Requires GetObject permission.
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Object key
+        in: path
+        name: key
+        required: true
+        type: string
+      - description: Set to 'true' to force download attachment
+        in: query
+        name: download
+        type: string
+      produces:
+      - application/octet-stream
+      responses:
+        "200":
+          description: Object content
+          schema:
+            type: file
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Download an object
+      tags:
+      - buckets
+    head:
+      description: Returns HTTP headers with metadata (Content-Type, Content-Length,
+        ETag, Last-Modified) for the specified object without returning the body.
+        Requires HeadObject permission.
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Object key
+        in: path
+        name: key
+        required: true
+        type: string
+      responses:
+        "200":
+          description: Object metadata headers
+        "403":
+          description: Permission denied
+        "404":
+          description: Object or bucket not found
+      security:
+      - BearerAuth: []
+      summary: Get object metadata (HEAD)
+      tags:
+      - buckets
+  /api/buckets/{name}/objects/move:
+    post:
+      consumes:
+      - application/json
+      description: Moves an object from one key to another within the same bucket.
+        Requires GetObject, PutObject, and DeleteObject permissions on the respective
+        keys.
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Source and destination keys
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.MoveObjectRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Move result with updated object
+          schema:
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Move an object
+      tags:
+      - buckets
+  /api/buckets/{name}/objects/rename:
+    post:
+      consumes:
+      - application/json
+      description: Renames an object by changing its filename while keeping it in
+        the same folder. The new name cannot contain slashes. Requires GetObject,
+        PutObject, and DeleteObject permissions.
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Source key and new filename
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.RenameObjectRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Rename result with updated object
+          schema:
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Rename an object
+      tags:
+      - buckets
+  /api/buckets/{name}/policy:
+    get:
+      consumes:
+      - application/json
+      description: Returns the S3-style access policy document for the specified bucket.
+        Requires GetBucketPolicy permission.
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Bucket policy document
+          schema:
+            type: object
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get bucket policy
+      tags:
+      - buckets
+    put:
+      consumes:
+      - application/json
+      description: Admin-only. Sets an S3-style access policy document on the specified
+        bucket. Requires PutBucketPolicy permission.
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Bucket policy document
+        in: body
+        name: request
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Set bucket policy
+      tags:
+      - buckets
+  /api/policies:
+    get:
+      consumes:
+      - application/json
+      description: Returns all policies for admins, or only the policies attached
+        to the authenticated user for regular users.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.Policy'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: List policies
+      tags:
+      - policies
+    post:
+      consumes:
+      - application/json
+      description: Admin-only. Creates a new IAM-style policy with a validated policy
+        document.
+      parameters:
+      - description: Policy definition
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/models.CreatePolicyRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.Policy'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Create a policy
+      tags:
+      - policies
+  /api/policies/{id}:
+    delete:
+      consumes:
+      - application/json
+      description: Admin-only. Deletes a policy. Fails if the policy is still attached
+        to any users.
+      parameters:
+      - description: Policy ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Delete a policy
+      tags:
+      - policies
+    get:
+      consumes:
+      - application/json
+      description: Admin-only. Returns the details of a specific policy by ID.
+      parameters:
+      - description: Policy ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Policy'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get a policy
+      tags:
+      - policies
+    put:
+      consumes:
+      - application/json
+      description: Admin-only. Updates an existing policy's name, description, or
+        document. The policy document is validated before saving.
+      parameters:
+      - description: Policy ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Updated policy fields
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/models.UpdatePolicyRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Policy'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Update a policy
+      tags:
+      - policies
+  /api/policies/users/{user_id}/attach:
+    post:
+      consumes:
+      - application/json
+      description: Admin-only. Attaches an existing policy to a user, granting them
+        the policy's permissions.
+      parameters:
+      - description: User ID
+        in: path
+        name: user_id
+        required: true
+        type: string
+      - description: Policy to attach
+        in: body
+        name: request
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Attach a policy to a user
+      tags:
+      - policies
+  /api/policies/users/{user_id}/detach/{policy_id}:
+    delete:
+      consumes:
+      - application/json
+      description: Admin-only. Removes the association between a policy and a user,
+        revoking those permissions.
+      parameters:
+      - description: User ID
+        in: path
+        name: user_id
+        required: true
+        type: string
+      - description: Policy ID
+        in: path
+        name: policy_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Detach a policy from a user
+      tags:
+      - policies
+  /api/s3-configs:
+    get:
+      consumes:
+      - application/json
+      description: Admin-only. Returns all S3 backend configurations stored in the
+        system.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.S3Configuration'
+            type: array
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: List S3 configurations
+      tags:
+      - s3-configs
+    post:
+      consumes:
+      - application/json
+      description: Admin-only. Creates a new S3 backend configuration. Credentials
+        are encrypted before storage. If marked as default, any existing default is
+        unset.
+      parameters:
+      - description: S3 configuration details
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/models.CreateS3ConfigRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.S3Configuration'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Create an S3 configuration
+      tags:
+      - s3-configs
+  /api/s3-configs/{id}:
+    delete:
+      consumes:
+      - application/json
+      description: Admin-only. Deletes an S3 backend configuration. Fails if any buckets
+        are currently using this configuration.
+      parameters:
+      - description: S3 Configuration ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Delete an S3 configuration
+      tags:
+      - s3-configs
+    get:
+      consumes:
+      - application/json
+      description: Admin-only. Returns the details of a specific S3 backend configuration
+        by ID.
+      parameters:
+      - description: S3 Configuration ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.S3Configuration'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get an S3 configuration
+      tags:
+      - s3-configs
+    put:
+      consumes:
+      - application/json
+      description: Admin-only. Updates an existing S3 backend configuration. New credentials
+        are encrypted before storage. The S3 config cache is invalidated on success.
+      parameters:
+      - description: S3 Configuration ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Updated S3 configuration fields
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/models.UpdateS3ConfigRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.S3Configuration'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Update an S3 configuration
+      tags:
+      - s3-configs
+  /api/users:
+    get:
+      consumes:
+      - application/json
+      description: Admin-only. Returns a list of all user accounts in the system.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.User'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: List all users
+      tags:
+      - users
+    post:
+      consumes:
+      - application/json
+      description: Admin-only. Creates a new user account with the specified credentials
+        and role.
+      parameters:
+      - description: New user details
+        in: body
+        name: request
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.User'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Create a new user
+      tags:
+      - users
+  /api/users/{id}:
+    delete:
+      consumes:
+      - application/json
+      description: Admin-only. Permanently deletes the specified user account.
+      parameters:
+      - description: User ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Delete a user
+      tags:
+      - users
+  /api/users/{id}/access-keys:
+    get:
+      consumes:
+      - application/json
+      description: Admin-only. Returns all access keys associated with the specified
+        user.
+      parameters:
+      - description: User ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.AccessKey'
+            type: array
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: List access keys for a user
+      tags:
+      - users
+  /api/users/{id}/access-keys/{key_id}:
+    delete:
+      consumes:
+      - application/json
+      description: Admin-only. Permanently deletes (hard delete) the specified access
+        key belonging to the given user.
+      parameters:
+      - description: User ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Access Key ID
+        in: path
+        name: key_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Delete a user's access key
+      tags:
+      - users
+  /api/users/{id}/lock:
+    post:
+      consumes:
+      - application/json
+      description: Admin-only. Locks a user account to prevent the user from logging
+        in. Admin accounts cannot be locked.
+      parameters:
+      - description: User ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Lock a user account
+      tags:
+      - users
+  /api/users/{id}/unlock:
+    post:
+      consumes:
+      - application/json
+      description: Admin-only. Unlocks a previously locked user account to allow login
+        again.
+      parameters:
+      - description: User ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Unlock a user account
+      tags:
+      - users
+  /api/users/me:
+    get:
+      consumes:
+      - application/json
+      description: Returns the profile of the currently authenticated user.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.User'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get current user profile
+      tags:
+      - users
+    put:
+      consumes:
+      - application/json
+      description: Updates the email and/or password of the currently authenticated
+        user.
+      parameters:
+      - description: Fields to update
+        in: body
+        name: request
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.User'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Update current user profile
+      tags:
+      - users
+swagger: "2.0"

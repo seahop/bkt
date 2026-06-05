@@ -2,6 +2,10 @@
 
 This guide explains how to mount your BKT buckets as local filesystems using s3fs-fuse.
 
+> **Endpoint:** The S3-compatible API listens on its own port — **`9000`** by
+> default — separate from the web console / REST API on `9443`. Always point
+> s3fs (and any other S3 client) at `https://<host>:9000`.
+
 ## Prerequisites
 
 1. **Install s3fs-fuse**
@@ -64,7 +68,7 @@ Mount your bucket using s3fs:
 
 ```bash
 s3fs my-bucket ~/bkt-mounts/my-bucket \
-  -o url=https://localhost:9443 \
+  -o url=https://localhost:9000 \
   -o use_path_request_style \
   -o passwd_file=~/.bkt \
   -o ssl_verify_hostname=0 \
@@ -79,7 +83,7 @@ s3fs my-bucket ~/bkt-mounts/my-bucket \
 
 ```bash
 sudo s3fs my-bucket /mnt/my-bucket \
-  -o url=https://localhost:9443 \
+  -o url=https://localhost:9000 \
   -o use_path_request_style \
   -o passwd_file=/home/<your-username>/.bkt \
   -o ssl_verify_hostname=0 \
@@ -94,7 +98,7 @@ sudo s3fs my-bucket /mnt/my-bucket \
 
 **Important Options:**
 - `my-bucket`: Replace with your actual bucket name
-- `-o url=https://localhost:9443`: Your BKT server URL
+- `-o url=https://localhost:9000`: Your BKT server URL
 - `-o passwd_file=~/.bkt`: Path to your credentials file
 - `-o use_path_request_style`: Required for BKT compatibility
 - `-o ssl_verify_hostname=0`: Disable SSL hostname verification (for self-signed certs)
@@ -157,7 +161,7 @@ To automatically mount your bucket at boot, add an entry to `/etc/fstab`:
 
 2. Add this line (adjust paths and options as needed):
    ```
-   my-bucket /home/<your-username>/bkt-mounts/my-bucket fuse.s3fs _netdev,allow_other,use_path_request_style,url=https://localhost:9443,passwd_file=/home/<your-username>/.bkt,ssl_verify_hostname=0,no_check_certificate,uid=1000,gid=1000,umask=0022 0 0
+   my-bucket /home/<your-username>/bkt-mounts/my-bucket fuse.s3fs _netdev,allow_other,use_path_request_style,url=https://localhost:9000,passwd_file=/home/<your-username>/.bkt,ssl_verify_hostname=0,no_check_certificate,uid=1000,gid=1000,umask=0022 0 0
    ```
 
    Replace `<your-username>` with your actual username and `uid=1000,gid=1000` with your actual user/group IDs (find them with `id -u` and `id -g`).
@@ -180,7 +184,7 @@ If you get "Permission Denied" errors:
   ```bash
   sudo fusermount -u /mnt/my-bucket
   sudo s3fs my-bucket /mnt/my-bucket \
-    -o url=https://localhost:9443 \
+    -o url=https://localhost:9000 \
     -o passwd_file=/home/<your-username>/.bkt \
     -o use_path_request_style \
     -o ssl_verify_hostname=0 \
@@ -224,7 +228,7 @@ If you're using self-signed certificates (common in development):
 To see detailed error messages, add the debug flag:
 ```bash
 s3fs my-bucket ~/bkt-mounts/my-bucket \
-  -o url=https://localhost:9443 \
+  -o url=https://localhost:9000 \
   -o passwd_file=~/.bkt \
   -o use_path_request_style \
   -o dbglevel=info \
@@ -240,7 +244,7 @@ For better performance:
 1. **Enable caching**:
    ```bash
    s3fs my-bucket ~/bkt-mounts/my-bucket \
-     -o url=https://localhost:9443 \
+     -o url=https://localhost:9000 \
      -o passwd_file=~/.bkt \
      -o use_path_request_style \
      -o use_cache=/tmp/s3fs-cache \
@@ -282,7 +286,7 @@ Create a script to mount multiple buckets:
 
 BUCKETS=("data" "backups" "media")
 MOUNT_BASE=~/bkt-mounts
-BKT_URL="https://localhost:9443"
+BKT_URL="https://localhost:9000"
 
 for bucket in "${BUCKETS[@]}"; do
     echo "Mounting $bucket..."

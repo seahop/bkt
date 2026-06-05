@@ -1348,6 +1348,11 @@ Manage external S3-compatible storage backends (admin only).
 
 The S3-compatible API enables tools like `s3fs-fuse`, AWS CLI, and other S3 clients to interact with bkt.
 
+> **Endpoint:** The S3 API listens on its own port — **`9000`** by default —
+> separate from the console / REST API (`9443`). Point your S3 client at
+> `https://<host>:9000` (e.g. `aws --endpoint-url https://localhost:9000 s3 ls`).
+> S3 clients address buckets at the host root, which is why this is a dedicated port.
+
 ### Authentication
 
 Uses **AWS Signature V4** with access keys generated from the bkt API.

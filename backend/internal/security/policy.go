@@ -17,6 +17,7 @@ type PolicyDocument struct {
 type PolicyStatement struct {
 	Sid       string                 `json:"Sid,omitempty"`       // Statement ID
 	Effect    string                 `json:"Effect"`              // "Allow" or "Deny"
+	Principal interface{}            `json:"Principal,omitempty"` // Optional: "*" or [usernames]. Absent = applies to all. Used by bucket policies to scope a statement to specific users.
 	Action    []string               `json:"Action"`              // Actions this statement applies to
 	Resource  []string               `json:"Resource"`            // Resources this statement applies to
 	Condition map[string]interface{} `json:"Condition,omitempty"` // Conditions for the statement
@@ -30,9 +31,21 @@ const (
 	EffectDeny  PolicyEffect = "Deny"
 )
 
+// PolicyResult is the tri-state outcome of evaluating a policy document.
+// Distinguishing NoMatch from Deny prevents a policy that simply doesn't
+// cover an action from being mistaken for an explicit denial.
+type PolicyResult int
+
+const (
+	PolicyNoMatch PolicyResult = iota // no statement matched — neither allow nor deny
+	PolicyAllow                       // at least one Allow statement matched, no Deny
+	PolicyDeny                        // at least one Deny statement matched
+)
+
 // PolicyEvaluationContext contains context for policy evaluation
 type PolicyEvaluationContext struct {
 	UserID     string
+	Username   string // requesting user, for Principal matching
 	Action     string
 	Resource   string
 	IsAdmin    bool
@@ -132,6 +145,13 @@ func validateStatement(stmt *PolicyStatement, index int) error {
 	if stmt.Sid != "" {
 		if err := validateSid(stmt.Sid); err != nil {
 			return fmt.Errorf("invalid Sid: %w", err)
+		}
+	}
+
+	// Validate Principal (if present)
+	if stmt.Principal != nil {
+		if err := validatePrincipal(stmt.Principal); err != nil {
+			return err
 		}
 	}
 
@@ -237,6 +257,35 @@ func validateSid(sid string) error {
 	return nil
 }
 
+// validatePrincipal validates a Principal field: it must be a string ("*" or a
+// username) or an array of such strings. The AWS object form ({"AWS": …}) is
+// intentionally rejected — bkt principals are usernames.
+func validatePrincipal(principal interface{}) error {
+	switch p := principal.(type) {
+	case string:
+		if len(p) > 200 {
+			return fmt.Errorf("principal too long (max 200 characters)")
+		}
+		return nil
+	case []interface{}:
+		if len(p) > 50 {
+			return fmt.Errorf("statement cannot contain more than 50 principals")
+		}
+		for _, v := range p {
+			s, ok := v.(string)
+			if !ok {
+				return fmt.Errorf("principal entries must be strings")
+			}
+			if len(s) > 200 {
+				return fmt.Errorf("principal too long (max 200 characters)")
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("principal must be a string or an array of strings")
+	}
+}
+
 // isAlphanumeric checks if a string contains only alphanumeric characters
 func isAlphanumeric(s string) bool {
 	matched, _ := regexp.MatchString("^[a-zA-Z0-9]+$", s)
@@ -249,88 +298,113 @@ func isAlphanumericOrWildcard(s string) bool {
 	return matched
 }
 
-// EvaluatePolicy evaluates a policy document against a context
-// Returns true if access is allowed, false if denied
-// DENY-BY-DEFAULT: Returns false if no explicit allow is found
-// EXPLICIT DENY WINS: If any deny is found, access is denied regardless of allows
-func EvaluatePolicy(policy *PolicyDocument, ctx *PolicyEvaluationContext) bool {
+// EvaluatePolicy evaluates a policy document against a context and returns a PolicyResult.
+// PolicyDeny wins over PolicyAllow. PolicyNoMatch is returned when no statement covers
+// the action+resource — callers must treat NoMatch as implicit deny.
+func EvaluatePolicy(policy *PolicyDocument, ctx *PolicyEvaluationContext) PolicyResult {
 	// Admin users bypass policy checks (superuser privilege)
 	if ctx.IsAdmin {
-		return true
+		return PolicyAllow
 	}
 
-	hasExplicitAllow := false
-	hasExplicitDeny := false
+	result := PolicyNoMatch
 
-	// Evaluate each statement
 	for _, statement := range policy.Statement {
-		// Check if statement applies to this action
+		// Principal scopes a statement to specific users (used by bucket policies);
+		// absent Principal applies to everyone.
+		if !matchesPrincipal(statement.Principal, ctx.Username) {
+			continue
+		}
 		if !matchesAction(statement.Action, ctx.Action) {
 			continue
 		}
-
-		// Check if statement applies to this resource
 		if !matchesResource(statement.Resource, ctx.Resource) {
 			continue
 		}
-
-		// Statement applies - check effect
 		if statement.Effect == string(EffectDeny) {
-			hasExplicitDeny = true
-			// Explicit deny wins - no need to check further
-			break
-		} else if statement.Effect == string(EffectAllow) {
-			hasExplicitAllow = true
+			return PolicyDeny // explicit deny wins immediately
+		}
+		if statement.Effect == string(EffectAllow) {
+			result = PolicyAllow
 		}
 	}
 
-	// DENY OVERRIDES ALLOW
-	if hasExplicitDeny {
+	return result
+}
+
+// matchesPrincipal reports whether a statement's Principal applies to the given
+// user. A nil Principal applies to everyone. "*" matches everyone; otherwise the
+// username must be listed. An unrecognized form fails closed (no match).
+func matchesPrincipal(principal interface{}, username string) bool {
+	if principal == nil {
+		return true
+	}
+	switch p := principal.(type) {
+	case string:
+		return p == "*" || p == username
+	case []interface{}:
+		for _, v := range p {
+			if s, ok := v.(string); ok && (s == "*" || s == username) {
+				return true
+			}
+		}
+		return false
+	default:
 		return false
 	}
-
-	// DENY BY DEFAULT - only allow if explicit allow found
-	return hasExplicitAllow
 }
 
-// matchesAction checks if an action matches any pattern in the list
+// matchesAction checks if an action matches any pattern in the list. Action
+// matching is case-insensitive (consistent with AWS IAM) and supports `*`
+// wildcards anywhere in the pattern (e.g. "s3:*", "s3:Get*", "*").
 func matchesAction(patterns []string, action string) bool {
+	a := strings.ToLower(action)
 	for _, pattern := range patterns {
-		if pattern == "*" {
+		if globMatch(strings.ToLower(pattern), a) {
 			return true
-		}
-		if pattern == action {
-			return true
-		}
-		// Handle wildcards like "s3:*"
-		if strings.HasSuffix(pattern, ":*") {
-			service := strings.TrimSuffix(pattern, ":*")
-			if strings.HasPrefix(action, service+":") {
-				return true
-			}
 		}
 	}
 	return false
 }
 
-// matchesResource checks if a resource matches any pattern in the list
+// matchesResource checks if a resource matches any pattern in the list. Resource
+// matching is case-SENSITIVE (object keys are case-sensitive in S3) and supports
+// `*` wildcards anywhere (e.g. "bucket/*", "bucket/photos/*", "*").
 func matchesResource(patterns []string, resource string) bool {
 	for _, pattern := range patterns {
-		if pattern == "*" {
+		if globMatch(pattern, resource) {
 			return true
-		}
-		if pattern == resource {
-			return true
-		}
-		// Handle wildcards like "bucket/*"
-		if strings.HasSuffix(pattern, "/*") {
-			prefix := strings.TrimSuffix(pattern, "/*")
-			if strings.HasPrefix(resource, prefix+"/") {
-				return true
-			}
 		}
 	}
 	return false
+}
+
+// globMatch reports whether s matches pattern, where `*` matches any (possibly
+// empty) sequence of characters. There are no other metacharacters. Matching is
+// exact when the pattern contains no `*`.
+func globMatch(pattern, s string) bool {
+	parts := strings.Split(pattern, "*")
+	if len(parts) == 1 {
+		return pattern == s // no wildcard → exact match
+	}
+	// First segment must be a literal prefix.
+	if !strings.HasPrefix(s, parts[0]) {
+		return false
+	}
+	s = s[len(parts[0]):]
+	// Interior segments must appear in order.
+	for _, seg := range parts[1 : len(parts)-1] {
+		if seg == "" {
+			continue
+		}
+		idx := strings.Index(s, seg)
+		if idx < 0 {
+			return false
+		}
+		s = s[idx+len(seg):]
+	}
+	// Last segment must be a literal suffix.
+	return strings.HasSuffix(s, parts[len(parts)-1])
 }
 
 // GetDefaultDenyAllPolicy returns a policy that denies all access (for safety)
@@ -359,8 +433,6 @@ func GetDefaultReadOnlyPolicy() *PolicyDocument {
 				Action: []string{
 					"s3:GetObject",
 					"s3:ListBucket",
-					"objectstore:GetObject",
-					"objectstore:ListBucket",
 				},
 				Resource: []string{"*"},
 			},

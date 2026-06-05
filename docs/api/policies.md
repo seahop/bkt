@@ -37,9 +37,15 @@ Policies use AWS IAM-compatible JSON format:
 - **Statement:** Array of policy statements (max 20)
 - **Sid:** Optional statement ID (alphanumeric, hyphens, underscores)
 - **Effect:** Either `"Allow"` or `"Deny"`
-- **Action:** Array of actions (service:action format)
+- **Principal:** Optional. `"*"` or an array of usernames. Used in **bucket policies** to scope a statement to specific users. **If omitted, the statement applies to all authenticated users** — so an Allow with no Principal grants everyone. (Ignored on user/identity policies, which are already scoped to the user they're attached to.)
+- **Action:** Array of actions (`service:action` format)
 - **Resource:** Array of resource patterns
 - **Condition:** (Future) Conditional logic
+
+### Matching
+
+- **Actions** are matched **case-insensitively** and support `*` wildcards anywhere — e.g. `s3:*`, `s3:Get*`, `*`.
+- **Resources** are matched **case-sensitively** (S3 object keys are case-sensitive) and support `*` wildcards anywhere — e.g. `arn:aws:s3:::bucket/*`, `arn:aws:s3:::bucket/photos/*`.
 
 ### Validation Rules
 
@@ -48,6 +54,7 @@ Policies use AWS IAM-compatible JSON format:
 - Actions must be in `service:action` format
 - Resources cannot contain `..` (path traversal prevention)
 - Statement must have at least one action and resource
+- Principal (if present) must be a string or an array of strings
 
 ## Endpoints
 
@@ -357,9 +364,9 @@ curl -k -X DELETE https://localhost:9443/api/policies/users/ece39642-19ac-4ea3-b
 ### Evaluation Rules
 
 1. **DENY-BY-DEFAULT**: Access is denied unless explicitly allowed
-2. **EXPLICIT DENY WINS**: If any statement denies access, it overrides all allows
+2. **EXPLICIT DENY WINS**: An explicit `Deny` overrides every `Allow` — across **both** the user's identity policies **and** the bucket (resource) policy. A user-policy Deny is honored even when a bucket policy allows the action.
 3. **ADMIN BYPASS**: Admin users automatically pass all policy checks
-4. **MULTIPLE POLICIES**: All user policies are evaluated (union of permissions)
+4. **MULTIPLE POLICIES**: All user policies plus the bucket policy are evaluated; access is granted if any of them allows and none denies (union of permissions, minus any deny)
 
 ### Evaluation Flow
 
@@ -537,5 +544,5 @@ All policies are validated before storage:
 ## Related Documentation
 
 - [Security Overview](../security/security-overview.md) - Policy security model
-- [Policy Examples](../examples/policy-examples.md) - More policy examples
 - [Admin Guide](../guides/admin-guide.md) - Policy management guide
+- [cURL Examples](../examples/curl-examples.md) - Command-line examples

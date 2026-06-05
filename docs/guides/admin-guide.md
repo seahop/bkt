@@ -265,7 +265,7 @@ As an admin, you can view any user's access keys:
 
 ```bash
 # This requires direct database access
-docker exec objectstore-db psql -U objectstore -d objectstore \
+docker exec bkt-db psql -U objectstore -d objectstore \
   -c "SELECT id, user_id, access_key, is_active, created_at, last_used_at FROM access_keys WHERE user_id = '{user_uuid}';"
 ```
 
@@ -330,7 +330,7 @@ Each bucket can use a different storage backend - either local filesystem or S3-
 
 ```bash
 # List all buckets with their storage backends and S3 configurations
-docker exec objectstore-db psql -U objectstore -d objectstore \
+docker exec bkt-db psql -U objectstore -d objectstore \
   -c "SELECT b.name, b.storage_backend, b.region, s.name as s3_config FROM buckets b LEFT JOIN s3_configurations s ON b.s3_config_id = s.id;"
 ```
 
@@ -479,7 +479,7 @@ The system uses this priority order for S3 configurations:
 curl -k https://localhost:9443/health
 
 # Database health
-docker exec objectstore-db pg_isready -U objectstore
+docker exec bkt-db pg_isready -U objectstore
 
 # Service status
 docker compose ps
@@ -526,10 +526,10 @@ ORDER BY SUM(o.size) DESC NULLS LAST;
 
 ```bash
 # Backend logs
-docker logs objectstore-backend --tail 100 -f
+docker logs bkt-backend --tail 100 -f
 
 # Database logs
-docker logs objectstore-db --tail 100 -f
+docker logs bkt-db --tail 100 -f
 
 # All services
 docker compose logs -f
@@ -585,7 +585,7 @@ backend:
 Already enabled! Verify:
 
 ```bash
-docker exec objectstore-db psql -U objectstore -d objectstore \
+docker exec bkt-db psql -U objectstore -d objectstore \
   -c "SHOW ssl;"
 ```
 
@@ -632,10 +632,10 @@ ORDER BY created_at DESC;
 
 ```bash
 # Full backup
-docker exec objectstore-db pg_dump -U objectstore objectstore > backup_$(date +%Y%m%d).sql
+docker exec bkt-db pg_dump -U objectstore objectstore > backup_$(date +%Y%m%d).sql
 
 # Compressed backup
-docker exec objectstore-db pg_dump -U objectstore objectstore | gzip > backup_$(date +%Y%m%d).sql.gz
+docker exec bkt-db pg_dump -U objectstore objectstore | gzip > backup_$(date +%Y%m%d).sql.gz
 ```
 
 ### Object Storage Backup
@@ -652,7 +652,7 @@ rsync -av --progress ./data/buckets/ /backup/location/
 
 ```bash
 # Database restore
-docker exec -i objectstore-db psql -U objectstore objectstore < backup_20251208.sql
+docker exec -i bkt-db psql -U objectstore objectstore < backup_20251208.sql
 
 # Object storage restore
 tar -xzf buckets_backup_20251208.tar.gz -C ./data/
@@ -668,7 +668,7 @@ BACKUP_DIR="/backups"
 DATE=$(date +%Y%m%d_%H%M%S)
 
 # Backup database
-docker exec objectstore-db pg_dump -U objectstore objectstore | \
+docker exec bkt-db pg_dump -U objectstore objectstore | \
   gzip > "${BACKUP_DIR}/db_${DATE}.sql.gz"
 
 # Backup object storage
@@ -715,13 +715,13 @@ docker compose up -d backend
 
 ```bash
 # Test database connectivity
-docker exec objectstore-db pg_isready -U objectstore
+docker exec bkt-db pg_isready -U objectstore
 
 # Check PostgreSQL logs
-docker logs objectstore-db
+docker logs bkt-db
 
 # Verify SSL configuration
-docker exec objectstore-db psql -U objectstore -d objectstore \
+docker exec bkt-db psql -U objectstore -d objectstore \
   -c "SHOW ssl;"
 ```
 

@@ -372,4 +372,4 @@ if __name__ == '__main__':
 - [Authentication API](authentication.md) - JWT-based authentication
 - [Policies API](policies.md) - Access control policies for keys
 - [Security Overview](../security/security-overview.md) - Security best practices
-- [Developer Guide](../guides/developer-guide.md) - Integration examples
+- [S3fs Mounting](../guides/MOUNTING.md) - Use access keys to mount buckets

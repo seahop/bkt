@@ -11,18 +11,25 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
-// S3AuthMiddleware validates AWS Signature Version 4 authentication
-// This is used for S3-compatible API requests (e.g., from s3fs-fuse)
+// S3AuthMiddleware validates AWS Signature Version 4 authentication.
+// Supports both header-based auth (standard API) and query-string auth (presigned URLs).
 func S3AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Extract authorization header
 		authHeader := c.GetHeader("Authorization")
+
+		// Detect presigned URL: no Authorization header but X-Amz-Algorithm query param present
+		if authHeader == "" && c.Query("X-Amz-Algorithm") != "" {
+			authenticatePresigned(c)
+			return
+		}
+
 		if authHeader == "" {
 			c.Header("WWW-Authenticate", "AWS4-HMAC-SHA256")
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
@@ -41,7 +48,6 @@ func S3AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Extract access key from Credential field
 		accessKey, err := extractAccessKey(authHeader)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
@@ -51,41 +57,12 @@ func S3AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Look up access key in database
-		var key models.AccessKey
-		if err := database.DB.Where("access_key = ? AND is_active = ?", accessKey, true).
-			Preload("User").First(&key).Error; err != nil {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-				"Code":    "InvalidAccessKeyId",
-				"Message": "The access key ID you provided does not exist in our records",
-			})
+		key, secretKey, ok := lookupAndDecryptKey(c, accessKey)
+		if !ok {
 			return
 		}
 
-		// Check if user is locked (use same generic message to avoid info disclosure)
-		if key.User.IsLocked {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-				"Code":    "InvalidAccessKeyId",
-				"Message": "The AWS access key ID you provided does not exist in our records",
-			})
-			return
-		}
-
-		// Decrypt secret key
-		secretKey, err := security.DecryptSecretKey(key.SecretKeyEncrypted)
-		if err != nil {
-			// Don't log access key - security risk
-			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
-				"Code":    "InternalError",
-				"Message": "We encountered an internal error. Please try again.",
-			})
-			return
-		}
-
-		// Validate signature
 		if err := validateSignature(c, authHeader, accessKey, secretKey); err != nil {
-			// Debug logging (uncomment for troubleshooting)
-			// fmt.Printf("[S3Auth] Signature validation failed: %s %s\n", c.Request.Method, c.Request.URL.Path)
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"Code":    "SignatureDoesNotMatch",
 				"Message": "The request signature we calculated does not match the signature you provided",
@@ -93,20 +70,198 @@ func S3AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Update last used timestamp (best-effort, don't fail auth if update fails)
-		now := time.Now()
-		key.LastUsedAt = &now
-		if err := database.DB.Save(&key).Error; err != nil {
-			// Don't log - not critical and avoids any credential exposure
-		}
-
-		// Set user context for downstream handlers
+		updateLastUsed(key)
 		c.Set("user_id", key.UserID)
 		c.Set("user", &key.User)
 		c.Set("is_admin", key.User.IsAdmin)
-
 		c.Next()
 	}
+}
+
+// authenticatePresigned handles query-string SigV4 authentication for presigned URLs
+func authenticatePresigned(c *gin.Context) {
+	algorithm := c.Query("X-Amz-Algorithm")
+	if algorithm != "AWS4-HMAC-SHA256" {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"Code": "InvalidArgument", "Message": "Unsupported algorithm"})
+		return
+	}
+
+	credentialParam := c.Query("X-Amz-Credential")
+	if credentialParam == "" {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"Code": "AuthorizationQueryParametersError", "Message": "X-Amz-Credential missing"})
+		return
+	}
+	// Credential format: ACCESS_KEY/date/region/service/aws4_request
+	credParts := strings.SplitN(credentialParam, "/", 2)
+	if len(credParts) < 1 {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"Code": "AuthorizationQueryParametersError", "Message": "Invalid X-Amz-Credential"})
+		return
+	}
+	accessKey := credParts[0]
+
+	// Validate timestamp and expiry
+	dateStr := c.Query("X-Amz-Date")
+	expiresStr := c.Query("X-Amz-Expires")
+	if dateStr == "" || expiresStr == "" {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"Code": "AuthorizationQueryParametersError", "Message": "Missing X-Amz-Date or X-Amz-Expires"})
+		return
+	}
+
+	requestTime, err := time.Parse("20060102T150405Z", dateStr)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"Code": "AuthorizationQueryParametersError", "Message": "Invalid X-Amz-Date"})
+		return
+	}
+
+	expiresSecs, err := strconv.ParseInt(expiresStr, 10, 64)
+	if err != nil || expiresSecs <= 0 || expiresSecs > 604800 { // max 7 days per AWS spec
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"Code": "AuthorizationQueryParametersError", "Message": "Invalid X-Amz-Expires"})
+		return
+	}
+
+	expiryTime := requestTime.Add(time.Duration(expiresSecs) * time.Second)
+	if time.Now().UTC().After(expiryTime) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"Code": "ExpiredToken", "Message": "Request has expired"})
+		return
+	}
+
+	key, secretKey, ok := lookupAndDecryptKey(c, accessKey)
+	if !ok {
+		return
+	}
+
+	if err := validatePresignedSignature(c, secretKey); err != nil {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"Code":    "SignatureDoesNotMatch",
+			"Message": "The request signature we calculated does not match the signature you provided",
+		})
+		return
+	}
+
+	updateLastUsed(key)
+	c.Set("user_id", key.UserID)
+	c.Set("user", &key.User)
+	c.Set("is_admin", key.User.IsAdmin)
+	c.Next()
+}
+
+// validatePresignedSignature validates query-string SigV4 where the signature is in X-Amz-Signature query param
+func validatePresignedSignature(c *gin.Context, secretKey string) error {
+	providedSignature := c.Query("X-Amz-Signature")
+	if providedSignature == "" {
+		return fmt.Errorf("X-Amz-Signature missing")
+	}
+
+	credentialParam := c.Query("X-Amz-Credential")
+	signedHeaders := c.Query("X-Amz-SignedHeaders")
+	if signedHeaders == "" {
+		signedHeaders = "host"
+	}
+	dateStr := c.Query("X-Amz-Date")
+
+	// Reconstruct the credential scope from X-Amz-Credential (ACCESS_KEY/scope)
+	slashIdx := strings.Index(credentialParam, "/")
+	if slashIdx < 0 {
+		return fmt.Errorf("invalid credential format")
+	}
+	credentialScope := credentialParam[slashIdx+1:]
+
+	// Build canonical request — for presigned URLs, payload hash is always UNSIGNED-PAYLOAD
+	canonicalRequest := buildPresignedCanonicalRequest(c, signedHeaders)
+	stringToSign := buildStringToSign(dateStr, credentialScope, canonicalRequest)
+	calculatedSignature := calculateSignature(secretKey, dateStr, credentialScope, stringToSign)
+
+	if !hmac.Equal([]byte(calculatedSignature), []byte(providedSignature)) {
+		return fmt.Errorf("signature mismatch")
+	}
+	return nil
+}
+
+// buildPresignedCanonicalRequest builds the canonical request for presigned URL validation.
+// Key difference from header auth: payload hash is UNSIGNED-PAYLOAD, and X-Amz-Signature
+// is excluded from the canonical query string.
+func buildPresignedCanonicalRequest(c *gin.Context, signedHeaders string) string {
+	method := c.Request.Method
+
+	canonicalURI := c.Request.URL.Path
+	if canonicalURI == "" {
+		canonicalURI = "/"
+	}
+
+	// Build canonical query string: all query params EXCEPT X-Amz-Signature, sorted
+	query := c.Request.URL.Query()
+	var queryKeys []string
+	for key := range query {
+		if key == "X-Amz-Signature" {
+			continue
+		}
+		queryKeys = append(queryKeys, key)
+	}
+	sort.Strings(queryKeys)
+
+	var queryParts []string
+	for _, key := range queryKeys {
+		encodedKey := url.QueryEscape(key)
+		for _, value := range query[key] {
+			queryParts = append(queryParts, encodedKey+"="+url.QueryEscape(value))
+		}
+	}
+	canonicalQuery := strings.Join(queryParts, "&")
+
+	// Canonical headers (typically just host for presigned)
+	headerNames := strings.Split(signedHeaders, ";")
+	var canonicalHeaders []string
+	for _, headerName := range headerNames {
+		canonicalName := http.CanonicalHeaderKey(headerName)
+		headerValue := c.Request.Header.Get(canonicalName)
+		if headerName == "host" && headerValue == "" {
+			headerValue = c.Request.Host
+		}
+		canonicalHeaders = append(canonicalHeaders, fmt.Sprintf("%s:%s\n", headerName, strings.TrimSpace(headerValue)))
+	}
+	canonicalHeadersStr := strings.Join(canonicalHeaders, "")
+
+	return fmt.Sprintf("%s\n%s\n%s\n%s\n%s\nUNSIGNED-PAYLOAD",
+		method, canonicalURI, canonicalQuery, canonicalHeadersStr, signedHeaders)
+}
+
+// lookupAndDecryptKey fetches an access key from the DB and decrypts its secret
+func lookupAndDecryptKey(c *gin.Context, accessKey string) (*models.AccessKey, string, bool) {
+	var key models.AccessKey
+	if err := database.DB.Where("access_key = ? AND is_active = ?", accessKey, true).
+		Preload("User").First(&key).Error; err != nil {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"Code":    "InvalidAccessKeyId",
+			"Message": "The access key ID you provided does not exist in our records",
+		})
+		return nil, "", false
+	}
+
+	if key.User.IsLocked {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"Code":    "InvalidAccessKeyId",
+			"Message": "The AWS access key ID you provided does not exist in our records",
+		})
+		return nil, "", false
+	}
+
+	secretKey, err := security.DecryptSecretKey(key.SecretKeyEncrypted)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
+			"Code":    "InternalError",
+			"Message": "We encountered an internal error. Please try again.",
+		})
+		return nil, "", false
+	}
+
+	return &key, secretKey, true
+}
+
+// updateLastUsed updates the access key's last used timestamp (best-effort)
+func updateLastUsed(key *models.AccessKey) {
+	now := time.Now()
+	key.LastUsedAt = &now
+	database.DB.Save(key)
 }
 
 // extractAccessKey extracts the access key from the Authorization header

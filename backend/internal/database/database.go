@@ -62,6 +62,7 @@ func Initialize(cfg *config.Config) error {
 		&models.IdempotencyKey{},
 		&models.Upload{},
 		&models.RevokedToken{},
+		&models.MultipartUpload{},
 	)
 
 	if err != nil {
@@ -97,4 +98,9 @@ func GetDB() *gorm.DB {
 // CleanupExpiredTokens deletes revoked tokens that have passed their expiry time
 func CleanupExpiredTokens() error {
 	return DB.Where("expires_at < NOW()").Delete(&models.RevokedToken{}).Error
+}
+
+// CleanupAbandonedMultipartUploads removes multipart uploads that have passed their expiry
+func CleanupAbandonedMultipartUploads() error {
+	return DB.Where("expires_at < NOW() AND status = 'in-progress'").Delete(&models.MultipartUpload{}).Error
 }

@@ -28,11 +28,12 @@ Complete index of all documentation files for bkt.
 
 ### Security
 - [docs/security/security-overview.md](security/security-overview.md) - Comprehensive security documentation
-- [TLS_SETUP.md](../TLS_SETUP.md) - TLS/SSL configuration (root directory)
-- [PHASE3_COMPLETE.md](../PHASE3_COMPLETE.md) - Phase 3 security features (root directory)
 
 ### Deployment
+- [docs/deployment/deployment-options.md](deployment/deployment-options.md) - The three ways to run bkt (omnibus, dev compose, prod/Helm)
+- [docs/deployment/configuration.md](deployment/configuration.md) - Environment-variable reference (`docker run -e …`)
 - [docs/deployment/production-checklist.md](deployment/production-checklist.md) - Production deployment checklist
+- [docs/deployment/vault-oidc-setup.md](deployment/vault-oidc-setup.md) - Vault OIDC SSO setup
 
 ### Examples
 - [docs/examples/curl-examples.md](examples/curl-examples.md) - cURL command examples
@@ -60,9 +61,7 @@ Complete index of all documentation files for bkt.
 
 ### For Security Teams
 1. [Security Overview](security/security-overview.md)
-2. [TLS Setup](../TLS_SETUP.md)
-3. [Phase 3 Security](../PHASE3_COMPLETE.md)
-4. [Production Checklist](deployment/production-checklist.md)
+2. [Production Checklist](deployment/production-checklist.md)
 
 ## Topics
 
@@ -82,9 +81,7 @@ Complete index of all documentation files for bkt.
 - [Production Checklist](deployment/production-checklist.md) - Deployment preparation
 
 ### Security & Compliance
-- [Security Overview](security/security-overview.md) - Security architecture
-- [TLS Setup](../TLS_SETUP.md) - Certificate management
-- [Phase 3 Complete](../PHASE3_COMPLETE.md) - Access control features
+- [Security Overview](security/security-overview.md) - Security architecture and access control
 
 ## File Organization
 
@@ -105,13 +102,12 @@ docs/
 ├── security/                          # Security docs
 │   └── security-overview.md
 ├── deployment/                        # Deployment guides
-│   └── production-checklist.md
+│   ├── deployment-options.md          # The three ways to run bkt
+│   ├── configuration.md               # Environment-variable reference
+│   ├── production-checklist.md
+│   └── vault-oidc-setup.md
 └── examples/                          # Code examples
     └── curl-examples.md
-
-Root directory:
-├── TLS_SETUP.md                       # TLS certificate setup
-└── PHASE3_COMPLETE.md                 # Phase 3 completion summary
 ```
 
 ## Contributing to Documentation
@@ -132,7 +128,6 @@ When adding new documentation:
    - Link to related documentation
 
 3. **Update indexes:**
-   - Add to `docs/README.md`
    - Add to this index file
    - Update related documentation links
 
@@ -161,4 +156,4 @@ Found an issue or want to improve documentation?
 
 ---
 
-**Last Updated:** 2025-12-11
+**Last Updated:** 2026-06-04

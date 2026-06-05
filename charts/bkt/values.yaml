@@ -1,0 +1,149 @@
+# bkt Helm chart values
+# Override any value with: helm install bkt ./charts/bkt --set key=value
+
+# -- Image tag to deploy for both backend and frontend.
+# Set to a specific version (e.g. "1.2.0") for production.
+global:
+  imageTag: latest
+  imagePullPolicy: IfNotPresent
+
+# ─────────────────────────────────────────
+# Backend
+# ─────────────────────────────────────────
+backend:
+  image:
+    repository: ghcr.io/seahop/bkt-backend
+    # tag: overrides global.imageTag
+    pullPolicy: ""  # falls back to global.imagePullPolicy
+
+  replicaCount: 1
+
+  service:
+    type: ClusterIP
+    port: 9443      # console: web UI + REST API
+    s3Port: 9000    # S3-compatible API
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # TLS: supply cert/key as K8s secret or disable and terminate at ingress
+  tls:
+    enabled: true
+    # Name of an existing TLS secret with keys tls.crt and tls.key
+    # Leave empty to auto-generate a self-signed cert via an init container
+    existingSecret: ""
+
+  env:
+    # REQUIRED — must be set before deploying
+    JWT_SECRET: ""
+    ENCRYPTION_KEY: ""
+    ADMIN_PASSWORD: ""
+
+    # Optional overrides
+    ADMIN_USERNAME: "admin"
+    ADMIN_EMAIL: "admin@localhost"
+    ALLOW_REGISTRATION: "false"
+    GO_ENV: "production"
+
+    # Storage backend: "local" or "s3"
+    STORAGE_BACKEND: "local"
+
+    # S3 backend settings (only needed when STORAGE_BACKEND=s3)
+    S3_ENABLED: "false"
+    S3_ENDPOINT: ""
+    S3_REGION: "us-east-1"
+    S3_ACCESS_KEY_ID: ""
+    S3_SECRET_ACCESS_KEY: ""
+    S3_BUCKET_PREFIX: ""
+    S3_USE_SSL: "true"
+    S3_FORCE_PATH_STYLE: "false"
+
+    # CORS — set to your frontend domain
+    CORS_ALLOWED_ORIGINS: ""
+
+    # Google OIDC SSO
+    GOOGLE_OIDC_ENABLED: "false"
+    GOOGLE_CLIENT_ID: ""
+    GOOGLE_CLIENT_SECRET: ""
+    GOOGLE_REDIRECT_URL: ""
+
+    # Vault OIDC SSO
+    VAULT_OIDC_ENABLED: "false"
+    VAULT_OIDC_CLIENT_ID: ""
+    VAULT_OIDC_PROVIDER_URL: ""
+    VAULT_OIDC_REDIRECT_URL: ""
+    VAULT_OIDC_SCOPES: "openid profile"
+
+    FRONTEND_URL: ""
+
+  # Persistent storage for local object storage
+  persistence:
+    enabled: true
+    storageClass: ""  # default storage class
+    size: 50Gi
+    accessMode: ReadWriteOnce
+
+  # Which env vars should be treated as Secrets (stored in K8s Secret, not ConfigMap)
+  secretEnvKeys:
+    - JWT_SECRET
+    - ENCRYPTION_KEY
+    - ADMIN_PASSWORD
+    - GOOGLE_CLIENT_SECRET
+    - S3_SECRET_ACCESS_KEY
+    - S3_ACCESS_KEY_ID
+
+# ─────────────────────────────────────────
+# ─────────────────────────────────────────
+# Ingress
+# ─────────────────────────────────────────
+# The web UI is embedded in the backend image and served on the console port,
+# so the ingress routes everything to the backend. (The S3-compatible API on
+# port 9000 is typically exposed via its own Service/LoadBalancer, not ingress.)
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations: {}
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+    # nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  hosts:
+    - host: bkt.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+    # - secretName: bkt-tls
+    #   hosts:
+    #     - bkt.example.com
+
+# ─────────────────────────────────────────
+# PostgreSQL (bitnami subchart)
+# ─────────────────────────────────────────
+# Set postgresql.enabled=false and configure backend.env.DB_* to use an external DB
+postgresql:
+  enabled: true
+  auth:
+    database: objectstore
+    username: objectstore
+    password: ""        # REQUIRED: set this before deploying
+    existingSecret: ""  # or point to an existing secret
+  primary:
+    persistence:
+      enabled: true
+      size: 10Gi
+  # SSL is managed at the app level; disable bundled SSL for simplicity in K8s
+  tls:
+    enabled: false
+
+# When postgresql.enabled=false, configure an external database:
+externalDatabase:
+  host: ""
+  port: 5432
+  database: objectstore
+  username: objectstore
+  password: ""
+  sslMode: require

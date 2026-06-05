@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "bkt.fullname" . }}-backend
+  labels:
+    {{- include "bkt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+spec:
+  replicas: {{ .Values.backend.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "bkt.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: backend
+  template:
+    metadata:
+      labels:
+        {{- include "bkt.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: backend
+    spec:
+      containers:
+        - name: backend
+          image: "{{ .Values.backend.image.repository }}:{{ include "bkt.backendTag" . }}"
+          imagePullPolicy: {{ include "bkt.backendPullPolicy" . }}
+          ports:
+            - name: https
+              containerPort: 9443
+              protocol: TCP
+            - name: s3
+              containerPort: 9000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "bkt.fullname" . }}-backend
+            - secretRef:
+                name: {{ include "bkt.fullname" . }}-backend
+          {{- if .Values.backend.tls.enabled }}
+          env:
+            - name: TLS_CERT_FILE
+              value: /certs/tls.crt
+            - name: TLS_KEY_FILE
+              value: /certs/tls.key
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9443
+              scheme: HTTPS
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 9443
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+          volumeMounts:
+            - name: bucket-data
+              mountPath: /data/buckets
+            {{- if .Values.backend.tls.enabled }}
+            - name: tls-certs
+              mountPath: /certs
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: bucket-data
+          {{- if .Values.backend.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "bkt.fullname" . }}-bucket-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if .Values.backend.tls.enabled }}
+        - name: tls-certs
+          secret:
+            secretName: {{ .Values.backend.tls.existingSecret | default (printf "%s-tls" (include "bkt.fullname" .)) }}
+        {{- end }}

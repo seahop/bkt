@@ -23,6 +23,17 @@ func NewAccessKeyHandler(cfg *config.Config) *AccessKeyHandler {
 }
 
 // GenerateAccessKey generates a new access key and secret key pair for the authenticated user
+// @Summary Generate a new access key
+// @Description Generates a new cryptographically secure access key and secret key pair for the authenticated user. The secret key is returned only once and cannot be retrieved again. Maximum 5 active keys per user.
+// @Tags access-keys
+// @Accept json
+// @Produce json
+// @Success 201 {object} object "Access key and secret key (secret shown only once)"
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 401 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/access-keys [post]
 func (h *AccessKeyHandler) GenerateAccessKey(c *gin.Context) {
 	userID, exists := c.Get("user_id")
 	if !exists {
@@ -131,6 +142,16 @@ func (h *AccessKeyHandler) GenerateAccessKey(c *gin.Context) {
 }
 
 // ListAccessKeys lists all access keys for the authenticated user
+// @Summary List access keys
+// @Description Returns all access keys (active and inactive) belonging to the authenticated user. Secret key hashes are never returned.
+// @Tags access-keys
+// @Accept json
+// @Produce json
+// @Success 200 {array} models.AccessKey
+// @Failure 401 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/access-keys [get]
 func (h *AccessKeyHandler) ListAccessKeys(c *gin.Context) {
 	userID, exists := c.Get("user_id")
 	if !exists {
@@ -154,6 +175,20 @@ func (h *AccessKeyHandler) ListAccessKeys(c *gin.Context) {
 }
 
 // RevokeAccessKey deactivates an access key (soft delete for audit trail)
+// @Summary Revoke an access key
+// @Description Deactivates an access key (soft delete). Users can revoke their own keys; admins can revoke any key. The key record is retained for audit purposes.
+// @Tags access-keys
+// @Accept json
+// @Produce json
+// @Param id path string true "Access Key ID"
+// @Success 200 {object} models.SuccessResponse
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 401 {object} models.ErrorResponse
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/access-keys/{id} [delete]
 func (h *AccessKeyHandler) RevokeAccessKey(c *gin.Context) {
 	keyID := c.Param("id")
 	userID, exists := c.Get("user_id")
@@ -240,6 +275,15 @@ func (h *AccessKeyHandler) ValidateAccessKey(accessKey, secretKey string) (*mode
 }
 
 // GetAccessKeyStats returns statistics about access keys for the user
+// @Summary Get access key statistics
+// @Description Returns the count of active and total access keys for the authenticated user, along with the maximum allowed keys.
+// @Tags access-keys
+// @Accept json
+// @Produce json
+// @Success 200 {object} object "Access key statistics"
+// @Failure 401 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/access-keys/stats [get]
 func (h *AccessKeyHandler) GetAccessKeyStats(c *gin.Context) {
 	userID, exists := c.Get("user_id")
 	if !exists {

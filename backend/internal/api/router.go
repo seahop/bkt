@@ -5,23 +5,47 @@ import (
 
 	authpkg "bkt/internal/auth"
 	"bkt/internal/config"
+	_ "bkt/docs/swagger" // swaggo generated docs
 	"bkt/internal/middleware"
+	"bkt/internal/web"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	swaggerFiles "github.com/swaggo/files"
+	ginSwagger "github.com/swaggo/gin-swagger"
 )
 
-func SetupRouter(cfg *config.Config) *gin.Engine {
+// @title bkt API
+// @version 1.0
+// @description Self-hosted S3-compatible object storage gateway
+// @contact.name bkt project
+// @contact.url https://bkt.tips
+// @license.name Apache 2.0
+// @host localhost:9443
+// @BasePath /
+// @securityDefinitions.apikey BearerAuth
+// @in header
+// @name Authorization
+
+// SetupConsoleRouter builds the browser-facing listener: the embedded web UI at
+// `/`, the REST API under `/api`, Prometheus metrics, Swagger, and health
+// probes. It deliberately has no `/:bucket` S3 routes, so the SPA can safely own
+// every unmatched path via NoRoute.
+func SetupConsoleRouter(cfg *config.Config) *gin.Engine {
 	router := gin.Default()
 
-	// Request ID middleware - adds unique ID to each request for tracing
-	router.Use(middleware.RequestIDMiddleware())
+	// Metrics + Swagger are registered before the middleware chain so they are
+	// not subject to CORS/UA validation (standard for scraping & docs).
+	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
+	router.GET("/api/docs/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
-	// User-Agent validation - prevents malformed requests
+	router.Use(middleware.RequestIDMiddleware())
+	router.Use(middleware.MetricsMiddleware())
 	router.Use(middleware.UserAgentValidationMiddleware())
 
-	// CORS configuration - loaded from environment for security (CORS_ALLOWED_ORIGINS)
-	// Defaults to development origins if not set. In production, always set explicitly.
+	// CORS — browser-facing only. With the UI served same-origin from this
+	// listener, this matters mainly for S3 clients / tooling hitting the API.
 	router.Use(cors.New(cors.Config{
 		AllowOrigins:     cfg.CORS.AllowedOrigins,
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"},
@@ -31,20 +55,68 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	}))
 
 	// Health check endpoints
-	router.GET("/health", HealthHandler)     // Full health with DB check
-	router.GET("/ready", ReadinessHandler)   // Readiness probe (for k8s)
-	router.GET("/live", LivenessHandler)     // Liveness probe (for k8s)
+	router.GET("/health", HealthHandler)   // Full health with DB check
+	router.GET("/ready", ReadinessHandler) // Readiness probe (for k8s)
+	router.GET("/live", LivenessHandler)   // Liveness probe (for k8s)
 
-	// API routes group
+	registerAPIRoutes(router, cfg)
+
+	// Embedded single-page app as the catch-all (must be last).
+	web.RegisterUI(router)
+
+	return router
+}
+
+// SetupS3Router builds the S3-compatible API listener. S3 clients (aws-cli,
+// s3fs) address buckets at the host root, so these routes own `/` and cannot
+// share a listener with the web UI.
+func SetupS3Router(cfg *config.Config) *gin.Engine {
+	router := gin.Default()
+
+	router.Use(middleware.RequestIDMiddleware())
+	router.Use(middleware.MetricsMiddleware())
+	router.Use(middleware.UserAgentValidationMiddleware())
+
+	s3Handler := NewS3APIHandler(cfg)
+	s3 := router.Group("")
+	s3.Use(middleware.S3AuthMiddleware())
+	{
+		// Service-level operations
+		s3.GET("/", s3Handler.ListBuckets)
+
+		// Bucket-level operations
+		s3.HEAD("/:bucket", s3Handler.HeadBucket)
+		s3.GET("/:bucket", s3Handler.ListObjects)
+		s3.POST("/:bucket", s3Handler.HandleBucketPost) // e.g. ?delete for bulk delete
+		s3.PUT("/:bucket", s3Handler.CreateBucket)      // Currently disabled
+
+		// Object-level operations
+		s3.HEAD("/:bucket/*key", s3Handler.HeadObject)
+		s3.GET("/:bucket/*key", s3Handler.GetObject)         // also handles ListParts (?uploadId)
+		s3.PUT("/:bucket/*key", s3Handler.PutObject)         // also handles UploadPart (?partNumber&uploadId)
+		s3.POST("/:bucket/*key", s3Handler.HandleObjectPost) // CreateMultipartUpload (?uploads) or CompleteMultipartUpload (?uploadId)
+		s3.DELETE("/:bucket/*key", s3Handler.DeleteObject)   // also handles AbortMultipartUpload (?uploadId)
+	}
+
+	return router
+}
+
+// registerAPIRoutes wires the JWT-authenticated REST API under /api onto the
+// given engine.
+func registerAPIRoutes(router *gin.Engine, cfg *config.Config) {
 	api := router.Group("/api")
 	{
 		// Auth routes (no authentication required)
 		authHandler := NewAuthHandler(cfg)
 		auth := api.Group("/auth")
 		{
-			// Apply strict rate limiting to auth endpoints (prevents brute force attacks)
-			// 5 requests per minute per IP for login/register
-			authRateLimit := middleware.RateLimitMiddleware(5, time.Minute)
+			// Auth rate limiting — configurable via AUTH_RATE_LIMIT env var.
+			// Default: 5/min (production). Set higher (e.g. 60) for testing/dev.
+			authRatePerMin := cfg.Auth.AuthRateLimit
+			if authRatePerMin <= 0 {
+				authRatePerMin = 5
+			}
+			authRateLimit := middleware.RateLimitMiddleware(authRatePerMin, time.Minute)
 
 			auth.POST("/register", authRateLimit, authHandler.Register)
 			auth.POST("/login", authRateLimit, authHandler.Login)
@@ -106,7 +178,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 				buckets.GET("", bucketHandler.ListBuckets)
 				buckets.POST("", middleware.AdminMiddleware(), bucketHandler.CreateBucket) // Admin only
 				buckets.GET("/:name", bucketHandler.GetBucket)
-				buckets.DELETE("/:name", middleware.AdminMiddleware(), bucketHandler.DeleteBucket) // Admin only
+				buckets.DELETE("/:name", middleware.AdminMiddleware(), bucketHandler.DeleteBucket)       // Admin only
 				buckets.PUT("/:name/policy", middleware.AdminMiddleware(), bucketHandler.SetBucketPolicy) // Admin only
 				buckets.GET("/:name/policy", bucketHandler.GetBucketPolicy)
 
@@ -133,12 +205,12 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			policyHandler := NewPolicyHandler(cfg)
 			policies := protected.Group("/policies")
 			{
-				policies.GET("", policyHandler.ListPolicies) // Regular users see their policies, admins see all
-				policies.POST("", middleware.AdminMiddleware(), policyHandler.CreatePolicy) // Admin only
-				policies.GET("/:id", middleware.AdminMiddleware(), policyHandler.GetPolicy) // Admin only
-				policies.PUT("/:id", middleware.AdminMiddleware(), policyHandler.UpdatePolicy) // Admin only
-				policies.DELETE("/:id", middleware.AdminMiddleware(), policyHandler.DeletePolicy) // Admin only
-				policies.POST("/users/:user_id/attach", middleware.AdminMiddleware(), policyHandler.AttachPolicyToUser) // Admin only
+				policies.GET("", policyHandler.ListPolicies)                                                              // Regular users see their policies, admins see all
+				policies.POST("", middleware.AdminMiddleware(), policyHandler.CreatePolicy)                               // Admin only
+				policies.GET("/:id", middleware.AdminMiddleware(), policyHandler.GetPolicy)                               // Admin only
+				policies.PUT("/:id", middleware.AdminMiddleware(), policyHandler.UpdatePolicy)                            // Admin only
+				policies.DELETE("/:id", middleware.AdminMiddleware(), policyHandler.DeletePolicy)                         // Admin only
+				policies.POST("/users/:user_id/attach", middleware.AdminMiddleware(), policyHandler.AttachPolicyToUser)   // Admin only
 				policies.DELETE("/users/:user_id/detach/:policy_id", middleware.AdminMiddleware(), policyHandler.DetachPolicyFromUser) // Admin only
 			}
 
@@ -158,27 +230,4 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// Logout (requires authentication)
 		api.POST("/auth/logout", middleware.AuthMiddleware(cfg.Auth.JWTSecret), authHandler.Logout)
 	}
-
-	// S3-compatible API routes (authenticated with AWS Signature V4)
-	// These routes enable s3fs-fuse and other S3 clients to mount buckets
-	s3Handler := NewS3APIHandler(cfg)
-	s3 := router.Group("")
-	s3.Use(middleware.S3AuthMiddleware())
-	{
-		// Service-level operations
-		s3.GET("/", s3Handler.ListBuckets)
-
-		// Bucket-level operations
-		s3.HEAD("/:bucket", s3Handler.HeadBucket)
-		s3.GET("/:bucket", s3Handler.ListObjects)
-		s3.PUT("/:bucket", s3Handler.CreateBucket) // Currently disabled
-
-		// Object-level operations
-		s3.HEAD("/:bucket/*key", s3Handler.HeadObject)
-		s3.GET("/:bucket/*key", s3Handler.GetObject)
-		s3.PUT("/:bucket/*key", s3Handler.PutObject)
-		s3.DELETE("/:bucket/*key", s3Handler.DeleteObject)
-	}
-
-	return router
 }

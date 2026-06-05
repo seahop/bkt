@@ -5,60 +5,82 @@ This guide will help you get up and running with bkt in minutes.
 ## Prerequisites
 
 - Docker 20.10+
-- Docker Compose 2.0+
-- Python 3.8+
-- curl or similar HTTP client
+- `curl` or similar HTTP client
+- (Docker Compose 2.0+ and Python 3.8+ only for the multi-container option)
+
+bkt exposes two ports:
+
+- **`9443`** — web console + REST API (browser, `curl`)
+- **`9000`** — S3-compatible API (`aws`, `s3fs`)
 
 ## Quick Start
 
-### 1. Clone and Setup
+The two options below get you running fastest. For the full picture — including the
+production multi-container / Helm path and how the image is built from the repo — see
+[Deployment Options](../deployment/deployment-options.md). Pick one, then continue to
+**First Steps**.
+
+### Option A — Single container (fastest)
+
+The omnibus image bundles the API, web UI, and PostgreSQL. It boots with zero
+configuration: local storage, self-signed TLS, and an auto-generated admin
+password printed to the logs.
 
 ```bash
-# Navigate to project directory
-cd /path/to/objectstore
+docker run -d --name bkt \
+  -p 9443:9443 \
+  -p 9000:9000 \
+  -v bkt-data:/data \
+  ghcr.io/seahop/bkt
 
-# Run the unified setup script (first time only)
-python3 setup.py
+# Grab the first-boot admin password (or set your own with -e ADMIN_PASSWORD=...)
+docker logs bkt | grep -A2 "admin credentials"
 ```
 
-This will:
-- Generate admin credentials (username, password, email)
-- Generate JWT secret
-- Create `.env` file with all configuration
-- Generate TLS certificates for all services
+All state (database, objects, certs, secrets) lives in the `bkt-data` volume.
 
-**IMPORTANT:** Save the admin credentials displayed by the setup script!
+You can override defaults with `-e` at run time — e.g. set your own admin password
+(`-e ADMIN_PASSWORD=...`), enable S3 (`-e S3_ENABLED=true -e S3_ACCESS_KEY_ID=... -e S3_SECRET_ACCESS_KEY=...`),
+or serve plain HTTP behind a proxy (`-e TLS_ENABLED=false`). Secrets you don't set are
+generated on first boot. Never pass secrets as build args — only at run time. See the
+full list in [Configuration](../deployment/configuration.md).
 
-### 2. Start Services
+### Option B — Docker Compose (separate Postgres)
 
 ```bash
-# Start all services
-docker compose up -d
+# Run the unified setup script (first time only) — generates the .env,
+# admin credentials, JWT secret, encryption key, and TLS certificates.
+python3 setup.py
 
-# Verify services are running
+# Start the stack, then check status
+docker compose up -d
 docker compose ps
 ```
 
-You should see:
-- `objectstore-db` (PostgreSQL)
-- `objectstore-backend` (Go API server)
-- `objectstore-frontend` (React app)
+**IMPORTANT:** Save the admin credentials displayed by the setup script!
 
-### 3. Login as Admin
+You should see `bkt-db` (PostgreSQL) and `bkt-backend` (API + embedded web UI).
+The dev compose also runs a `bkt-frontend` container that serves the UI with
+hot-reload on `https://localhost:5173`; in production the backend serves the UI
+itself on the console port.
+
+## First Steps
+
+### 1. Login as Admin
 
 ```bash
 # Use the credentials from setup.py output
 curl -k -X POST https://localhost:9443/api/auth/login \
   -H 'Content-Type: application/json' \
   -d '{
-    "username": "testadmin",
+    "username": "admin",
     "password": "YOUR_PASSWORD_FROM_SETUP"
   }'
 ```
 
 Save the `token` from the response - you'll need it for authentication.
 
-### 4. Create a Bucket
+### 2. Create a Bucket
 
 ```bash
 # Replace YOUR_TOKEN with the token from step 3
@@ -76,7 +98,7 @@ curl -k -X POST https://localhost:9443/api/buckets \
 
 You can choose `"local"` or `"s3"` for the storage backend - each bucket can use a different backend!
 
-### 5. Upload a File
+### 3. Upload a File
 
 ```bash
 # Create a test file
@@ -89,7 +111,7 @@ curl -k -X POST https://localhost:9443/api/buckets/my-first-bucket/objects \
   -F "file=@test.txt"
 ```
 
-### 6. Download the File
+### 4. Download the File
 
 ```bash
 curl -k -X GET https://localhost:9443/api/buckets/my-first-bucket/objects/test.txt \
@@ -117,15 +139,17 @@ Congratulations! 🎉 You've successfully:
 - [Security Best Practices](../security/security-overview.md)
 
 ### For Developers
-- [Developer Guide](developer-guide.md) - Integrate the API into your applications
-- [Code Examples](../examples/code-examples.md) - SDKs and code samples
+- [Full API Reference](../api/API.md) - Every REST and S3-compatible endpoint
+- [cURL Examples](../examples/curl-examples.md) - Command-line examples
+- [S3fs Mounting](MOUNTING.md) - Mount buckets as a local filesystem
 
 ## Common Tasks
 
 ### Using the Web Interface
 
-Open your browser and navigate to:
-- Frontend: https://localhost:5173
+Open the **console** in your browser:
+- Single container / production: `https://localhost:9443`
+- Dev compose (hot-reload): `https://localhost:5173` (also published on `8443`)
 
 You may need to accept the self-signed certificate warning.
 
@@ -249,30 +273,29 @@ JWT tokens expire after 24 hours. Login again to get a new token:
 curl -k -X POST https://localhost:9443/api/auth/login \
   -H 'Content-Type: application/json' \
   -d '{
-    "username": "testadmin",
+    "username": "admin",
     "password": "YOUR_PASSWORD"
   }'
 ```
 
 ## Environment Overview
 
-### Services
+### Endpoints
 
-- **Backend API**: https://localhost:9443
-- **Frontend**: https://localhost:5173 (HTTPS enabled)
-- **PostgreSQL**: localhost:5432
+- **Console (web UI + REST API)**: `https://localhost:9443`
+- **S3-compatible API**: `https://localhost:9000`
+- **PostgreSQL**: internal only (loopback in the omnibus; the `bkt-db` container in compose)
 
 ### Data Storage
 
-- **Database**: `./data/postgres`
-- **Object Files**: `./data/buckets`
-- **Certificates**: `./certs`
+- **Single container**: everything (Postgres data, objects, certs, secrets) lives under `/data` in the `bkt-data` volume
+- **Docker Compose**: database in `./data/postgres`, objects in `./data/buckets`, certs in `./certs`
 
 ### Configuration
 
-Configuration is managed via the `.env` file generated by `setup.py`.
-
-See the main README.md for environment variable details.
+The single container runs with sensible defaults and needs no config. For the
+compose path, configuration is managed via the `.env` file generated by
+`setup.py`. See the main `README.md` and `.env.example` for environment variables.
 
 ## Health Check
 
@@ -292,7 +315,7 @@ curl -k https://localhost:9443/health
 ## Default Admin Account
 
 The setup script creates a default admin account:
-- **Username**: `testadmin`
+- **Username**: `admin`
 - **Password**: Generated randomly (displayed during setup)
 - **Email**: `admin@example.com`
 
@@ -300,7 +323,7 @@ The setup script creates a default admin account:
 
 ## Getting Help
 
-- **Documentation**: See [docs/README.md](../README.md)
+- **Documentation Index**: See [docs/DOCUMENTATION_INDEX.md](../DOCUMENTATION_INDEX.md)
 - **API Reference**: See [docs/api/](../api/)
 - **Examples**: See [docs/examples/](../examples/)
 
@@ -310,10 +333,8 @@ Now that you have the basics, explore more features:
 
 - **Policies**: Create fine-grained access control policies
 - **Public Buckets**: Share files publicly
-- **Metadata**: Attach custom metadata to objects
-- **Web Interface**: Use the React frontend at https://localhost:5173
-- **Storage Backends**: Use local or S3 storage per bucket
+- **Storage Backends**: Use local or AWS S3 storage per bucket
 - **Folder Organization**: Create virtual folders to organize files
-- **S3 Compatibility**: Use AWS S3 SDKs (coming soon)
+- **S3 Compatibility**: Mount buckets with `s3fs` or use the AWS CLI / SDKs against the S3 endpoint on port `9000` — see [S3fs Mounting](MOUNTING.md)
 
 Happy storing! 🚀

@@ -255,6 +255,20 @@ func (h *BucketHandler) getStorageBackend(bucket *models.Bucket) (storage.Storag
 	return storageBackend, nil
 }
 
+// CreateBucket creates a new bucket
+// @Summary Create a bucket
+// @Description Admin-only. Creates a new storage bucket. If the bucket already exists in the storage backend, it is linked rather than re-created.
+// @Tags buckets
+// @Accept json
+// @Produce json
+// @Param request body models.CreateBucketRequest true "Bucket configuration"
+// @Success 201 {object} models.Bucket
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 409 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/buckets [post]
 func (h *BucketHandler) CreateBucket(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 	userUUID := userID.(uuid.UUID)
@@ -454,6 +468,16 @@ func (h *BucketHandler) CreateBucket(c *gin.Context) {
 	c.JSON(http.StatusCreated, response)
 }
 
+// ListBuckets lists accessible buckets for the authenticated user
+// @Summary List buckets
+// @Description Returns all buckets the authenticated user has access to. Admins see all buckets; regular users see only buckets permitted by their attached policies.
+// @Tags buckets
+// @Accept json
+// @Produce json
+// @Success 200 {array} models.Bucket
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/buckets [get]
 func (h *BucketHandler) ListBuckets(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 	userUUID := userID.(uuid.UUID)
@@ -511,6 +535,19 @@ func (h *BucketHandler) ListBuckets(c *gin.Context) {
 	c.JSON(http.StatusOK, accessibleBuckets)
 }
 
+// GetBucket returns details of a specific bucket
+// @Summary Get a bucket
+// @Description Returns the details of a specific bucket by name. Requires GetBucketLocation permission.
+// @Tags buckets
+// @Accept json
+// @Produce json
+// @Param name path string true "Bucket name"
+// @Success 200 {object} models.Bucket
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/buckets/{name} [get]
 func (h *BucketHandler) GetBucket(c *gin.Context) {
 	bucketName := c.Param("name")
 	userID, _ := c.Get("user_id")
@@ -544,6 +581,19 @@ func (h *BucketHandler) GetBucket(c *gin.Context) {
 	c.JSON(http.StatusOK, bucket)
 }
 
+// DeleteBucket deletes a bucket and all its contents
+// @Summary Delete a bucket
+// @Description Admin-only. Deletes a bucket and all its objects from both the database and the storage backend.
+// @Tags buckets
+// @Accept json
+// @Produce json
+// @Param name path string true "Bucket name"
+// @Success 200 {object} models.SuccessResponse
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/buckets/{name} [delete]
 func (h *BucketHandler) DeleteBucket(c *gin.Context) {
 	bucketName := c.Param("name")
 	userID, _ := c.Get("user_id")
@@ -678,6 +728,20 @@ func (h *BucketHandler) DeleteBucket(c *gin.Context) {
 	})
 }
 
+// SetBucketPolicy sets an access policy on a bucket
+// @Summary Set bucket policy
+// @Description Admin-only. Sets an S3-style access policy document on the specified bucket. Requires PutBucketPolicy permission.
+// @Tags buckets
+// @Accept json
+// @Produce json
+// @Param name path string true "Bucket name"
+// @Param request body object true "Bucket policy document" SchemaExample({"policy":"{\"Version\":\"2012-10-17\",...}"})
+// @Success 200 {object} models.SuccessResponse
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/buckets/{name}/policy [put]
 func (h *BucketHandler) SetBucketPolicy(c *gin.Context) {
 	bucketName := c.Param("name")
 	userID, _ := c.Get("user_id")
@@ -725,6 +789,19 @@ func (h *BucketHandler) SetBucketPolicy(c *gin.Context) {
 	})
 }
 
+// GetBucketPolicy retrieves the access policy for a bucket
+// @Summary Get bucket policy
+// @Description Returns the S3-style access policy document for the specified bucket. Requires GetBucketPolicy permission.
+// @Tags buckets
+// @Accept json
+// @Produce json
+// @Param name path string true "Bucket name"
+// @Success 200 {object} object "Bucket policy document"
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/buckets/{name}/policy [get]
 func (h *BucketHandler) GetBucketPolicy(c *gin.Context) {
 	bucketName := c.Param("name")
 	userID, _ := c.Get("user_id")
@@ -762,6 +839,21 @@ func (h *BucketHandler) GetBucketPolicy(c *gin.Context) {
 	})
 }
 
+// ListObjects lists objects in a bucket
+// @Summary List objects in a bucket
+// @Description Returns objects stored in the specified bucket. Supports prefix filtering and pagination. For S3-backed buckets, automatically syncs new and removed objects from the storage backend.
+// @Tags buckets
+// @Accept json
+// @Produce json
+// @Param name path string true "Bucket name"
+// @Param prefix query string false "Filter objects by key prefix"
+// @Param max-keys query string false "Maximum number of objects to return (default 1000, max 1000)"
+// @Success 200 {object} object "List of objects with count"
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/buckets/{name}/objects [get]
 func (h *BucketHandler) ListObjects(c *gin.Context) {
 	bucketName := c.Param("name")
 	userID, _ := c.Get("user_id")
@@ -946,6 +1038,23 @@ func (h *BucketHandler) ListObjects(c *gin.Context) {
 	})
 }
 
+// UploadObject uploads an object to a bucket
+// @Summary Upload an object
+// @Description Uploads a file to the specified bucket. The content type is detected from file magic bytes. Requires PutObject permission.
+// @Tags buckets
+// @Accept multipart/form-data
+// @Produce json
+// @Param name path string true "Bucket name"
+// @Param key formData string true "Object key (path within bucket)"
+// @Param file formData file true "File to upload"
+// @Success 200 {object} object "Upload result with ETag and content type"
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 413 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/buckets/{name}/objects [post]
 func (h *BucketHandler) UploadObject(c *gin.Context) {
 	bucketName := c.Param("name")
 	userID, _ := c.Get("user_id")
@@ -1184,6 +1293,20 @@ func (h *BucketHandler) UploadObject(c *gin.Context) {
 	})
 }
 
+// DownloadObject downloads an object from a bucket
+// @Summary Download an object
+// @Description Streams the content of an object from the specified bucket. Add ?download=true to force a download attachment. Requires GetObject permission.
+// @Tags buckets
+// @Produce application/octet-stream
+// @Param name path string true "Bucket name"
+// @Param key path string true "Object key"
+// @Param download query string false "Set to 'true' to force download attachment"
+// @Success 200 {file} binary "Object content"
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/buckets/{name}/objects/{key} [get]
 func (h *BucketHandler) DownloadObject(c *gin.Context) {
 	bucketName := c.Param("name")
 	objectKey := strings.TrimPrefix(c.Param("key"), "/")
@@ -1248,7 +1371,6 @@ func (h *BucketHandler) DownloadObject(c *gin.Context) {
 
 	// Set response headers
 	c.Header("Content-Type", object.ContentType)
-	c.Header("Content-Length", strconv.FormatInt(object.Size, 10))
 	c.Header("ETag", fmt.Sprintf("\"%s\"", object.ETag))
 	c.Header("Last-Modified", object.UpdatedAt.UTC().Format(http.TimeFormat))
 	c.Header("Accept-Ranges", "bytes")
@@ -1261,10 +1383,48 @@ func (h *BucketHandler) DownloadObject(c *gin.Context) {
 		c.Header("Content-Disposition", "inline")
 	}
 
-	// Stream file to response
-	c.DataFromReader(http.StatusOK, object.Size, object.ContentType, file, nil)
+	// Honor Range requests so browsers can seek media and resume downloads.
+	// We advertise Accept-Ranges, so a 200-with-full-body response to a range
+	// request corrupts the client's reassembled file.
+	if start, length, ok, satisfiable := parseRange(c.GetHeader("Range"), object.Size); ok {
+		if !satisfiable {
+			c.Header("Content-Range", fmt.Sprintf("bytes */%d", object.Size))
+			c.Status(http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		if seeker, isSeeker := file.(io.Seeker); isSeeker {
+			if _, err := seeker.Seek(start, io.SeekStart); err != nil {
+				c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to seek object", Message: err.Error()})
+				return
+			}
+		} else if _, err := io.CopyN(io.Discard, file, start); err != nil {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to read object range", Message: err.Error()})
+			return
+		}
+		c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+length-1, object.Size))
+		c.DataFromReader(http.StatusPartialContent, length, object.ContentType, io.LimitReader(file, length), nil)
+		return
+	}
+
+	// Stream file to response — cap at object.Size so the body never exceeds the
+	// declared Content-Length (multipart-assembled files may have trailing bytes).
+	c.Header("Content-Length", strconv.FormatInt(object.Size, 10))
+	c.DataFromReader(http.StatusOK, object.Size, object.ContentType, io.LimitReader(file, object.Size), nil)
 }
 
+// DeleteObject deletes an object from a bucket
+// @Summary Delete an object
+// @Description Deletes an object and its metadata from the specified bucket. Requires DeleteObject permission.
+// @Tags buckets
+// @Produce json
+// @Param name path string true "Bucket name"
+// @Param key path string true "Object key"
+// @Success 200 {object} models.SuccessResponse
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/buckets/{name}/objects/{key} [delete]
 func (h *BucketHandler) DeleteObject(c *gin.Context) {
 	bucketName := c.Param("name")
 	objectKey := strings.TrimPrefix(c.Param("key"), "/")
@@ -1339,6 +1499,17 @@ func (h *BucketHandler) DeleteObject(c *gin.Context) {
 	})
 }
 
+// HeadObject retrieves metadata headers for an object without downloading its content
+// @Summary Get object metadata (HEAD)
+// @Description Returns HTTP headers with metadata (Content-Type, Content-Length, ETag, Last-Modified) for the specified object without returning the body. Requires HeadObject permission.
+// @Tags buckets
+// @Param name path string true "Bucket name"
+// @Param key path string true "Object key"
+// @Success 200 "Object metadata headers"
+// @Failure 403 "Permission denied"
+// @Failure 404 "Object or bucket not found"
+// @Security BearerAuth
+// @Router /api/buckets/{name}/objects/{key} [head]
 func (h *BucketHandler) HeadObject(c *gin.Context) {
 	bucketName := c.Param("name")
 	objectKey := strings.TrimPrefix(c.Param("key"), "/")
@@ -1388,6 +1559,22 @@ type RenameObjectRequest struct {
 	NewName   string `json:"new_name" binding:"required"`
 }
 
+// MoveObject moves an object to a new key within the same bucket
+// @Summary Move an object
+// @Description Moves an object from one key to another within the same bucket. Requires GetObject, PutObject, and DeleteObject permissions on the respective keys.
+// @Tags buckets
+// @Accept json
+// @Produce json
+// @Param name path string true "Bucket name"
+// @Param request body MoveObjectRequest true "Source and destination keys"
+// @Success 200 {object} object "Move result with updated object"
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 409 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/buckets/{name}/objects/move [post]
 func (h *BucketHandler) MoveObject(c *gin.Context) {
 	bucketName := c.Param("name")
 	userID, _ := c.Get("user_id")
@@ -1535,6 +1722,22 @@ func (h *BucketHandler) MoveObject(c *gin.Context) {
 	})
 }
 
+// RenameObject renames an object within its current folder
+// @Summary Rename an object
+// @Description Renames an object by changing its filename while keeping it in the same folder. The new name cannot contain slashes. Requires GetObject, PutObject, and DeleteObject permissions.
+// @Tags buckets
+// @Accept json
+// @Produce json
+// @Param name path string true "Bucket name"
+// @Param request body RenameObjectRequest true "Source key and new filename"
+// @Success 200 {object} object "Rename result with updated object"
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 409 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/buckets/{name}/objects/rename [post]
 func (h *BucketHandler) RenameObject(c *gin.Context) {
 	bucketName := c.Param("name")
 	userID, _ := c.Get("user_id")
@@ -1704,6 +1907,21 @@ type MoveFolderRequest struct {
 	DestinationPrefix string `json:"destination_prefix" binding:"required"`
 }
 
+// MoveFolder moves all objects under a folder prefix to a new prefix
+// @Summary Move a folder
+// @Description Moves all objects under the specified source prefix to a new destination prefix within the same bucket. Cannot move a folder into itself.
+// @Tags buckets
+// @Accept json
+// @Produce json
+// @Param name path string true "Bucket name"
+// @Param request body MoveFolderRequest true "Source and destination folder prefixes"
+// @Success 200 {object} object "Move result with count of moved objects"
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/buckets/{name}/folders/move [post]
 func (h *BucketHandler) MoveFolder(c *gin.Context) {
 	bucketName := c.Param("name")
 	userID, _ := c.Get("user_id")

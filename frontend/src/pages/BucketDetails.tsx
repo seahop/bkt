@@ -1160,7 +1160,7 @@ export default function BucketDetails() {
                       <tr
                         key={`left-${item.id}`}
                         className={`hover:bg-dark-surfaceHover transition-colors ${
-                          draggedItem?.id === item.id ? 'opacity-50' : ''
+                          draggedItem && !draggedItem.isFolder && draggedItem.id === item.id ? 'opacity-50' : ''
                         }`}
                         draggable={!isSearchMode}
                         onContextMenu={(e) => handleContextMenu(e, 'file', 'left', item)}
@@ -1309,7 +1309,7 @@ export default function BucketDetails() {
                       <tr
                         key={`right-${item.id}`}
                         className={`hover:bg-dark-surfaceHover transition-colors ${
-                          draggedItem?.id === item.id ? 'opacity-50' : ''
+                          draggedItem && !draggedItem.isFolder && draggedItem.id === item.id ? 'opacity-50' : ''
                         }`}
                         draggable={!isSearchMode}
                         onContextMenu={(e) => handleContextMenu(e, 'file', 'right', item)}
@@ -1502,7 +1502,7 @@ export default function BucketDetails() {
                       <tr
                         key={item.id}
                         className={`hover:bg-dark-surfaceHover transition-colors ${
-                          draggedItem?.id === item.id ? 'opacity-50' : ''
+                          draggedItem && !draggedItem.isFolder && draggedItem.id === item.id ? 'opacity-50' : ''
                         }`}
                         draggable={!isSearchMode}
                         onContextMenu={(e) => handleContextMenu(e, 'file', 'single', item)}

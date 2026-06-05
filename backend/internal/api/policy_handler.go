@@ -24,6 +24,15 @@ func NewPolicyHandler(cfg *config.Config) *PolicyHandler {
 }
 
 // ListPolicies lists all policies (admin only) or user's attached policies
+// @Summary List policies
+// @Description Returns all policies for admins, or only the policies attached to the authenticated user for regular users.
+// @Tags policies
+// @Accept json
+// @Produce json
+// @Success 200 {array} models.Policy
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/policies [get]
 func (h *PolicyHandler) ListPolicies(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 	isAdmin, _ := c.Get("is_admin")
@@ -56,6 +65,19 @@ func (h *PolicyHandler) ListPolicies(c *gin.Context) {
 }
 
 // CreatePolicy creates a new policy (admin only)
+// @Summary Create a policy
+// @Description Admin-only. Creates a new IAM-style policy with a validated policy document.
+// @Tags policies
+// @Accept json
+// @Produce json
+// @Param request body models.CreatePolicyRequest true "Policy definition"
+// @Success 201 {object} models.Policy
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 409 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/policies [post]
 func (h *PolicyHandler) CreatePolicy(c *gin.Context) {
 	isAdmin, _ := c.Get("is_admin")
 
@@ -124,6 +146,18 @@ func (h *PolicyHandler) CreatePolicy(c *gin.Context) {
 }
 
 // GetPolicy gets a specific policy
+// @Summary Get a policy
+// @Description Admin-only. Returns the details of a specific policy by ID.
+// @Tags policies
+// @Accept json
+// @Produce json
+// @Param id path string true "Policy ID"
+// @Success 200 {object} models.Policy
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/policies/{id} [get]
 func (h *PolicyHandler) GetPolicy(c *gin.Context) {
 	policyID := c.Param("id")
 	isAdmin, _ := c.Get("is_admin")
@@ -157,6 +191,20 @@ func (h *PolicyHandler) GetPolicy(c *gin.Context) {
 }
 
 // UpdatePolicy updates a policy (admin only)
+// @Summary Update a policy
+// @Description Admin-only. Updates an existing policy's name, description, or document. The policy document is validated before saving.
+// @Tags policies
+// @Accept json
+// @Produce json
+// @Param id path string true "Policy ID"
+// @Param request body models.UpdatePolicyRequest true "Updated policy fields"
+// @Success 200 {object} models.Policy
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/policies/{id} [put]
 func (h *PolicyHandler) UpdatePolicy(c *gin.Context) {
 	isAdmin, _ := c.Get("is_admin")
 
@@ -236,6 +284,20 @@ func (h *PolicyHandler) UpdatePolicy(c *gin.Context) {
 }
 
 // DeletePolicy deletes a policy (admin only)
+// @Summary Delete a policy
+// @Description Admin-only. Deletes a policy. Fails if the policy is still attached to any users.
+// @Tags policies
+// @Accept json
+// @Produce json
+// @Param id path string true "Policy ID"
+// @Success 200 {object} models.SuccessResponse
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 409 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/policies/{id} [delete]
 func (h *PolicyHandler) DeletePolicy(c *gin.Context) {
 	isAdmin, _ := c.Get("is_admin")
 
@@ -288,6 +350,20 @@ func (h *PolicyHandler) DeletePolicy(c *gin.Context) {
 }
 
 // AttachPolicyToUser attaches a policy to a user (admin only)
+// @Summary Attach a policy to a user
+// @Description Admin-only. Attaches an existing policy to a user, granting them the policy's permissions.
+// @Tags policies
+// @Accept json
+// @Produce json
+// @Param user_id path string true "User ID"
+// @Param request body object true "Policy to attach" SchemaExample({"policy_id":"uuid-here"})
+// @Success 200 {object} models.SuccessResponse
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/policies/users/{user_id}/attach [post]
 func (h *PolicyHandler) AttachPolicyToUser(c *gin.Context) {
 	isAdmin, _ := c.Get("is_admin")
 
@@ -369,6 +445,20 @@ func (h *PolicyHandler) AttachPolicyToUser(c *gin.Context) {
 }
 
 // DetachPolicyFromUser detaches a policy from a user (admin only)
+// @Summary Detach a policy from a user
+// @Description Admin-only. Removes the association between a policy and a user, revoking those permissions.
+// @Tags policies
+// @Accept json
+// @Produce json
+// @Param user_id path string true "User ID"
+// @Param policy_id path string true "Policy ID"
+// @Success 200 {object} models.SuccessResponse
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/policies/users/{user_id}/detach/{policy_id} [delete]
 func (h *PolicyHandler) DetachPolicyFromUser(c *gin.Context) {
 	isAdmin, _ := c.Get("is_admin")
 

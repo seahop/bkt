@@ -2,6 +2,21 @@
 
 This checklist ensures your bkt deployment is production-ready.
 
+## Deployment models
+
+See [Deployment Options](deployment-options.md) for a full walkthrough of all three
+ways to run bkt. In short:
+
+- **Single container (omnibus)** — `ghcr.io/seahop/bkt` bundles the API, web UI,
+  and PostgreSQL. Easiest for single-node; back up the `/data` volume. Note it
+  cannot be horizontally replicated (each replica would run its own Postgres).
+- **Multi-container** — `docker-compose.prod.yml` or the Helm chart (`charts/bkt`)
+  run the UI-inclusive backend against a separate PostgreSQL, for scale-out / HA.
+
+The web UI is embedded in the backend image (served on the **console** port
+`9443`); there is no separate frontend container. The S3-compatible API is on its
+own port (`9000`).
+
 ## Pre-Deployment
 
 ### Security
@@ -82,7 +97,7 @@ This checklist ensures your bkt deployment is production-ready.
 
 - [ ] **Firewall Rules**
   - [ ] Restrict database port (5432) to backend only
-  - [ ] Expose only necessary ports (443, 9443)
+  - [ ] Expose only necessary ports (9443 console, 9000 S3 API; 443 if fronted by a proxy)
   - [ ] Configure IP whitelisting (if needed)
   - [ ] Test connectivity
 
@@ -433,7 +448,7 @@ proxy_cache_path /var/cache/nginx levels=1:2 keys_zone=my_cache:10m;
 
 ---
 
-**Last Updated:** 2025-12-08
+**Last Updated:** 2026-06-04
 **Reviewed By:** _________________
 **Approved By:** _________________
 **Date:** _________________

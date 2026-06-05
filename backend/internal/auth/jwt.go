@@ -38,6 +38,26 @@ func GenerateToken(userID uuid.UUID, username string, isAdmin bool, secret strin
 	return token.SignedString([]byte(secret))
 }
 
+// ParseTokenClaims parses a JWT and returns claims without enforcing expiry.
+// Use only for revocation on logout — never for auth decisions.
+func ParseTokenClaims(tokenString string, secret string) (*Claims, error) {
+	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
+	token, err := parser.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, ErrInvalidToken
+		}
+		return []byte(secret), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	claims, ok := token.Claims.(*Claims)
+	if !ok {
+		return nil, ErrInvalidToken
+	}
+	return claims, nil
+}
+
 // ValidateToken validates a JWT token and returns the claims
 func ValidateToken(tokenString string, secret string) (*Claims, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {

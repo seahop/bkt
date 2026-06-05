@@ -63,32 +63,19 @@ func (ps *PolicyService) CheckBucketAccess(userID uuid.UUID, bucketName, action 
 	// Build resource ARN
 	resourceARN := fmt.Sprintf("arn:aws:s3:::%s", bucketName)
 
-	// Check user policies
-	userPolicyResult := ps.evaluateUserPolicies(&user, action, resourceARN)
+	// Evaluate user (identity) and bucket (resource) policies, then combine so an
+	// explicit Deny from either source wins.
+	userResult := ps.evaluateUserPolicies(&user, action, resourceARN)
 
-	// Get bucket policy if it exists
+	bucketResult := security.PolicyNoMatch
 	var bucketPolicy models.BucketPolicy
-	hasBucketPolicy := database.DB.Where("bucket_id = ?", bucket.ID).First(&bucketPolicy).Error == nil
-
-	if hasBucketPolicy {
-		// Evaluate bucket policy
-		bucketPolicyResult, err := ps.evaluateBucketPolicy(&bucketPolicy, action, resourceARN)
-		if err != nil {
-			// If bucket policy is malformed, fall back to user policies only
-			return userPolicyResult, nil
+	if database.DB.Where("bucket_id = ?", bucket.ID).First(&bucketPolicy).Error == nil {
+		if br, perr := ps.evaluateBucketPolicy(&bucketPolicy, action, resourceARN, user.Username); perr == nil {
+			bucketResult = br
 		}
-
-		// Combine results: explicit deny wins, then explicit allow
-		// If either policy explicitly denies, deny
-		// If either policy explicitly allows (and no deny), allow
-		if bucketPolicyResult == false && userPolicyResult == false {
-			return false, nil // Both deny or neither allow
-		}
-		return bucketPolicyResult || userPolicyResult, nil
 	}
 
-	// No bucket policy - use user policies only
-	return userPolicyResult, nil
+	return decide(userResult, bucketResult), nil
 }
 
 // CheckObjectAccess checks if a user has permission to perform an action on an object
@@ -122,102 +109,87 @@ func (ps *PolicyService) CheckObjectAccess(userID uuid.UUID, bucketName, objectK
 	// Build resource ARN - for objects, include the key
 	resourceARN := fmt.Sprintf("arn:aws:s3:::%s/%s", bucketName, objectKey)
 
-	// Check user policies
-	userPolicyResult := ps.evaluateUserPolicies(&user, action, resourceARN)
+	// Evaluate user (identity) and bucket (resource) policies, then combine so an
+	// explicit Deny from either source wins.
+	userResult := ps.evaluateUserPolicies(&user, action, resourceARN)
 
-	// Get bucket policy if it exists
+	bucketResult := security.PolicyNoMatch
 	var bucketPolicy models.BucketPolicy
-	hasBucketPolicy := database.DB.Where("bucket_id = ?", bucket.ID).First(&bucketPolicy).Error == nil
-
-	if hasBucketPolicy {
-		// Evaluate bucket policy
-		bucketPolicyResult, err := ps.evaluateBucketPolicy(&bucketPolicy, action, resourceARN)
-		if err != nil {
-			// If bucket policy is malformed, fall back to user policies only
-			return userPolicyResult, nil
+	if database.DB.Where("bucket_id = ?", bucket.ID).First(&bucketPolicy).Error == nil {
+		if br, perr := ps.evaluateBucketPolicy(&bucketPolicy, action, resourceARN, user.Username); perr == nil {
+			bucketResult = br
 		}
-
-		// Combine results: explicit deny wins
-		if bucketPolicyResult == false && userPolicyResult == false {
-			return false, nil // Both deny or neither allow
-		}
-		return bucketPolicyResult || userPolicyResult, nil
 	}
 
-	// No bucket policy - use user policies only
-	return userPolicyResult, nil
+	return decide(userResult, bucketResult), nil
 }
 
-// evaluateUserPolicies evaluates all user policies
-func (ps *PolicyService) evaluateUserPolicies(user *models.User, action, resource string) bool {
-	// Admin bypass
+// evaluateUserPolicies evaluates all attached user policies and returns a
+// tri-state result. Explicit Deny anywhere wins; otherwise Allow if any policy
+// allows; otherwise NoMatch. Returning the tri-state (rather than a bool) lets
+// callers honor an explicit user Deny even when a bucket policy allows.
+func (ps *PolicyService) evaluateUserPolicies(user *models.User, action, resource string) security.PolicyResult {
 	if user.IsAdmin {
-		return true
+		return security.PolicyAllow
 	}
-
-	// No policies attached - deny by default
 	if len(user.Policies) == 0 {
-		return false
+		return security.PolicyNoMatch
 	}
 
-	hasExplicitDeny := false
-	hasExplicitAllow := false
-
-	// Evaluate each policy
+	result := security.PolicyNoMatch
 	for _, policy := range user.Policies {
-		result, err := ps.evaluatePolicy(policy.Document, action, resource, user.IsAdmin)
+		r, err := ps.evaluatePolicy(policy.Document, action, resource, user.IsAdmin, user.Username)
 		if err != nil {
-			// Skip malformed policies
-			continue
+			continue // skip malformed policies
 		}
-
-		if result == false {
-			hasExplicitDeny = true
-		} else if result == true {
-			hasExplicitAllow = true
+		switch r {
+		case security.PolicyDeny:
+			return security.PolicyDeny // explicit deny wins immediately
+		case security.PolicyAllow:
+			result = security.PolicyAllow
 		}
 	}
-
-	// Deny overrides allow (MinIO approach)
-	if hasExplicitDeny {
-		return false
-	}
-
-	// Return allow if at least one policy allows
-	return hasExplicitAllow
+	return result
 }
 
-// evaluateBucketPolicy evaluates a bucket policy
-func (ps *PolicyService) evaluateBucketPolicy(bucketPolicy *models.BucketPolicy, action, resource string) (bool, error) {
-	return ps.evaluatePolicy(bucketPolicy.PolicyDocument, action, resource, false)
+// evaluateBucketPolicy evaluates a bucket policy returning a tri-state result.
+// The requesting username is supplied so the policy's Principal can scope it.
+func (ps *PolicyService) evaluateBucketPolicy(bucketPolicy *models.BucketPolicy, action, resource, username string) (security.PolicyResult, error) {
+	return ps.evaluatePolicy(bucketPolicy.PolicyDocument, action, resource, false, username)
 }
 
-// evaluatePolicy parses and evaluates a policy document with panic recovery
-func (ps *PolicyService) evaluatePolicy(policyJSON string, action, resource string, isAdmin bool) (result bool, err error) {
-	// Recover from panics in policy evaluation (prevent resource leaks)
+// evaluatePolicy parses and evaluates a policy document with panic recovery.
+func (ps *PolicyService) evaluatePolicy(policyJSON string, action, resource string, isAdmin bool, username string) (result security.PolicyResult, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			// Convert panic to error instead of crashing the service
 			err = fmt.Errorf("policy evaluation panic: %v", r)
-			result = false
+			result = security.PolicyNoMatch
 		}
 	}()
 
-	// Parse and validate policy document
 	policyDoc, err := security.ValidatePolicyDocument(policyJSON)
 	if err != nil {
-		return false, fmt.Errorf("failed to parse policy: %w", err)
+		return security.PolicyNoMatch, fmt.Errorf("failed to parse policy: %w", err)
 	}
 
-	// Create evaluation context
 	ctx := &security.PolicyEvaluationContext{
+		Username: username,
 		Action:   action,
 		Resource: resource,
 		IsAdmin:  isAdmin,
 	}
 
-	// Evaluate using the security package
 	return security.EvaluatePolicy(policyDoc, ctx), nil
+}
+
+// decide combines a user-policy result with a bucket-policy result into a final
+// allow/deny. An explicit Deny from EITHER source wins (matching IAM semantics);
+// otherwise access is granted if EITHER source allows.
+func decide(userResult, bucketResult security.PolicyResult) bool {
+	if userResult == security.PolicyDeny || bucketResult == security.PolicyDeny {
+		return false
+	}
+	return userResult == security.PolicyAllow || bucketResult == security.PolicyAllow
 }
 
 // GetUserPolicies retrieves all policies attached to a user
@@ -327,33 +299,19 @@ func (ps *PolicyService) FilterAccessibleBuckets(userID uuid.UUID, buckets []mod
 	// Filter buckets - evaluate permissions in memory
 	accessibleBuckets := make([]models.Bucket, 0, len(buckets))
 	for _, bucket := range buckets {
-		// Build resource ARN
 		resourceARN := fmt.Sprintf("arn:aws:s3:::%s", bucket.Name)
 
-		// Check user policies
-		userPolicyResult := ps.evaluateUserPolicies(&user, action, resourceARN)
+		userResult := ps.evaluateUserPolicies(&user, action, resourceARN)
 
-		// Check bucket policy if exists
-		bucketPolicy, hasBucketPolicy := bucketPolicyMap[bucket.ID]
-		if hasBucketPolicy {
-			bucketPolicyResult, err := ps.evaluateBucketPolicy(bucketPolicy, action, resourceARN)
-			if err != nil {
-				// If bucket policy is malformed, fall back to user policies only
-				if userPolicyResult {
-					accessibleBuckets = append(accessibleBuckets, bucket)
-				}
-				continue
+		bucketResult := security.PolicyNoMatch
+		if bucketPolicy, ok := bucketPolicyMap[bucket.ID]; ok {
+			if br, perr := ps.evaluateBucketPolicy(bucketPolicy, action, resourceARN, user.Username); perr == nil {
+				bucketResult = br
 			}
+		}
 
-			// Combine results: explicit deny wins, then explicit allow
-			if bucketPolicyResult || userPolicyResult {
-				accessibleBuckets = append(accessibleBuckets, bucket)
-			}
-		} else {
-			// No bucket policy - use user policies only
-			if userPolicyResult {
-				accessibleBuckets = append(accessibleBuckets, bucket)
-			}
+		if decide(userResult, bucketResult) {
+			accessibleBuckets = append(accessibleBuckets, bucket)
 		}
 	}
 

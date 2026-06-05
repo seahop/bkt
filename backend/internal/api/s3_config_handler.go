@@ -21,6 +21,16 @@ func NewS3ConfigHandler(cfg *config.Config) *S3ConfigHandler {
 }
 
 // ListS3Configs lists all S3 configurations (admin only)
+// @Summary List S3 configurations
+// @Description Admin-only. Returns all S3 backend configurations stored in the system.
+// @Tags s3-configs
+// @Accept json
+// @Produce json
+// @Success 200 {array} models.S3Configuration
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/s3-configs [get]
 func (h *S3ConfigHandler) ListS3Configs(c *gin.Context) {
 	isAdmin, _ := c.Get("is_admin")
 
@@ -44,6 +54,19 @@ func (h *S3ConfigHandler) ListS3Configs(c *gin.Context) {
 }
 
 // CreateS3Config creates a new S3 configuration (admin only)
+// @Summary Create an S3 configuration
+// @Description Admin-only. Creates a new S3 backend configuration. Credentials are encrypted before storage. If marked as default, any existing default is unset.
+// @Tags s3-configs
+// @Accept json
+// @Produce json
+// @Param request body models.CreateS3ConfigRequest true "S3 configuration details"
+// @Success 201 {object} models.S3Configuration
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 409 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/s3-configs [post]
 func (h *S3ConfigHandler) CreateS3Config(c *gin.Context) {
 	isAdmin, _ := c.Get("is_admin")
 
@@ -145,6 +168,18 @@ func (h *S3ConfigHandler) CreateS3Config(c *gin.Context) {
 }
 
 // GetS3Config gets a specific S3 configuration (admin only)
+// @Summary Get an S3 configuration
+// @Description Admin-only. Returns the details of a specific S3 backend configuration by ID.
+// @Tags s3-configs
+// @Accept json
+// @Produce json
+// @Param id path string true "S3 Configuration ID"
+// @Success 200 {object} models.S3Configuration
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/s3-configs/{id} [get]
 func (h *S3ConfigHandler) GetS3Config(c *gin.Context) {
 	isAdmin, _ := c.Get("is_admin")
 
@@ -176,6 +211,20 @@ func (h *S3ConfigHandler) GetS3Config(c *gin.Context) {
 }
 
 // UpdateS3Config updates an S3 configuration (admin only)
+// @Summary Update an S3 configuration
+// @Description Admin-only. Updates an existing S3 backend configuration. New credentials are encrypted before storage. The S3 config cache is invalidated on success.
+// @Tags s3-configs
+// @Accept json
+// @Produce json
+// @Param id path string true "S3 Configuration ID"
+// @Param request body models.UpdateS3ConfigRequest true "Updated S3 configuration fields"
+// @Success 200 {object} models.S3Configuration
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/s3-configs/{id} [put]
 func (h *S3ConfigHandler) UpdateS3Config(c *gin.Context) {
 	isAdmin, _ := c.Get("is_admin")
 
@@ -289,6 +338,20 @@ func (h *S3ConfigHandler) UpdateS3Config(c *gin.Context) {
 }
 
 // DeleteS3Config deletes an S3 configuration (admin only)
+// @Summary Delete an S3 configuration
+// @Description Admin-only. Deletes an S3 backend configuration. Fails if any buckets are currently using this configuration.
+// @Tags s3-configs
+// @Accept json
+// @Produce json
+// @Param id path string true "S3 Configuration ID"
+// @Success 200 {object} models.SuccessResponse
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 409 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/s3-configs/{id} [delete]
 func (h *S3ConfigHandler) DeleteS3Config(c *gin.Context) {
 	isAdmin, _ := c.Get("is_admin")
 

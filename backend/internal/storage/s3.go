@@ -360,9 +360,7 @@ func (s3s *S3Storage) CopyObject(bucketName, srcKey, dstKey string) error {
 	ctx := context.Background()
 	actualBucketName := s3s.getBucketName(bucketName)
 
-	// CopySource format: bucket/key
 	copySource := fmt.Sprintf("%s/%s", actualBucketName, srcKey)
-
 	_, err := s3s.client.CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket:     aws.String(actualBucketName),
 		Key:        aws.String(dstKey),
@@ -371,6 +369,97 @@ func (s3s *S3Storage) CopyObject(bucketName, srcKey, dstKey string) error {
 	if err != nil {
 		return fmt.Errorf("failed to copy object: %w", err)
 	}
-
 	return nil
+}
+
+func (s3s *S3Storage) CreateMultipartUpload(bucketName, objectKey, contentType string) (string, error) {
+	ctx := context.Background()
+	out, err := s3s.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket:      aws.String(s3s.getBucketName(bucketName)),
+		Key:         aws.String(objectKey),
+		ContentType: aws.String(contentType),
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to create multipart upload: %w", err)
+	}
+	return aws.ToString(out.UploadId), nil
+}
+
+func (s3s *S3Storage) UploadPart(bucketName, objectKey, uploadID string, partNumber int, data io.Reader, size int64) (string, error) {
+	ctx := context.Background()
+	out, err := s3s.client.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket:        aws.String(s3s.getBucketName(bucketName)),
+		Key:           aws.String(objectKey),
+		UploadId:      aws.String(uploadID),
+		PartNumber:    aws.Int32(int32(partNumber)),
+		Body:          data,
+		ContentLength: aws.Int64(size),
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to upload part: %w", err)
+	}
+	return aws.ToString(out.ETag), nil
+}
+
+func (s3s *S3Storage) CompleteMultipartUpload(bucketName, objectKey, uploadID string, parts []CompletedPart) error {
+	ctx := context.Background()
+	awsParts := make([]types.CompletedPart, len(parts))
+	for i, p := range parts {
+		etag := p.ETag
+		awsParts[i] = types.CompletedPart{
+			PartNumber: aws.Int32(int32(p.PartNumber)),
+			ETag:       aws.String(etag),
+		}
+	}
+	_, err := s3s.client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:   aws.String(s3s.getBucketName(bucketName)),
+		Key:      aws.String(objectKey),
+		UploadId: aws.String(uploadID),
+		MultipartUpload: &types.CompletedMultipartUpload{
+			Parts: awsParts,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to complete multipart upload: %w", err)
+	}
+	return nil
+}
+
+func (s3s *S3Storage) AbortMultipartUpload(bucketName, objectKey, uploadID string) error {
+	ctx := context.Background()
+	_, err := s3s.client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(s3s.getBucketName(bucketName)),
+		Key:      aws.String(objectKey),
+		UploadId: aws.String(uploadID),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to abort multipart upload: %w", err)
+	}
+	return nil
+}
+
+func (s3s *S3Storage) ListParts(bucketName, objectKey, uploadID string) ([]PartInfo, error) {
+	ctx := context.Background()
+	out, err := s3s.client.ListParts(ctx, &s3.ListPartsInput{
+		Bucket:   aws.String(s3s.getBucketName(bucketName)),
+		Key:      aws.String(objectKey),
+		UploadId: aws.String(uploadID),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list parts: %w", err)
+	}
+	parts := make([]PartInfo, len(out.Parts))
+	for i, p := range out.Parts {
+		var lastMod time.Time
+		if p.LastModified != nil {
+			lastMod = *p.LastModified
+		}
+		parts[i] = PartInfo{
+			PartNumber:   int(aws.ToInt32(p.PartNumber)),
+			Size:         aws.ToInt64(p.Size),
+			ETag:         aws.ToString(p.ETag),
+			LastModified: lastMod,
+		}
+	}
+	return parts, nil
 }

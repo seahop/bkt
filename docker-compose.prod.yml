@@ -1,0 +1,112 @@
+# Production compose file — uses pre-built images from ghcr.io/seahop
+#
+# Usage:
+#   BKT_VERSION=1.2.0 docker compose -f docker-compose.prod.yml up -d
+#   docker compose -f docker-compose.prod.yml up -d   # uses :latest
+#
+# Before first run, make sure you have:
+#   1. Generated certs/  via setup.py
+#   2. Set required env vars in .env (DB_PASSWORD, JWT_SECRET, ENCRYPTION_KEY, ADMIN_PASSWORD)
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: bkt-db
+    entrypoint: ["/bin/bash", "/postgres-init-ssl.sh"]
+    command: >
+      postgres
+      -c ssl=on
+      -c ssl_cert_file=/var/lib/postgresql/certs/server.crt
+      -c ssl_key_file=/var/lib/postgresql/certs/server.key
+      -c ssl_ca_file=/var/lib/postgresql/certs/ca.crt
+    environment:
+      POSTGRES_USER: objectstore
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: objectstore
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./docker/postgres-init-ssl.sh:/postgres-init-ssl.sh:ro
+      - ./certs/postgres:/ssl-certs:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U objectstore"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - bkt-network
+    restart: unless-stopped
+
+  backend:
+    image: ghcr.io/seahop/bkt-backend:${BKT_VERSION:-latest}
+    container_name: bkt-backend
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: objectstore
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: objectstore
+      DB_SSL_MODE: require
+      JWT_SECRET: ${JWT_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      SERVER_PORT: 9000
+      GO_ENV: production
+      # TLS Configuration
+      TLS_ENABLED: "true"
+      TLS_CERT_FILE: /certs/backend.crt
+      TLS_KEY_FILE: /certs/backend.key
+      TLS_CA_FILE: /certs/ca.crt
+      # Admin
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@localhost}
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-false}
+      # CORS — set to your actual frontend domain in production
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://localhost}
+      # Google OIDC
+      GOOGLE_OIDC_ENABLED: ${GOOGLE_OIDC_ENABLED:-false}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URL: ${GOOGLE_REDIRECT_URL:-}
+      # Vault OIDC
+      VAULT_OIDC_ENABLED: ${VAULT_OIDC_ENABLED:-false}
+      VAULT_OIDC_CLIENT_ID: ${VAULT_OIDC_CLIENT_ID:-}
+      VAULT_OIDC_PROVIDER_URL: ${VAULT_OIDC_PROVIDER_URL:-}
+      VAULT_OIDC_REDIRECT_URL: ${VAULT_OIDC_REDIRECT_URL:-}
+      VAULT_OIDC_SCOPES: ${VAULT_OIDC_SCOPES:-openid profile}
+      FRONTEND_URL: ${FRONTEND_URL:-https://localhost}
+      # Storage
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
+      STORAGE_ROOT: /data/buckets
+      S3_ENABLED: ${S3_ENABLED:-false}
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
+      S3_BUCKET_PREFIX: ${S3_BUCKET_PREFIX:-}
+      S3_USE_SSL: ${S3_USE_SSL:-true}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}
+    ports:
+      - "9443:9443"  # console: web UI + REST API (the backend image serves the UI)
+      - "9000:9000"  # S3-compatible API (aws-cli / s3fs)
+    volumes:
+      - ./data/buckets:/data/buckets
+      - ./certs/backend:/certs:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "--no-check-certificate", "https://localhost:9443/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - bkt-network
+    restart: unless-stopped
+
+# The web UI is now embedded in the backend image and served on the console
+# port (9443) — there is no separate frontend container.
+
+networks:
+  bkt-network:
+    driver: bridge

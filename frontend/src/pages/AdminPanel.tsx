@@ -176,7 +176,9 @@ export default function AdminPanel() {
                         <div className="text-sm font-medium text-dark-text flex items-center gap-2">
                           {user.username}
                           {user.is_locked && (
-                            <Lock className="w-4 h-4 text-red-500" title="Account locked" />
+                            <span title="Account locked">
+                              <Lock className="w-4 h-4 text-red-500" />
+                            </span>
                           )}
                         </div>
                         <div className="flex gap-1 mt-1">

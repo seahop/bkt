@@ -25,6 +25,16 @@ func NewUserHandler(cfg *config.Config) *UserHandler {
 	}
 }
 
+// GetCurrentUser returns the authenticated user's profile
+// @Summary Get current user profile
+// @Description Returns the profile of the currently authenticated user.
+// @Tags users
+// @Accept json
+// @Produce json
+// @Success 200 {object} models.User
+// @Failure 404 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/users/me [get]
 func (h *UserHandler) GetCurrentUser(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 
@@ -41,6 +51,19 @@ func (h *UserHandler) GetCurrentUser(c *gin.Context) {
 	c.JSON(http.StatusOK, user)
 }
 
+// UpdateCurrentUser updates the authenticated user's profile
+// @Summary Update current user profile
+// @Description Updates the email and/or password of the currently authenticated user.
+// @Tags users
+// @Accept json
+// @Produce json
+// @Param request body object true "Fields to update" SchemaExample({"email":"user@example.com","password":"newpassword"})
+// @Success 200 {object} models.User
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/users/me [put]
 func (h *UserHandler) UpdateCurrentUser(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 
@@ -93,6 +116,19 @@ func (h *UserHandler) UpdateCurrentUser(c *gin.Context) {
 	c.JSON(http.StatusOK, user)
 }
 
+// CreateUser creates a new user account (admin only)
+// @Summary Create a new user
+// @Description Admin-only. Creates a new user account with the specified credentials and role.
+// @Tags users
+// @Accept json
+// @Produce json
+// @Param request body object true "New user details" SchemaExample({"username":"alice","email":"alice@example.com","password":"secret123","is_admin":false})
+// @Success 201 {object} models.User
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 409 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/users [post]
 func (h *UserHandler) CreateUser(c *gin.Context) {
 	var req struct {
 		Username string `json:"username" binding:"required"`
@@ -201,6 +237,16 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 	c.JSON(http.StatusCreated, user)
 }
 
+// ListUsers lists all users (admin only)
+// @Summary List all users
+// @Description Admin-only. Returns a list of all user accounts in the system.
+// @Tags users
+// @Accept json
+// @Produce json
+// @Success 200 {array} models.User
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/users [get]
 func (h *UserHandler) ListUsers(c *gin.Context) {
 	users := make([]models.User, 0)
 	// Don't preload Policies to avoid memory issues when there are many users
@@ -216,6 +262,19 @@ func (h *UserHandler) ListUsers(c *gin.Context) {
 	c.JSON(http.StatusOK, users)
 }
 
+// DeleteUser deletes a user account (admin only)
+// @Summary Delete a user
+// @Description Admin-only. Permanently deletes the specified user account.
+// @Tags users
+// @Accept json
+// @Produce json
+// @Param id path string true "User ID"
+// @Success 200 {object} models.SuccessResponse
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/users/{id} [delete]
 func (h *UserHandler) DeleteUser(c *gin.Context) {
 	userIDStr := c.Param("id")
 	userID, err := uuid.Parse(userIDStr)
@@ -288,6 +347,19 @@ func (h *UserHandler) DeleteUser(c *gin.Context) {
 }
 
 // LockUser locks a user account to prevent login
+// @Summary Lock a user account
+// @Description Admin-only. Locks a user account to prevent the user from logging in. Admin accounts cannot be locked.
+// @Tags users
+// @Accept json
+// @Produce json
+// @Param id path string true "User ID"
+// @Success 200 {object} models.SuccessResponse
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/users/{id}/lock [post]
 func (h *UserHandler) LockUser(c *gin.Context) {
 	userIDStr := c.Param("id")
 	userID, err := uuid.Parse(userIDStr)
@@ -387,6 +459,18 @@ func (h *UserHandler) LockUser(c *gin.Context) {
 }
 
 // UnlockUser unlocks a user account to allow login
+// @Summary Unlock a user account
+// @Description Admin-only. Unlocks a previously locked user account to allow login again.
+// @Tags users
+// @Accept json
+// @Produce json
+// @Param id path string true "User ID"
+// @Success 200 {object} models.SuccessResponse
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/users/{id}/unlock [post]
 func (h *UserHandler) UnlockUser(c *gin.Context) {
 	userIDStr := c.Param("id")
 	userID, err := uuid.Parse(userIDStr)
@@ -457,6 +541,18 @@ func (h *UserHandler) UnlockUser(c *gin.Context) {
 }
 
 // ListUserAccessKeys lists all access keys for a specific user (admin only)
+// @Summary List access keys for a user
+// @Description Admin-only. Returns all access keys associated with the specified user.
+// @Tags users
+// @Accept json
+// @Produce json
+// @Param id path string true "User ID"
+// @Success 200 {array} models.AccessKey
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/users/{id}/access-keys [get]
 func (h *UserHandler) ListUserAccessKeys(c *gin.Context) {
 	userIDStr := c.Param("id")
 	userID, err := uuid.Parse(userIDStr)
@@ -490,6 +586,19 @@ func (h *UserHandler) ListUserAccessKeys(c *gin.Context) {
 }
 
 // DeleteUserAccessKey deletes a specific access key for a user (admin only)
+// @Summary Delete a user's access key
+// @Description Admin-only. Permanently deletes (hard delete) the specified access key belonging to the given user.
+// @Tags users
+// @Accept json
+// @Produce json
+// @Param id path string true "User ID"
+// @Param key_id path string true "Access Key ID"
+// @Success 200 {object} models.SuccessResponse
+// @Failure 400 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/users/{id}/access-keys/{key_id} [delete]
 func (h *UserHandler) DeleteUserAccessKey(c *gin.Context) {
 	userIDStr := c.Param("id")
 	keyIDStr := c.Param("key_id")

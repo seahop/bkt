@@ -1,0 +1,42 @@
+Thank you for installing {{ .Chart.Name }} v{{ .Chart.Version }}!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  bkt — self-hosted S3-compatible storage
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{{- if .Values.ingress.enabled }}
+Access bkt at:
+  {{- range .Values.ingress.hosts }}
+  https://{{ .host }}
+  {{- end }}
+{{- else }}
+
+To access bkt locally, run:
+
+  # Console — web UI + REST API (the UI is embedded in the backend)
+  kubectl port-forward svc/{{ include "bkt.fullname" . }}-backend 9443:{{ .Values.backend.service.port }}
+
+  # S3-compatible API (aws-cli / s3fs)
+  kubectl port-forward svc/{{ include "bkt.fullname" . }}-backend 9000:{{ .Values.backend.service.s3Port }}
+
+Then open https://localhost:9443 in your browser.
+{{- end }}
+
+API Documentation (Swagger UI):
+  https://<console-host>/api/docs/
+
+Prometheus Metrics:
+  https://<console-host>/metrics
+
+Default admin credentials (change after first login):
+  Username: {{ .Values.backend.env.ADMIN_USERNAME | default "admin" }}
+  Password: (set via backend.env.ADMIN_PASSWORD)
+
+S3 Compatibility:
+  Endpoint: https://<s3-host>:9000
+  Use your bkt access keys from the Settings page.
+
+  aws configure --profile bkt
+  aws s3 ls --endpoint-url https://<s3-host>:9000 --profile bkt
+
+Documentation: https://bkt.tips

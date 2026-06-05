@@ -193,10 +193,15 @@ if len(parts) != 2 {
 ### TLS/SSL Configuration
 
 **Backend (Go):**
+
+The server runs two TLS listeners that share the same hardened config — the
+console (UI + REST API) on `9443` and the S3-compatible API on `9000`. TLS is
+required in production (`GO_ENV=production` rejects `TLS_ENABLED=false`); plain
+HTTP is only permitted in development or behind a TLS-terminating proxy.
+
 ```go
-// HTTPS only - no HTTP fallback
-httpsServer := &http.Server{
-    Addr:    ":9443",
+srv := &http.Server{
+    Addr:    ":9443", // and a second server on :9000 for the S3 API
     Handler: router,
     TLSConfig: &tls.Config{
         MinVersion: tls.VersionTLS12,
@@ -207,7 +212,7 @@ httpsServer := &http.Server{
     },
 }
 
-httpsServer.ListenAndServeTLS(certFile, keyFile)
+srv.ListenAndServeTLS(certFile, keyFile)
 ```
 
 **PostgreSQL:**
@@ -615,7 +620,6 @@ For security issues:
 
 ## Related Documentation
 
-- [TLS Setup](tls-setup.md)
-- [Policy Enforcement](policy-enforcement.md)
+- [Policies API](../api/policies.md)
 - [Admin Guide](../guides/admin-guide.md)
 - [Production Checklist](../deployment/production-checklist.md)

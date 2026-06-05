@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bkt.fullname" . }}-backend
+  labels:
+    {{- include "bkt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+spec:
+  type: {{ .Values.backend.service.type }}
+  ports:
+    - port: {{ .Values.backend.service.port }}
+      targetPort: https
+      protocol: TCP
+      name: https
+    - port: {{ .Values.backend.service.s3Port }}
+      targetPort: s3
+      protocol: TCP
+      name: s3
+  selector:
+    {{- include "bkt.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: backend

@@ -419,5 +419,5 @@ When `GOOGLE_WORKSPACE_ENABLED=true`, the system automatically syncs policies ba
 
 - [SSO Setup Guide](../guides/sso-setup.md) - Complete SSO configuration guide
 - [Access Keys API](access-keys.md) - Alternative authentication method for API access
-- [Users API](users.md) - User management endpoints
+- [Admin Guide](../guides/admin-guide.md) - User management endpoints
 - [Security Overview](../security/security-overview.md) - Comprehensive security documentation

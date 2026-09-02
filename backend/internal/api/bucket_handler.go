@@ -381,7 +381,7 @@ func (h *BucketHandler) CreateBucket(c *gin.Context) {
 		username, _ := c.Get("username")
 
 		// Log failure
-		h.auditService.LogFailure(
+		_ = h.auditService.LogFailure(
 			c,
 			userUUID,
 			username.(string),
@@ -433,7 +433,7 @@ func (h *BucketHandler) CreateBucket(c *gin.Context) {
 	username, _ := c.Get("username")
 
 	// Log success
-	h.auditService.LogSuccess(
+	_ = h.auditService.LogSuccess(
 		c,
 		userUUID,
 		username.(string),
@@ -705,7 +705,7 @@ func (h *BucketHandler) DeleteBucket(c *gin.Context) {
 
 	if err != nil {
 		// Log failure
-		h.auditService.LogFailure(
+		_ = h.auditService.LogFailure(
 			c,
 			userUUID,
 			username.(string),
@@ -730,7 +730,7 @@ func (h *BucketHandler) DeleteBucket(c *gin.Context) {
 	}
 
 	// Log success
-	h.auditService.LogSuccess(
+	_ = h.auditService.LogSuccess(
 		c,
 		userUUID,
 		username.(string),
@@ -1235,7 +1235,7 @@ func (h *BucketHandler) UploadObject(c *gin.Context) {
 		})
 		return
 	}
-	defer file.Close()
+	defer file.Close() //nolint:errcheck // best-effort close of read-only file
 
 	// Detect actual content type from file magic numbers (don't trust client)
 	detectedType, firstBytes, err := validation.DetectContentType(file)
@@ -1367,7 +1367,7 @@ func (h *BucketHandler) UploadObject(c *gin.Context) {
 
 	if err != nil {
 		// Clean up file if database operation fails
-		storageBackend.DeleteObject(bucketName, objectKey)
+		_ = storageBackend.DeleteObject(bucketName, objectKey)
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to save object metadata",
 			Message: err.Error(),
@@ -1375,11 +1375,10 @@ func (h *BucketHandler) UploadObject(c *gin.Context) {
 		return
 	}
 
-	// Retrieve the object to get the ID and timestamps for response
-	if err := database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, objectKey).First(&object).Error; err != nil {
-		// Object was created but couldn't retrieve - log but don't fail the upload
-		// The file is successfully stored, just return success without full details
-	}
+	// Retrieve the object to get the ID and timestamps for response.
+	// Best effort: if the object was created but couldn't be retrieved, the file
+	// is successfully stored, just return success without full details.
+	_ = database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, objectKey).First(&object).Error
 
 	notifyObjectEvent(&bucket, services.EventObjectCreated, objectKey, objectInfo.Size, objectInfo.ETag, newVersionID)
 
@@ -1467,7 +1466,7 @@ func (h *BucketHandler) DownloadObject(c *gin.Context) {
 		})
 		return
 	}
-	defer file.Close()
+	defer file.Close() //nolint:errcheck // best-effort close of read-only file
 
 	// Set response headers
 	c.Header("Content-Type", object.ContentType)
@@ -1813,7 +1812,7 @@ func (h *BucketHandler) MoveObject(c *gin.Context) {
 	// Delete source from storage backend
 	if err := storageBackend.DeleteObject(bucketName, req.SourceKey); err != nil {
 		// Try to rollback - delete the copy
-		storageBackend.DeleteObject(bucketName, req.DestinationKey)
+		_ = storageBackend.DeleteObject(bucketName, req.DestinationKey)
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to delete source object",
 			Message: err.Error(),
@@ -1992,7 +1991,7 @@ func (h *BucketHandler) RenameObject(c *gin.Context) {
 	// Delete source from storage backend
 	if err := storageBackend.DeleteObject(bucketName, req.SourceKey); err != nil {
 		// Try to rollback - delete the copy
-		storageBackend.DeleteObject(bucketName, destinationKey)
+		_ = storageBackend.DeleteObject(bucketName, destinationKey)
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to delete source object",
 			Message: err.Error(),
@@ -2135,7 +2134,7 @@ func (h *BucketHandler) MoveFolder(c *gin.Context) {
 		// Delete source from storage backend
 		if err := storageBackend.DeleteObject(bucketName, obj.Key); err != nil {
 			// Try to rollback - delete the copy
-			storageBackend.DeleteObject(bucketName, newKey)
+			_ = storageBackend.DeleteObject(bucketName, newKey)
 			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 				Error:   "Failed to delete source object",
 				Message: fmt.Sprintf("Failed to delete %s: %v", obj.Key, err),

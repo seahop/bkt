@@ -70,7 +70,7 @@ func (h *VaultOIDCHandler) discoverOIDC() (*oidcDiscovery, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch OIDC discovery: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck // best-effort close of response body
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("OIDC discovery returned status %s", resp.Status)
 	}
@@ -224,7 +224,7 @@ func (h *VaultOIDCHandler) HandleVaultCallback(c *gin.Context) {
 		database.DB.Preload("Policies").First(user, user.ID)
 	}
 
-	services.NewAuditService().LogSuccess(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, map[string]interface{}{"provider": "vault-oidc"})
+	_ = services.NewAuditService().LogSuccess(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, map[string]interface{}{"provider": "vault-oidc"})
 
 	// Generate our access+refresh pair (access carries the refresh JTI so
 	// logout can revoke the sibling refresh token).
@@ -301,7 +301,7 @@ func (h *VaultOIDCHandler) exchangeCodeForToken(code, codeVerifier string) (*Vau
 	if err != nil {
 		return nil, fmt.Errorf("failed to exchange code: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck // best-effort close of response body
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -406,7 +406,7 @@ func (h *VaultOIDCHandler) syncUserPolicies(user *models.User, policyNames []str
 	database.DB.Where("name IN ?", policyNames).Find(&policies)
 
 	if len(policies) > 0 {
-		database.DB.Model(user).Association("Policies").Replace(policies)
+		_ = database.DB.Model(user).Association("Policies").Replace(policies)
 	}
 }
 

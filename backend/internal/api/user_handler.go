@@ -157,9 +157,9 @@ func (h *UserHandler) UpdateCurrentUser(c *gin.Context) {
 
 	if h.auditService != nil {
 		if passwordChanged {
-			h.auditService.LogSuccess(c, user.ID, user.Username, "user.password_change", "user", user.ID.String(), user.Username, nil)
+			_ = h.auditService.LogSuccess(c, user.ID, user.Username, "user.password_change", "user", user.ID.String(), user.Username, nil)
 		} else if req.Email != "" {
-			h.auditService.LogSuccess(c, user.ID, user.Username, "user.email_change", "user", user.ID.String(), user.Username, nil)
+			_ = h.auditService.LogSuccess(c, user.ID, user.Username, "user.email_change", "user", user.ID.String(), user.Username, nil)
 		}
 	}
 
@@ -219,7 +219,7 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 		adminUsername, _ := c.Get("username")
 
 		// Log failure
-		h.auditService.LogFailure(
+		_ = h.auditService.LogFailure(
 			c,
 			adminUserID.(uuid.UUID),
 			adminUsername.(string),
@@ -267,7 +267,7 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 	adminUsername, _ := c.Get("username")
 
 	// Log success
-	h.auditService.LogSuccess(
+	_ = h.auditService.LogSuccess(
 		c,
 		adminUserID.(uuid.UUID),
 		adminUsername.(string),
@@ -379,7 +379,7 @@ func (h *UserHandler) DeleteUser(c *gin.Context) {
 		adminUsername, _ := c.Get("username")
 
 		// Log failure
-		h.auditService.LogFailure(
+		_ = h.auditService.LogFailure(
 			c,
 			adminUserID.(uuid.UUID),
 			adminUsername.(string),
@@ -406,7 +406,7 @@ func (h *UserHandler) DeleteUser(c *gin.Context) {
 	adminUsername, _ := c.Get("username")
 
 	// Log success
-	h.auditService.LogSuccess(
+	_ = h.auditService.LogSuccess(
 		c,
 		adminUserID.(uuid.UUID),
 		adminUsername.(string),
@@ -464,7 +464,7 @@ func (h *UserHandler) LockUser(c *gin.Context) {
 		adminUsername, _ := c.Get("username")
 
 		// Log denied action
-		h.auditService.LogDenied(
+		_ = h.auditService.LogDenied(
 			c,
 			adminUserID.(uuid.UUID),
 			adminUsername.(string),
@@ -496,7 +496,7 @@ func (h *UserHandler) LockUser(c *gin.Context) {
 		adminUsername, _ := c.Get("username")
 
 		// Log failure
-		h.auditService.LogFailure(
+		_ = h.auditService.LogFailure(
 			c,
 			adminUserID.(uuid.UUID),
 			adminUsername.(string),
@@ -527,7 +527,7 @@ func (h *UserHandler) LockUser(c *gin.Context) {
 	adminUsername, _ := c.Get("username")
 
 	// Log success
-	h.auditService.LogSuccess(
+	_ = h.auditService.LogSuccess(
 		c,
 		adminUserID.(uuid.UUID),
 		adminUsername.(string),
@@ -583,7 +583,7 @@ func (h *UserHandler) UnlockUser(c *gin.Context) {
 		adminUsername, _ := c.Get("username")
 
 		// Log failure
-		h.auditService.LogFailure(
+		_ = h.auditService.LogFailure(
 			c,
 			adminUserID.(uuid.UUID),
 			adminUsername.(string),
@@ -609,7 +609,7 @@ func (h *UserHandler) UnlockUser(c *gin.Context) {
 	adminUsername, _ := c.Get("username")
 
 	// Log success
-	h.auditService.LogSuccess(
+	_ = h.auditService.LogSuccess(
 		c,
 		adminUserID.(uuid.UUID),
 		adminUsername.(string),
@@ -731,7 +731,7 @@ func (h *UserHandler) DeleteUserAccessKey(c *gin.Context) {
 		adminUsername, _ := c.Get("username")
 
 		// Log failure
-		h.auditService.LogFailure(
+		_ = h.auditService.LogFailure(
 			c,
 			adminUserID.(uuid.UUID),
 			adminUsername.(string),
@@ -759,7 +759,7 @@ func (h *UserHandler) DeleteUserAccessKey(c *gin.Context) {
 	adminUsername, _ := c.Get("username")
 
 	// Log success
-	h.auditService.LogSuccess(
+	_ = h.auditService.LogSuccess(
 		c,
 		adminUserID.(uuid.UUID),
 		adminUsername.(string),

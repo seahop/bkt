@@ -180,7 +180,7 @@ func (h *GoogleOAuthHandler) HandleGoogleCallback(c *gin.Context) {
 		}
 	}
 
-	services.NewAuditService().LogSuccess(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, map[string]interface{}{"provider": "google"})
+	_ = services.NewAuditService().LogSuccess(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, map[string]interface{}{"provider": "google"})
 
 	// Generate our access+refresh pair (access carries the refresh JTI so
 	// logout can revoke the sibling refresh token).
@@ -243,7 +243,7 @@ func (h *GoogleOAuthHandler) findOrCreateUser(userInfo *GoogleUserInfo) (*models
 
 // exchangeCodeForToken exchanges an authorization code for an access token
 func (h *GoogleOAuthHandler) exchangeCodeForToken(code string) (*GoogleTokenResponse, error) {
-	tokenURL := "https://oauth2.googleapis.com/token"
+	tokenURL := "https://oauth2.googleapis.com/token" //nolint:gosec // OAuth token endpoint URL, not a credential
 
 	data := url.Values{}
 	data.Set("code", code)
@@ -256,7 +256,7 @@ func (h *GoogleOAuthHandler) exchangeCodeForToken(code string) (*GoogleTokenResp
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck // best-effort close of response body
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -286,7 +286,7 @@ func (h *GoogleOAuthHandler) getUserInfo(accessToken string) (*GoogleUserInfo, e
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck // best-effort close of response body
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)

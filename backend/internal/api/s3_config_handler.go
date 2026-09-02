@@ -168,7 +168,7 @@ func (h *S3ConfigHandler) CreateS3Config(c *gin.Context) {
 
 	{
 		uid, uname := actor(c)
-		h.auditService.LogSuccess(c, uid, uname, "s3config.create", "s3_configuration", s3Config.ID.String(), s3Config.Name, nil)
+		_ = h.auditService.LogSuccess(c, uid, uname, "s3config.create", "s3_configuration", s3Config.ID.String(), s3Config.Name, nil)
 	}
 	c.JSON(http.StatusCreated, s3Config)
 }
@@ -342,7 +342,7 @@ func (h *S3ConfigHandler) UpdateS3Config(c *gin.Context) {
 
 	{
 		uid, uname := actor(c)
-		h.auditService.LogSuccess(c, uid, uname, "s3config.update", "s3_configuration", s3Config.ID.String(), s3Config.Name, nil)
+		_ = h.auditService.LogSuccess(c, uid, uname, "s3config.update", "s3_configuration", s3Config.ID.String(), s3Config.Name, nil)
 	}
 	c.JSON(http.StatusOK, s3Config)
 }
@@ -413,7 +413,7 @@ func (h *S3ConfigHandler) DeleteS3Config(c *gin.Context) {
 
 	{
 		uid, uname := actor(c)
-		h.auditService.LogSuccess(c, uid, uname, "s3config.delete", "s3_configuration", s3Config.ID.String(), s3Config.Name, nil)
+		_ = h.auditService.LogSuccess(c, uid, uname, "s3config.delete", "s3_configuration", s3Config.ID.String(), s3Config.Name, nil)
 	}
 
 	c.JSON(http.StatusOK, models.SuccessResponse{

@@ -100,7 +100,7 @@ func (h *AccessKeyHandler) IssueTemporaryCredentials(c *gin.Context) {
 	}
 
 	uid, uname := actor(c)
-	services.NewAuditService().LogSuccess(c, uid, uname, "sts.issue", "access_key", key.ID.String(), key.AccessKey,
+	_ = services.NewAuditService().LogSuccess(c, uid, uname, "sts.issue", "access_key", key.ID.String(), key.AccessKey,
 		map[string]interface{}{"expires_at": expiresAt.UTC().Format(time.RFC3339), "read_only": req.ReadOnly})
 
 	c.JSON(http.StatusCreated, gin.H{

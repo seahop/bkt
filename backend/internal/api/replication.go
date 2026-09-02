@@ -85,7 +85,7 @@ func replicateBucket(h *BucketHandler, src, dst *models.Bucket) {
 			continue
 		}
 		werr := dstBackend.PutObject(dst.Name, s.Key, rc, s.Size, s.ContentType, jsonPtrToMap(s.Metadata))
-		rc.Close()
+		_ = rc.Close()
 		if werr != nil {
 			logger.Warn("Replication: write failed", map[string]interface{}{"bucket": dst.Name, "key": s.Key, "error": werr.Error()})
 			continue

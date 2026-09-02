@@ -60,7 +60,7 @@ func (ls *LocalStorage) GetObjectVersion(bucketName, objectKey, versionID string
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.Open(p)
+	f, err := os.Open(p) //nolint:gosec // path validated by versionPath()/resolve() containment
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("version not found")

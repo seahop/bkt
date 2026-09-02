@@ -90,7 +90,7 @@ func deliver(q queuedEvent) {
 		}
 		resp, err := notifyClient.Do(req)
 		if err == nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				return
 			}

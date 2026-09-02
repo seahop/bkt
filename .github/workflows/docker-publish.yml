@@ -52,20 +52,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
-
-      # No package-lock.json is committed, so `npm ci` and setup-node's built-in
-      # npm cache (both require a lockfile) can't be used. Cache npm's download
-      # cache manually and install with `npm install`.
-      - name: Cache npm downloads
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: npm-${{ runner.os }}-${{ hashFiles('frontend/package.json') }}
-          restore-keys: |
-            npm-${{ runner.os }}-
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Lint
         # No ESLint flat config is committed (ESLint v9 requires one), so keep

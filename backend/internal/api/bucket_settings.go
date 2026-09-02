@@ -152,7 +152,7 @@ func (h *BucketHandler) SetBucketSettings(c *gin.Context) {
 		}
 		meta[k] = updates[k]
 	}
-	h.auditService.LogSuccess(c, userUUID, "", "bucket.settings", "bucket", bucket.ID.String(), bucket.Name, meta)
+	_ = h.auditService.LogSuccess(c, userUUID, "", "bucket.settings", "bucket", bucket.ID.String(), bucket.Name, meta)
 	c.JSON(http.StatusOK, models.SuccessResponse{Message: "Settings updated"})
 }
 

@@ -13,9 +13,11 @@ linters:
     - gosec
   exclusions:
     generated: lax
-    rules:
+    paths:
       # Generated Swagger docs and embedded assets aren't ours to lint.
-      - path: (docs/|internal/web/dist/)
+      - docs/
+      - internal/web/dist/
+    rules:
       # Tests routinely ignore errors and use weak randomness/hardcoded creds.
       - path: _test\.go
         linters:

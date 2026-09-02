@@ -155,7 +155,7 @@ func (h *PolicyHandler) CreatePolicy(c *gin.Context) {
 	}
 
 	uid, uname := actor(c)
-	h.auditService.LogSuccess(c, uid, uname, "policy.create", "policy", policy.ID.String(), policy.Name, nil)
+	_ = h.auditService.LogSuccess(c, uid, uname, "policy.create", "policy", policy.ID.String(), policy.Name, nil)
 
 	c.JSON(http.StatusCreated, policy)
 }
@@ -296,7 +296,7 @@ func (h *PolicyHandler) UpdatePolicy(c *gin.Context) {
 	}
 
 	uid, uname := actor(c)
-	h.auditService.LogSuccess(c, uid, uname, "policy.update", "policy", policy.ID.String(), policy.Name, nil)
+	_ = h.auditService.LogSuccess(c, uid, uname, "policy.update", "policy", policy.ID.String(), policy.Name, nil)
 
 	c.JSON(http.StatusOK, policy)
 }
@@ -363,7 +363,7 @@ func (h *PolicyHandler) DeletePolicy(c *gin.Context) {
 	}
 
 	uid, uname := actor(c)
-	h.auditService.LogSuccess(c, uid, uname, "policy.delete", "policy", policy.ID.String(), policy.Name, nil)
+	_ = h.auditService.LogSuccess(c, uid, uname, "policy.delete", "policy", policy.ID.String(), policy.Name, nil)
 
 	c.JSON(http.StatusOK, models.SuccessResponse{
 		Message: "Policy deleted successfully",
@@ -461,7 +461,7 @@ func (h *PolicyHandler) AttachPolicyToUser(c *gin.Context) {
 	}
 
 	uid, uname := actor(c)
-	h.auditService.LogSuccess(c, uid, uname, "policy.attach", "user", userUUID.String(), "", map[string]interface{}{"policy_id": req.PolicyID})
+	_ = h.auditService.LogSuccess(c, uid, uname, "policy.attach", "user", userUUID.String(), "", map[string]interface{}{"policy_id": req.PolicyID})
 
 	c.JSON(http.StatusOK, models.SuccessResponse{
 		Message: "Policy attached successfully",
@@ -550,7 +550,7 @@ func (h *PolicyHandler) DetachPolicyFromUser(c *gin.Context) {
 	}
 
 	uid, uname := actor(c)
-	h.auditService.LogSuccess(c, uid, uname, "policy.detach", "user", userUUID.String(), "", map[string]interface{}{"policy_id": policyUUID.String()})
+	_ = h.auditService.LogSuccess(c, uid, uname, "policy.detach", "user", userUUID.String(), "", map[string]interface{}{"policy_id": policyUUID.String()})
 
 	c.JSON(http.StatusOK, models.SuccessResponse{
 		Message: "Policy detached successfully",

@@ -1,7 +1,7 @@
 package storage
 
 import (
-	"crypto/md5"
+	"crypto/md5" //nolint:gosec // MD5 is the S3 ETag algorithm (content fingerprint, not a security control)
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -65,7 +65,7 @@ func (ls *LocalStorage) resolve(parts ...string) (string, error) {
 // leaves a truncated object at the live key. It returns the hex MD5 of the
 // bytes written (computed in the same pass — no second read).
 func writeAtomic(dir, finalPath string, data io.Reader) (string, error) {
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0750); err != nil {
 		return "", fmt.Errorf("failed to create directory: %w", err)
 	}
 	tmp, err := os.CreateTemp(dir, ".tmp-upload-*")
@@ -81,7 +81,7 @@ func writeAtomic(dir, finalPath string, data io.Reader) (string, error) {
 		}
 	}()
 
-	hash := md5.New()
+	hash := md5.New() //nolint:gosec // MD5 is the S3 ETag algorithm (content fingerprint, not a security control)
 	if _, err := io.Copy(io.MultiWriter(tmp, hash), data); err != nil {
 		return "", fmt.Errorf("failed to write data: %w", err)
 	}
@@ -104,7 +104,7 @@ func (ls *LocalStorage) CreateBucket(bucketName, region string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(bucketPath, 0755); err != nil {
+	if err := os.MkdirAll(bucketPath, 0750); err != nil {
 		return fmt.Errorf("failed to create bucket directory: %w", err)
 	}
 	return nil
@@ -161,7 +161,7 @@ func (ls *LocalStorage) GetObject(bucketName, objectKey string) (io.ReadCloser, 
 	if err != nil {
 		return nil, err
 	}
-	file, err := os.Open(objectPath)
+	file, err := os.Open(objectPath) //nolint:gosec // path validated by resolve() containment
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("object not found")
@@ -314,11 +314,11 @@ func (ls *LocalStorage) CopyObject(bucketName, srcKey, dstKey string) error {
 
 	// Stream through a temp file + rename so the source is fully read before
 	// the destination is committed. This is safe even if src and dst alias.
-	src, err := os.Open(srcPath)
+	src, err := os.Open(srcPath) //nolint:gosec // path validated by resolve() containment
 	if err != nil {
 		return fmt.Errorf("failed to open source file: %w", err)
 	}
-	defer src.Close()
+	defer src.Close() //nolint:errcheck // best-effort close of read-only file
 
 	if _, err := writeAtomic(filepath.Dir(dstPath), dstPath, src); err != nil {
 		return err
@@ -328,13 +328,13 @@ func (ls *LocalStorage) CopyObject(bucketName, srcKey, dstKey string) error {
 
 // calculateMD5 calculates the MD5 hash of a file
 func calculateMD5(filePath string) (string, error) {
-	file, err := os.Open(filePath)
+	file, err := os.Open(filePath) //nolint:gosec // path validated by resolve() containment in callers
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer file.Close() //nolint:errcheck // best-effort close of read-only file
 
-	hash := md5.New()
+	hash := md5.New() //nolint:gosec // MD5 is the S3 ETag algorithm (content fingerprint, not a security control)
 	if _, err := io.Copy(hash, file); err != nil {
 		return "", err
 	}
@@ -443,12 +443,12 @@ func (ls *LocalStorage) CompleteMultipartUpload(bucketName, objectKey, uploadID 
 
 	for _, part := range sorted {
 		partPath := filepath.Join(dir, fmt.Sprintf("part.%05d", part.PartNumber))
-		f, err := os.Open(partPath)
+		f, err := os.Open(partPath) //nolint:gosec // dir validated by multipartDir()/resolve() containment; part name is fixed-format
 		if err != nil {
 			return fmt.Errorf("failed to open part %d: %w", part.PartNumber, err)
 		}
 		_, copyErr := io.Copy(tmp, f)
-		f.Close()
+		_ = f.Close()
 		if copyErr != nil {
 			return fmt.Errorf("failed to assemble part %d: %w", part.PartNumber, copyErr)
 		}

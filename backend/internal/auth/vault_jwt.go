@@ -135,7 +135,7 @@ func (h *VaultJWTHandler) LoginWithVaultJWT(c *gin.Context) {
 		return
 	}
 
-	services.NewAuditService().LogSuccess(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, map[string]interface{}{"provider": "vault-jwt"})
+	_ = services.NewAuditService().LogSuccess(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, map[string]interface{}{"provider": "vault-jwt"})
 
 	// Generate our access+refresh pair (access carries the refresh JTI so
 	// logout can revoke the sibling refresh token).
@@ -236,11 +236,11 @@ func (h *VaultJWTHandler) findOrCreateVaultUser(vaultID, email, name string) (*m
 func (h *VaultJWTHandler) GetVaultJWKS() (*VaultJWKS, error) {
 	jwksURL := fmt.Sprintf("%s/v1/%s/.well-known/jwks.json", h.config.VaultSSO.Address, h.config.VaultSSO.JWTPath)
 
-	resp, err := http.Get(jwksURL)
+	resp, err := http.Get(jwksURL) //nolint:gosec // URL built from server-side Vault config, not user input
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch JWKS: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck // best-effort close of response body
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)

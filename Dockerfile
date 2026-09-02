@@ -44,7 +44,7 @@ EXPOSE 9000 9443
 ENTRYPOINT ["./main"]
 
 # ── Stage 3b: omnibus — backend + bundled Postgres (single-container path) ─────
-FROM postgres:16-alpine AS omnibus
+FROM postgres:18-alpine AS omnibus
 RUN apk add --no-cache bash openssl tini su-exec ca-certificates wget
 COPY --from=builder /app/main /usr/local/bin/bkt
 COPY docker/omnibus/entrypoint.sh /usr/local/bin/entrypoint.sh

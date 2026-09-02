@@ -1,6 +1,6 @@
 module bkt
 
-go 1.25
+go 1.25.0
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.32.6
@@ -17,7 +17,7 @@ require (
 	github.com/swaggo/gin-swagger v1.6.0
 	github.com/swaggo/swag v1.16.3
 	golang.org/x/crypto v0.45.0
-	golang.org/x/oauth2 v0.34.0
+	golang.org/x/oauth2 v0.36.0
 	google.golang.org/api v0.257.0
 	gorm.io/driver/postgres v1.5.11
 	gorm.io/gorm v1.25.12

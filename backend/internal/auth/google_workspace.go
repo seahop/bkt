@@ -34,7 +34,7 @@ func (s *GoogleWorkspaceService) GetUserGroups(ctx context.Context, userEmail st
 
 	// Load service account credentials
 	keyFile := s.config.GoogleSSO.ServiceAccountKeyFile
-	keyData, err := os.ReadFile(keyFile)
+	keyData, err := os.ReadFile(keyFile) //nolint:gosec // path from server-side config (service account key file), not user input
 	if err != nil {
 		return nil, fmt.Errorf("failed to read service account key file: %w", err)
 	}
@@ -175,7 +175,7 @@ type ServiceAccountKey struct {
 
 // ValidateServiceAccountKey checks if the service account key file is valid
 func ValidateServiceAccountKey(keyFilePath string) (*ServiceAccountKey, error) {
-	data, err := os.ReadFile(keyFilePath)
+	data, err := os.ReadFile(keyFilePath) //nolint:gosec // path from server-side config (service account key file), not user input
 	if err != nil {
 		return nil, fmt.Errorf("cannot read key file: %w", err)
 	}

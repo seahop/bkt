@@ -177,7 +177,7 @@ func (h *BucketHandler) UploadObjectAsync(c *gin.Context) {
 
 	// Detect content type
 	detectedType, _, err := validation.DetectContentType(file)
-	file.Close()
+	_ = file.Close()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to detect content type",
@@ -216,7 +216,7 @@ func (h *BucketHandler) UploadObjectAsync(c *gin.Context) {
 
 	// Save file to temporary location for background processing
 	tempDir := filepath.Join(os.TempDir(), "bkt-uploads", upload.ID.String())
-	if err := os.MkdirAll(tempDir, 0755); err != nil {
+	if err := os.MkdirAll(tempDir, 0750); err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to create temporary directory",
 			Message: err.Error(),
@@ -248,8 +248,8 @@ func (h *BucketHandler) UploadObjectAsync(c *gin.Context) {
 func (h *BucketHandler) processAsyncUpload(uploadID uuid.UUID, tempFilePath string, bucket *models.Bucket) {
 	// Ensure temp file is cleaned up
 	defer func() {
-		os.Remove(tempFilePath)
-		os.Remove(filepath.Dir(tempFilePath)) // Remove temp directory
+		_ = os.Remove(tempFilePath)
+		_ = os.Remove(filepath.Dir(tempFilePath)) // Remove temp directory
 	}()
 
 	// Get upload record
@@ -268,14 +268,14 @@ func (h *BucketHandler) processAsyncUpload(uploadID uuid.UUID, tempFilePath stri
 	database.DB.Save(&upload)
 
 	// Open temp file
-	file, err := os.Open(tempFilePath)
+	file, err := os.Open(tempFilePath) //nolint:gosec // server-generated temp path (os.TempDir + upload UUID), not user input
 	if err != nil {
 		upload.Status = models.UploadStatusFailed
 		upload.ErrorMessage = fmt.Sprintf("Failed to open temporary file: %v", err)
 		database.DB.Save(&upload)
 		return
 	}
-	defer file.Close()
+	defer file.Close() //nolint:errcheck // best-effort close of read-only temp file
 
 	// Re-detect content type from file
 	detectedType, _, err := validation.DetectContentType(file)
@@ -287,7 +287,7 @@ func (h *BucketHandler) processAsyncUpload(uploadID uuid.UUID, tempFilePath stri
 	}
 
 	// Reset file position after reading (file is seekable so no need for MultiReader)
-	file.Seek(0, 0)
+	_, _ = file.Seek(0, 0)
 
 	// Get storage backend
 	storageBackend, err := h.getStorageBackend(bucket)
@@ -327,7 +327,7 @@ func (h *BucketHandler) processAsyncUpload(uploadID uuid.UUID, tempFilePath stri
 	uploadDuration := time.Since(startTime)
 
 	// Calculate SHA256 hash of the uploaded file
-	file.Seek(0, 0)
+	_, _ = file.Seek(0, 0)
 
 	sha256Hash, err := validation.CalculateSHA256(file)
 	if err != nil {
@@ -339,7 +339,7 @@ func (h *BucketHandler) processAsyncUpload(uploadID uuid.UUID, tempFilePath stri
 	}
 
 	// Calculate ETag (MD5)
-	file.Seek(0, 0)
+	_, _ = file.Seek(0, 0)
 
 	etag, err := validation.CalculateMD5(file)
 	if err != nil {
@@ -446,7 +446,7 @@ func (h *BucketHandler) ListUploads(c *gin.Context) {
 	status := c.Query("status") // e.g., "pending", "processing", "completed", "failed"
 	limit := 50                  // Default limit
 	if limitStr := c.Query("limit"); limitStr != "" {
-		fmt.Sscanf(limitStr, "%d", &limit)
+		_, _ = fmt.Sscanf(limitStr, "%d", &limit)
 		if limit > 100 {
 			limit = 100 // Max 100 results
 		}

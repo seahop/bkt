@@ -126,13 +126,6 @@ func (rl *RateLimiter) cleanupRoutine() {
 	}
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // RateLimitMiddleware creates a Gin middleware for rate limiting
 // Common configurations:
 // - Login: 5 requests per minute per IP

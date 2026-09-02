@@ -223,7 +223,7 @@ func (h *BucketHandler) SetBucketLifecycleREST(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to store lifecycle"})
 		return
 	}
-	h.auditService.LogSuccess(c, userUUID, "", "bucket.lifecycle", "bucket", bucket.ID.String(), bucket.Name,
+	_ = h.auditService.LogSuccess(c, userUUID, "", "bucket.lifecycle", "bucket", bucket.ID.String(), bucket.Name,
 		map[string]interface{}{"expire_days": req.ExpireDays, "prefix": req.Prefix, "noncurrent_expire_days": req.NoncurrentExpireDays})
 	c.JSON(http.StatusOK, models.SuccessResponse{Message: "Lifecycle updated"})
 }

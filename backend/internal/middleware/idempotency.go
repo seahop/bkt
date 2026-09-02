@@ -174,10 +174,7 @@ func IdempotencyMiddleware() gin.HandlerFunc {
 			}
 
 			// Save to database (best effort - don't fail request if storage fails)
-			if err := database.DB.Create(&idempotencyRecord).Error; err != nil {
-				// Debug logging (uncomment for troubleshooting)
-				// fmt.Printf("Warning: Failed to store idempotency key: %v\n", err)
-			}
+			_ = database.DB.Create(&idempotencyRecord).Error
 		}
 	}
 }

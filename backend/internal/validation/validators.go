@@ -1,7 +1,7 @@
 package validation
 
 import (
-	"crypto/md5"
+	"crypto/md5" //nolint:gosec // MD5 is the S3 ETag algorithm (content fingerprint, not a security control)
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -189,7 +189,7 @@ func CalculateSHA256(reader io.Reader) (string, error) {
 
 // CalculateMD5 calculates the MD5 hash of the data from a reader (used for ETag)
 func CalculateMD5(reader io.Reader) (string, error) {
-	hash := md5.New()
+	hash := md5.New() //nolint:gosec // MD5 is the S3 ETag algorithm (content fingerprint, not a security control)
 	if _, err := io.Copy(hash, reader); err != nil {
 		return "", fmt.Errorf("failed to calculate MD5: %w", err)
 	}

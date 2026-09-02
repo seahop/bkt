@@ -40,7 +40,7 @@ func main() {
 	}
 
 	// Create storage directory if it doesn't exist
-	if err := os.MkdirAll(cfg.Storage.RootPath, 0755); err != nil {
+	if err := os.MkdirAll(cfg.Storage.RootPath, 0750); err != nil {
 		log.Fatalf("Failed to create storage directory: %v", err)
 	}
 

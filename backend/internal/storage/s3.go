@@ -25,27 +25,9 @@ type S3Storage struct {
 
 // NewS3Storage creates a new S3 storage backend
 func NewS3Storage(endpoint, region, accessKeyID, secretAccessKey, bucketPrefix string, useSSL, forcePathStyle, sse bool) (*S3Storage, error) {
-	// Create custom endpoint resolver for S3-compatible services
-	customResolver := aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
-		if endpoint != "" && endpoint != "s3.amazonaws.com" {
-			scheme := "https"
-			if !useSSL {
-				scheme = "http"
-			}
-			return aws.Endpoint{
-				URL:               fmt.Sprintf("%s://%s", scheme, endpoint),
-				HostnameImmutable: true,
-				Source:            aws.EndpointSourceCustom,
-			}, nil
-		}
-		// Use default AWS endpoint
-		return aws.Endpoint{}, &aws.EndpointNotFoundError{}
-	})
-
 	// Load AWS configuration
 	cfg, err := config.LoadDefaultConfig(context.TODO(),
 		config.WithRegion(region),
-		config.WithEndpointResolverWithOptions(customResolver),
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
 			accessKeyID,
 			secretAccessKey,
@@ -56,9 +38,16 @@ func NewS3Storage(endpoint, region, accessKeyID, secretAccessKey, bucketPrefix s
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
-	// Create S3 client
+	// Create S3 client, with a custom endpoint for S3-compatible services
 	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
 		o.UsePathStyle = forcePathStyle
+		if endpoint != "" && endpoint != "s3.amazonaws.com" {
+			scheme := "https"
+			if !useSSL {
+				scheme = "http"
+			}
+			o.BaseEndpoint = aws.String(fmt.Sprintf("%s://%s", scheme, endpoint))
+		}
 	})
 
 	return &S3Storage{
@@ -410,6 +399,11 @@ func (s3s *S3Storage) CreateMultipartUpload(bucketName, objectKey, contentType s
 }
 
 func (s3s *S3Storage) UploadPart(bucketName, objectKey, uploadID string, partNumber int, data io.Reader, size int64) (string, error) {
+	// Handlers already enforce the S3 part-number range; guard here so the
+	// int -> int32 conversion below is provably in bounds.
+	if partNumber < 1 || partNumber > 10000 {
+		return "", fmt.Errorf("invalid part number %d", partNumber)
+	}
 	ctx := context.Background()
 	out, err := s3s.client.UploadPart(ctx, &s3.UploadPartInput{
 		Bucket:        aws.String(s3s.getBucketName(bucketName)),
@@ -429,6 +423,11 @@ func (s3s *S3Storage) CompleteMultipartUpload(bucketName, objectKey, uploadID st
 	ctx := context.Background()
 	awsParts := make([]types.CompletedPart, len(parts))
 	for i, p := range parts {
+		// Handlers already enforce the S3 part-number range; guard here so the
+		// int -> int32 conversion below is provably in bounds.
+		if p.PartNumber < 1 || p.PartNumber > 10000 {
+			return fmt.Errorf("invalid part number %d", p.PartNumber)
+		}
 		etag := p.ETag
 		awsParts[i] = types.CompletedPart{
 			PartNumber: aws.Int32(int32(p.PartNumber)),

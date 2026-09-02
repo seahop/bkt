@@ -174,11 +174,11 @@ func (h *AuthHandler) Login(c *gin.Context) {
 			metrics.AuthFailuresTotal.WithLabelValues("lockout").Inc()
 		}
 		if found {
-			h.auditService.LogFailure(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, "invalid password", nil)
+			_ = h.auditService.LogFailure(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, "invalid password", nil)
 		} else {
 			// Unknown usernames matter for forensics too (spraying, typo'd
 			// service accounts). Zero-UUID actor; attempted name in metadata.
-			h.auditService.LogFailure(c, uuid.Nil, req.Username, "auth.login", "user", "", "", "unknown username", map[string]interface{}{
+			_ = h.auditService.LogFailure(c, uuid.Nil, req.Username, "auth.login", "user", "", "", "unknown username", map[string]interface{}{
 				"attempted_username": req.Username,
 			})
 		}
@@ -193,7 +193,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	// enumeration oracle for someone without the password).
 	if user.IsLocked {
 		metrics.AuthFailuresTotal.WithLabelValues("locked").Inc()
-		h.auditService.LogFailure(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, "account locked", nil)
+		_ = h.auditService.LogFailure(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, "account locked", nil)
 		c.JSON(http.StatusForbidden, models.ErrorResponse{
 			Error:   "Account locked",
 			Message: "This account has been locked. Please contact an administrator.",
@@ -203,7 +203,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	// Successful authentication — clear the failure counter and audit it.
 	h.loginGuard.reset(guardKey)
-	h.auditService.LogSuccess(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, nil)
+	_ = h.auditService.LogSuccess(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, nil)
 
 	// Generate the access+refresh pair (access carries the refresh JTI so
 	// logout can revoke the sibling refresh token).
@@ -329,7 +329,7 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 		if reason == models.RevokedReasonRotated {
 			database.DB.Model(&models.User{}).Where("id = ?", user.ID).
 				UpdateColumn("token_version", gorm.Expr("token_version + 1"))
-			h.auditService.LogFailure(c, user.ID, user.Username, "auth.refresh_reuse", "user",
+			_ = h.auditService.LogFailure(c, user.ID, user.Username, "auth.refresh_reuse", "user",
 				user.ID.String(), user.Username,
 				"rotated refresh token replayed — all sessions revoked", nil)
 		}

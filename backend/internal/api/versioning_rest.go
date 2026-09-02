@@ -162,7 +162,7 @@ func (h *BucketHandler) RestoreObjectVersion(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to read version"})
 		return
 	}
-	defer rc.Close()
+	defer rc.Close() //nolint:errcheck // best-effort close of read stream
 	if err := backend.PutObject(bucket.Name, req.Key, rc, ver.Size, ver.ContentType, jsonPtrToMap(ver.Metadata)); err != nil {
 		rollbackVersionedWrite(backend, &bucket, req.Key, archivedVID)
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to restore version", Message: err.Error()})
@@ -276,7 +276,7 @@ func (h *BucketHandler) SetBucketVersioning(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to update versioning"})
 		return
 	}
-	h.auditService.LogSuccess(c, userUUID, "", "bucket.versioning", "bucket", bucket.ID.String(), bucket.Name,
+	_ = h.auditService.LogSuccess(c, userUUID, "", "bucket.versioning", "bucket", bucket.ID.String(), bucket.Name,
 		map[string]interface{}{"versioning": req.Versioning})
 	c.JSON(http.StatusOK, models.SuccessResponse{Message: "Versioning " + req.Versioning})
 }

@@ -106,7 +106,7 @@ func fetchJWKS(url string) (map[string]*rsa.PublicKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch JWKS: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck // best-effort close of response body
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("failed to fetch JWKS: status %s", resp.Status)
 	}

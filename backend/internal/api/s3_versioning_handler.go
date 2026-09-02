@@ -222,6 +222,6 @@ func (h *S3APIHandler) serveObjectVersion(c *gin.Context, bucket *models.Bucket,
 		h.s3Error(c, "InternalError", "Failed to read version", objectKey, http.StatusInternalServerError)
 		return
 	}
-	defer rc.Close()
+	defer rc.Close() //nolint:errcheck // best-effort close of read stream
 	c.DataFromReader(http.StatusOK, ver.Size, ver.ContentType, io.LimitReader(rc, ver.Size), nil)
 }

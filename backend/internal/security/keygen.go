@@ -82,11 +82,7 @@ func ValidateAccessKeyFormat(accessKey string) bool {
 
 	// Check length (prefix + base64 encoded 20 bytes)
 	expectedLen := len(AccessKeyPrefix) + base64.RawURLEncoding.EncodedLen(AccessKeyLength)
-	if len(accessKey) != expectedLen {
-		return false
-	}
-
-	return true
+	return len(accessKey) == expectedLen
 }
 
 // ValidateSecretKeyFormat validates that a secret key has the correct format
@@ -101,9 +97,5 @@ func ValidateSecretKeyFormat(secretKey string) bool {
 
 	// Check length (prefix + base64 encoded 40 bytes)
 	expectedLen := len(SecretKeyPrefix) + base64.RawURLEncoding.EncodedLen(SecretKeyLength)
-	if len(secretKey) != expectedLen {
-		return false
-	}
-
-	return true
+	return len(secretKey) == expectedLen
 }

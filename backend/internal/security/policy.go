@@ -247,11 +247,11 @@ func validateSid(sid string) error {
 		return err
 	}
 	if !matched {
-		return fmt.Errorf("Sid must contain only alphanumeric characters, hyphens, and underscores")
+		return fmt.Errorf("policy Sid must contain only alphanumeric characters, hyphens, and underscores")
 	}
 
 	if len(sid) > 100 {
-		return fmt.Errorf("Sid too long (max 100 characters)")
+		return fmt.Errorf("policy Sid too long (max 100 characters)")
 	}
 
 	return nil

@@ -24,7 +24,7 @@ func NewGroupHandler() *GroupHandler {
 
 func (h *GroupHandler) audit(c *gin.Context, action, resourceID, resourceName string, meta map[string]interface{}) {
 	uid, uname := actor(c)
-	h.auditService.LogSuccess(c, uid, uname, action, "group", resourceID, resourceName, meta)
+	_ = h.auditService.LogSuccess(c, uid, uname, action, "group", resourceID, resourceName, meta)
 }
 
 // ListGroups handles GET /api/groups (admin).

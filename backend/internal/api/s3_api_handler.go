@@ -466,7 +466,7 @@ func (h *S3APIHandler) GetObject(c *gin.Context) {
 		h.s3Error(c, "InternalError", "Failed to retrieve object", objectKey, http.StatusInternalServerError)
 		return
 	}
-	defer file.Close()
+	defer file.Close() //nolint:errcheck // best-effort close of read stream
 
 	// Common S3-compatible headers
 	c.Header("Content-Type", object.ContentType)
@@ -750,7 +750,7 @@ func (h *S3APIHandler) PutObject(c *gin.Context) {
 			VersionID:   newVersionID,
 		}
 		if err := database.DB.Create(&object).Error; err != nil {
-			storageBackend.DeleteObject(bucketName, objectKey)
+			_ = storageBackend.DeleteObject(bucketName, objectKey)
 			h.s3Error(c, "InternalError", "Failed to create object metadata", objectKey, http.StatusInternalServerError)
 			return
 		}
@@ -1064,7 +1064,7 @@ func (h *S3APIHandler) CopyObject(c *gin.Context, copySource string) {
 			h.s3Error(c, "InternalError", "Failed to read source object", srcKey, http.StatusInternalServerError)
 			return
 		}
-		defer reader.Close()
+		defer reader.Close() //nolint:errcheck // best-effort close of read stream
 		if err := destStorage.PutObject(destBucket, destKey, reader, srcObj.Size, srcObj.ContentType, destMeta); err != nil {
 			copyFailed()
 			h.s3Error(c, "InternalError", "Failed to write destination object", destKey, http.StatusInternalServerError)
@@ -1282,7 +1282,7 @@ func (a *awsChunkedReader) Read(p []byte) (int, error) {
 	a.remaining -= n
 	if a.remaining == 0 {
 		// Consume the trailing \r\n after chunk data
-		a.r.ReadString('\n')
+		_, _ = a.r.ReadString('\n')
 	}
 	return n, err
 }

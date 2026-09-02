@@ -662,7 +662,7 @@ func (h *S3APIHandler) UploadPartCopy(c *gin.Context) {
 		h.s3Error(c, "InternalError", "Failed to read source object", srcKey, http.StatusInternalServerError)
 		return
 	}
-	defer reader.Close()
+	defer reader.Close() //nolint:errcheck // best-effort close of read stream
 
 	if offset > 0 {
 		if _, err := io.CopyN(io.Discard, reader, offset); err != nil {

@@ -126,7 +126,9 @@ type DeleteResult struct {
 }
 
 type DeletedObject struct {
-	Key string `xml:"Key"`
+	Key                   string `xml:"Key"`
+	DeleteMarker          bool   `xml:"DeleteMarker,omitempty"`
+	DeleteMarkerVersionId string `xml:"DeleteMarkerVersionId,omitempty"`
 }
 
 type DeleteError struct {
@@ -188,6 +190,30 @@ func (h *S3APIHandler) ListBuckets(c *gin.Context) {
 	c.XML(http.StatusOK, response)
 }
 
+// LocationConstraintResult is the response body for GET /{bucket}?location.
+type LocationConstraintResult struct {
+	XMLName xml.Name `xml:"LocationConstraint"`
+	Xmlns   string   `xml:"xmlns,attr"`
+	Value   string   `xml:",chardata"`
+}
+
+// VersioningConfigurationResult is the response body for GET /{bucket}?versioning.
+// An empty Status means versioning has never been enabled.
+type VersioningConfigurationResult struct {
+	XMLName xml.Name `xml:"VersioningConfiguration"`
+	Xmlns   string   `xml:"xmlns,attr"`
+	Status  string   `xml:"Status,omitempty"`
+}
+
+// bucketRegion returns the region reported for buckets. bkt is single-region;
+// this reflects the configured S3 region (default us-east-1).
+func (h *S3APIHandler) bucketRegion() string {
+	if h.config != nil && h.config.Storage.S3.Region != "" {
+		return h.config.Storage.S3.Region
+	}
+	return "us-east-1"
+}
+
 // ListObjects handles GET /{bucket} — supports ListObjectsV1 and ListObjectsV2 (list-type=2)
 func (h *S3APIHandler) ListObjects(c *gin.Context) {
 	bucketName := c.Param("bucket")
@@ -203,6 +229,49 @@ func (h *S3APIHandler) ListObjects(c *gin.Context) {
 	allowed, _ := h.policyService.CheckBucketAccess(userUUID, bucketName, services.ActionListBucket)
 	if !allowed {
 		h.s3Error(c, "AccessDenied", "Access Denied", bucketName, http.StatusForbidden)
+		return
+	}
+
+	// Bucket sub-resource requests share the GET /{bucket} route.
+	if _, ok := c.GetQuery("location"); ok {
+		region := h.bucketRegion()
+		// AWS represents us-east-1 as an empty LocationConstraint.
+		loc := region
+		if loc == "us-east-1" {
+			loc = ""
+		}
+		c.Header("x-amz-request-id", uuid.New().String())
+		c.XML(http.StatusOK, LocationConstraintResult{
+			Xmlns: "http://s3.amazonaws.com/doc/2006-03-01/",
+			Value: loc,
+		})
+		return
+	}
+	if _, ok := c.GetQuery("versioning"); ok {
+		status := ""
+		switch bucket.Versioning {
+		case models.VersioningEnabled:
+			status = "Enabled"
+		case models.VersioningSuspended:
+			status = "Suspended"
+		}
+		c.Header("x-amz-request-id", uuid.New().String())
+		c.XML(http.StatusOK, VersioningConfigurationResult{
+			Xmlns:  "http://s3.amazonaws.com/doc/2006-03-01/",
+			Status: status,
+		})
+		return
+	}
+	if _, ok := c.GetQuery("versions"); ok {
+		h.ListObjectVersions(c)
+		return
+	}
+	if _, ok := c.GetQuery("lifecycle"); ok {
+		h.GetBucketLifecycle(c)
+		return
+	}
+	if _, ok := c.GetQuery("uploads"); ok {
+		h.ListMultipartUploadsHandler(c)
 		return
 	}
 
@@ -336,6 +405,12 @@ func (h *S3APIHandler) GetObject(c *gin.Context) {
 		return
 	}
 
+	// Tagging subresource
+	if _, ok := c.GetQuery("tagging"); ok {
+		h.GetObjectTagging(c)
+		return
+	}
+
 	userID, _ := c.Get("user_id")
 	userUUID := userID.(uuid.UUID)
 
@@ -353,11 +428,29 @@ func (h *S3APIHandler) GetObject(c *gin.Context) {
 		return
 	}
 
+	// A non-current version addressed explicitly?
+	if vid := c.Query("versionId"); vid != "" {
+		var cur models.Object
+		curErr := database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, objectKey).First(&cur).Error
+		curVID := cur.VersionID
+		if curVID == "" {
+			curVID = "null"
+		}
+		if curErr != nil || vid != curVID {
+			h.serveObjectVersion(c, &bucket, objectKey, vid, false)
+			return
+		}
+		// Addressed version IS the current one — fall through to the normal path.
+	}
+
 	// Get object metadata
 	var object models.Object
 	if err := database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, objectKey).First(&object).Error; err != nil {
 		h.s3Error(c, "NoSuchKey", "The specified key does not exist", objectKey, http.StatusNotFound)
 		return
+	}
+	if object.VersionID != "" {
+		c.Header("x-amz-version-id", object.VersionID)
 	}
 
 	// Get storage backend
@@ -381,6 +474,7 @@ func (h *S3APIHandler) GetObject(c *gin.Context) {
 	c.Header("Last-Modified", object.UpdatedAt.UTC().Format(http.TimeFormat))
 	c.Header("Accept-Ranges", "bytes")
 	c.Header("x-amz-request-id", uuid.New().String())
+	writeUserMetadataHeaders(c, &object)
 
 	// Honor a Range request if present. We advertise Accept-Ranges, so clients
 	// (notably the AWS CLI/SDK, which split downloads >8MB into byte-range GETs)
@@ -472,6 +566,11 @@ func parseRange(header string, size int64) (start, length int64, ok, satisfiable
 // PutObject handles PUT /{bucket}/{key+} (upload, copy, or multipart part)
 func (h *S3APIHandler) PutObject(c *gin.Context) {
 	if copySource := c.GetHeader("x-amz-copy-source"); copySource != "" {
+		// With uploadId+partNumber this is UploadPartCopy, not CopyObject.
+		if c.Query("uploadId") != "" && c.Query("partNumber") != "" {
+			h.UploadPartCopy(c)
+			return
+		}
 		h.CopyObject(c, copySource)
 		return
 	}
@@ -479,6 +578,12 @@ func (h *S3APIHandler) PutObject(c *gin.Context) {
 	// Dispatch to UploadPart for multipart uploads
 	if c.Query("uploadId") != "" && c.Query("partNumber") != "" {
 		h.UploadPart(c)
+		return
+	}
+
+	// Tagging subresource
+	if _, ok := c.GetQuery("tagging"); ok {
+		h.PutObjectTagging(c)
 		return
 	}
 
@@ -504,6 +609,19 @@ func (h *S3APIHandler) PutObject(c *gin.Context) {
 	allowed, _ := h.policyService.CheckObjectAccess(userUUID, bucketName, objectKey, services.ActionPutObject)
 	if !allowed {
 		h.s3Error(c, "AccessDenied", "Access Denied", objectKey, http.StatusForbidden)
+		return
+	}
+
+	// User metadata (x-amz-meta-*) and tags (x-amz-tagging). A PUT replaces
+	// both wholesale, matching S3 semantics.
+	userMeta, err := extractUserMetadata(c)
+	if err != nil {
+		h.s3Error(c, "MetadataTooLarge", err.Error(), objectKey, http.StatusBadRequest)
+		return
+	}
+	objTags, err := parseTaggingHeader(c.GetHeader("x-amz-tagging"))
+	if err != nil {
+		h.s3Error(c, "InvalidTag", err.Error(), objectKey, http.StatusBadRequest)
 		return
 	}
 
@@ -533,24 +651,36 @@ func (h *S3APIHandler) PutObject(c *gin.Context) {
 		bodyReader = newAWSChunkedReader(c.Request.Body)
 	}
 
-	// Detect actual content type from file magic numbers (don't trust client)
-	detectedType, firstBytes, err := validation.DetectContentType(bodyReader)
-	if err != nil {
-		h.s3Error(c, "InternalError", "Failed to detect content type", objectKey, http.StatusInternalServerError)
-		return
+	var contentType string
+	var combinedReader io.Reader
+
+	if h.config.Storage.EnforceContentTypeDetection {
+		// Opt-in strict mode: detect the type from magic bytes and reject
+		// "unsafe" types. Off by default — see StorageConfig.
+		detectedType, firstBytes, derr := validation.DetectContentType(bodyReader)
+		if derr != nil {
+			h.s3Error(c, "InternalError", "Failed to detect content type", objectKey, http.StatusInternalServerError)
+			return
+		}
+		if !validation.IsSafeContentType(detectedType) {
+			h.s3Error(c, "InvalidRequest", fmt.Sprintf("File type '%s' is not allowed", detectedType), objectKey, http.StatusBadRequest)
+			return
+		}
+		contentType = detectedType
+		combinedReader = io.MultiReader(bytes.NewReader(firstBytes), bodyReader)
+	} else {
+		// Default S3 behavior: the client's Content-Type is authoritative
+		// metadata. Fall back to a sensible default only when it's absent.
+		contentType = c.GetHeader("Content-Type")
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		combinedReader = bodyReader
 	}
 
-	// Validate content type is safe
-	if !validation.IsSafeContentType(detectedType) {
-		h.s3Error(c, "InvalidRequest", fmt.Sprintf("File type '%s' is not allowed", detectedType), objectKey, http.StatusBadRequest)
-		return
-	}
-
-	// Use detected content type (from magic numbers, not from client header)
-	contentType := detectedType
-
-	// Create MultiReader to prepend the first bytes back to the stream
-	combinedReader := io.MultiReader(bytes.NewReader(firstBytes), bodyReader)
+	// Bound the stored body so a client can't exceed the max by understating
+	// its declared length (e.g. via chunked encoding).
+	combinedReader = &maxBytesReader{r: combinedReader, remaining: h.config.Storage.MaxFileSize}
 
 	// Get storage backend
 	storageBackend, err := h.bucketHandler.getStorageBackend(&bucket)
@@ -559,11 +689,29 @@ func (h *S3APIHandler) PutObject(c *gin.Context) {
 		return
 	}
 
+	// Quota: reject before any bytes are written.
+	if qerr := checkBucketQuota(&bucket, contentLength); qerr != nil {
+		h.s3Error(c, "QuotaExceeded", qerr.Error(), objectKey, http.StatusForbidden)
+		return
+	}
+
+	// Versioning: archive the current version before overwriting.
+	archivedVID, verr := prepareVersionedWrite(storageBackend, &bucket, objectKey)
+	if verr != nil {
+		h.s3Error(c, "InternalError", "Failed to version existing object", objectKey, http.StatusInternalServerError)
+		return
+	}
+
 	// Save object (use combinedReader that includes first 512 bytes)
-	err = storageBackend.PutObject(bucketName, objectKey, combinedReader, contentLength, contentType)
+	err = storageBackend.PutObject(bucketName, objectKey, combinedReader, contentLength, contentType, userMeta)
 	if err != nil {
+		rollbackVersionedWrite(storageBackend, &bucket, objectKey, archivedVID)
 		h.s3Error(c, "InternalError", "Failed to save object", objectKey, http.StatusInternalServerError)
 		return
+	}
+	newVersionID := ""
+	if bucket.Versioning == models.VersioningEnabled {
+		newVersionID = uuid.New().String()
 	}
 
 	// Get object info (including ETag)
@@ -583,6 +731,9 @@ func (h *S3APIHandler) PutObject(c *gin.Context) {
 		object.ContentType = objectInfo.ContentType
 		object.ETag = objectInfo.ETag
 		object.StoragePath = objectKey
+		object.Metadata = mapToJSONPtr(userMeta)
+		object.Tags = mapToJSONPtr(objTags)
+		object.VersionID = newVersionID
 		object.UpdatedAt = time.Now()
 		database.DB.Save(&object)
 	} else {
@@ -594,6 +745,9 @@ func (h *S3APIHandler) PutObject(c *gin.Context) {
 			ContentType: objectInfo.ContentType,
 			ETag:        objectInfo.ETag,
 			StoragePath: objectKey,
+			Metadata:    mapToJSONPtr(userMeta),
+			Tags:        mapToJSONPtr(objTags),
+			VersionID:   newVersionID,
 		}
 		if err := database.DB.Create(&object).Error; err != nil {
 			storageBackend.DeleteObject(bucketName, objectKey)
@@ -602,17 +756,36 @@ func (h *S3APIHandler) PutObject(c *gin.Context) {
 		}
 	}
 
+	notifyObjectEvent(&bucket, services.EventObjectCreated, objectKey, object.Size, object.ETag, newVersionID)
+
 	// Return success with ETag
 	c.Header("ETag", fmt.Sprintf(`"%s"`, object.ETag))
+	if newVersionID != "" {
+		c.Header("x-amz-version-id", newVersionID)
+	}
 	c.Header("x-amz-request-id", uuid.New().String())
 	c.Status(http.StatusOK)
 }
 
 // DeleteObject handles DELETE /{bucket}/{key+} (delete object or abort multipart)
 func (h *S3APIHandler) DeleteObject(c *gin.Context) {
+	// Bucket-level DELETE sub-resources arrive with an empty key.
+	if strings.TrimPrefix(c.Param("key"), "/") == "" {
+		if _, ok := c.GetQuery("lifecycle"); ok {
+			h.DeleteBucketLifecycle(c)
+			return
+		}
+	}
+
 	// Abort multipart upload
 	if c.Query("uploadId") != "" {
 		h.AbortMultipartUpload(c)
+		return
+	}
+
+	// Tagging subresource
+	if _, ok := c.GetQuery("tagging"); ok {
+		h.DeleteObjectTagging(c)
 		return
 	}
 
@@ -636,6 +809,25 @@ func (h *S3APIHandler) DeleteObject(c *gin.Context) {
 		return
 	}
 
+	// Get storage backend
+	storageBackend, err := h.bucketHandler.getStorageBackend(&bucket)
+	if err != nil {
+		h.s3Error(c, "InternalError", "Failed to get storage backend", objectKey, http.StatusInternalServerError)
+		return
+	}
+
+	// Version-addressed delete: permanently removes that one version.
+	if vid := c.Query("versionId"); vid != "" {
+		if err := deleteSpecificVersion(storageBackend, &bucket, objectKey, vid); err != nil {
+			h.s3Error(c, "InternalError", "Failed to delete version", objectKey, http.StatusInternalServerError)
+			return
+		}
+		c.Header("x-amz-version-id", vid)
+		c.Header("x-amz-request-id", uuid.New().String())
+		c.Status(http.StatusNoContent)
+		return
+	}
+
 	// Get object metadata
 	var object models.Object
 	if err := database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, objectKey).First(&object).Error; err != nil {
@@ -644,10 +836,17 @@ func (h *S3APIHandler) DeleteObject(c *gin.Context) {
 		return
 	}
 
-	// Get storage backend
-	storageBackend, err := h.bucketHandler.getStorageBackend(&bucket)
-	if err != nil {
-		h.s3Error(c, "InternalError", "Failed to get storage backend", objectKey, http.StatusInternalServerError)
+	// Versioned delete: archive bytes + record a delete marker.
+	if markerID, handled, derr := versionedDeleteCurrent(storageBackend, &bucket, &object); handled {
+		if derr != nil {
+			h.s3Error(c, "InternalError", "Failed to delete object", objectKey, http.StatusInternalServerError)
+			return
+		}
+		notifyObjectEvent(&bucket, services.EventObjectRemoved, objectKey, 0, "", markerID)
+		c.Header("x-amz-delete-marker", "true")
+		c.Header("x-amz-version-id", markerID)
+		c.Header("x-amz-request-id", uuid.New().String())
+		c.Status(http.StatusNoContent)
 		return
 	}
 
@@ -663,6 +862,7 @@ func (h *S3APIHandler) DeleteObject(c *gin.Context) {
 		h.s3Error(c, "InternalError", "Failed to delete object metadata", objectKey, http.StatusInternalServerError)
 		return
 	}
+	notifyObjectEvent(&bucket, services.EventObjectRemoved, objectKey, 0, "", "")
 
 	c.Header("x-amz-request-id", uuid.New().String())
 	c.Status(http.StatusNoContent)
@@ -693,6 +893,21 @@ func (h *S3APIHandler) HeadObject(c *gin.Context) {
 	var object models.Object
 	err := database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, objectKey).First(&object).Error
 
+	// A non-current version addressed explicitly?
+	if vid := c.Query("versionId"); vid != "" {
+		curVID := object.VersionID
+		if curVID == "" {
+			curVID = "null"
+		}
+		if err != nil || vid != curVID {
+			h.serveObjectVersion(c, &bucket, objectKey, vid, true)
+			return
+		}
+	}
+	if err == nil && object.VersionID != "" {
+		c.Header("x-amz-version-id", object.VersionID)
+	}
+
 	// If exact match not found and key ends with /, it might be a folder
 	// Check if any objects exist with this prefix
 	if err != nil && strings.HasSuffix(objectKey, "/") {
@@ -721,6 +936,7 @@ func (h *S3APIHandler) HeadObject(c *gin.Context) {
 	c.Header("Last-Modified", object.UpdatedAt.UTC().Format(http.TimeFormat))
 	c.Header("Accept-Ranges", "bytes")
 	c.Header("x-amz-request-id", uuid.New().String())
+	writeUserMetadataHeaders(c, &object)
 
 	c.Status(http.StatusOK)
 }
@@ -745,6 +961,8 @@ func (h *S3APIHandler) HeadBucket(c *gin.Context) {
 		return
 	}
 
+	// SDKs use x-amz-bucket-region for region discovery / redirect handling.
+	c.Header("x-amz-bucket-region", h.bucketRegion())
 	c.Header("x-amz-request-id", uuid.New().String())
 	c.Status(http.StatusOK)
 }
@@ -797,15 +1015,41 @@ func (h *S3APIHandler) CopyObject(c *gin.Context, copySource string) {
 		return
 	}
 
+	// Metadata directive: COPY (default) carries the source's user metadata to
+	// the destination; REPLACE takes the request's x-amz-meta-* headers instead.
+	destMeta := jsonPtrToMap(srcObj.Metadata)
+	if strings.EqualFold(c.GetHeader("x-amz-metadata-directive"), "REPLACE") {
+		m, merr := extractUserMetadata(c)
+		if merr != nil {
+			h.s3Error(c, "MetadataTooLarge", merr.Error(), destKey, http.StatusBadRequest)
+			return
+		}
+		destMeta = m
+	}
+
 	srcStorage, err := h.bucketHandler.getStorageBackend(&srcBucketModel)
 	if err != nil {
 		h.s3Error(c, "InternalError", "Failed to initialize source storage", srcKey, http.StatusInternalServerError)
 		return
 	}
 
+	// Versioning: archive the destination's current version before overwrite.
+	destStorageForVer, dsvErr := h.bucketHandler.getStorageBackend(&destBucketModel)
+	if dsvErr != nil {
+		h.s3Error(c, "InternalError", "Failed to initialize destination storage", destKey, http.StatusInternalServerError)
+		return
+	}
+	archivedVID, verr := prepareVersionedWrite(destStorageForVer, &destBucketModel, destKey)
+	if verr != nil {
+		h.s3Error(c, "InternalError", "Failed to version existing object", destKey, http.StatusInternalServerError)
+		return
+	}
+	copyFailed := func() { rollbackVersionedWrite(destStorageForVer, &destBucketModel, destKey, archivedVID) }
+
 	// If same bucket, use native CopyObject; otherwise stream copy
 	if srcBucket == destBucket {
 		if err := srcStorage.CopyObject(srcBucket, srcKey, destKey); err != nil {
+			copyFailed()
 			h.s3Error(c, "InternalError", "Failed to copy object", srcKey, http.StatusInternalServerError)
 			return
 		}
@@ -821,7 +1065,8 @@ func (h *S3APIHandler) CopyObject(c *gin.Context, copySource string) {
 			return
 		}
 		defer reader.Close()
-		if err := destStorage.PutObject(destBucket, destKey, reader, srcObj.Size, srcObj.ContentType); err != nil {
+		if err := destStorage.PutObject(destBucket, destKey, reader, srcObj.Size, srcObj.ContentType, destMeta); err != nil {
+			copyFailed()
 			h.s3Error(c, "InternalError", "Failed to write destination object", destKey, http.StatusInternalServerError)
 			return
 		}
@@ -831,6 +1076,17 @@ func (h *S3APIHandler) CopyObject(c *gin.Context, copySource string) {
 	destInfo, err := h.bucketHandler.getStorageBackend(&destBucketModel)
 	if err == nil {
 		if info, err := destInfo.GetObjectInfo(destBucket, destKey); err == nil {
+			destTags := jsonPtrToMap(srcObj.Tags)
+			if strings.EqualFold(c.GetHeader("x-amz-tagging-directive"), "REPLACE") {
+				if t, terr := parseTaggingHeader(c.GetHeader("x-amz-tagging")); terr == nil {
+					destTags = t
+				}
+			}
+			newVID := ""
+			if destBucketModel.Versioning == models.VersioningEnabled {
+				newVID = uuid.New().String()
+				c.Header("x-amz-version-id", newVID)
+			}
 			destObj := models.Object{
 				BucketID:    destBucketModel.ID,
 				Key:         destKey,
@@ -838,12 +1094,18 @@ func (h *S3APIHandler) CopyObject(c *gin.Context, copySource string) {
 				ContentType: info.ContentType,
 				ETag:        info.ETag,
 				StoragePath: destKey,
+				Metadata:    mapToJSONPtr(destMeta),
+				Tags:        mapToJSONPtr(destTags),
 			}
+			destObj.VersionID = newVID
 			var existing models.Object
 			if database.DB.Where("bucket_id = ? AND key = ?", destBucketModel.ID, destKey).First(&existing).Error == nil {
 				existing.Size = destObj.Size
 				existing.ContentType = destObj.ContentType
 				existing.ETag = destObj.ETag
+				existing.Metadata = destObj.Metadata
+				existing.Tags = destObj.Tags
+				existing.VersionID = newVID
 				database.DB.Save(&existing)
 				destObj = existing
 			} else {
@@ -917,6 +1179,17 @@ func (h *S3APIHandler) DeleteObjects(c *gin.Context) {
 			continue
 		}
 
+		if markerID, handled, derr := versionedDeleteCurrent(storageBackend, &bucket, &dbObj); handled {
+			if derr != nil {
+				result.Errors = append(result.Errors, DeleteError{Key: obj.Key, Code: "InternalError", Message: "Failed to delete"})
+				continue
+			}
+			if !deleteReq.Quiet {
+				result.Deleted = append(result.Deleted, DeletedObject{Key: obj.Key, DeleteMarker: true, DeleteMarkerVersionId: markerID})
+			}
+			continue
+		}
+
 		if err := storageBackend.DeleteObject(bucketName, obj.Key); err != nil {
 			result.Errors = append(result.Errors, DeleteError{Key: obj.Key, Code: "InternalError", Message: "Failed to delete"})
 			continue
@@ -946,6 +1219,15 @@ func (h *S3APIHandler) s3Error(c *gin.Context, code, message, resource string, s
 // CreateBucket handles PUT /{bucket} (create bucket)
 // NOTE: For now, we don't allow bucket creation via S3 API (only via web UI)
 func (h *S3APIHandler) CreateBucket(c *gin.Context) {
+	if _, ok := c.GetQuery("versioning"); ok {
+		h.PutBucketVersioning(c)
+		return
+	}
+	if _, ok := c.GetQuery("lifecycle"); ok {
+		h.PutBucketLifecycle(c)
+		return
+	}
+
 	h.s3Error(c, "AccessDenied", "Bucket creation via S3 API is not supported. Use web UI.", "", http.StatusForbidden)
 }
 

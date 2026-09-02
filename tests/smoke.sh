@@ -40,9 +40,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Default the S3 endpoint to the console endpoint (single-port deployments).
-[[ -z "$BKT_S3_ENDPOINT" ]] && BKT_S3_ENDPOINT="$BKT_ENDPOINT"
-
 # ── Load .env from project root ───────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/../.env"
@@ -57,6 +54,21 @@ load_env_var() {
 }
 
 [[ -z "$BKT_PASSWORD" ]] && BKT_PASSWORD=$(load_env_var "ADMIN_PASSWORD")
+
+# Resolve the S3 endpoint. The console SPA answers 200 for ANY path, so
+# pointing S3 clients at the console port makes every S3 test silently bogus —
+# derive the real S3 listener port from .env (SERVER_PORT is the S3-compatible
+# API port in the compose stack) before falling back to the console endpoint
+# (true single-port deployments only).
+if [[ -z "$BKT_S3_ENDPOINT" ]]; then
+  _s3_port=$(load_env_var "SERVER_PORT")
+  _console_port="${BKT_ENDPOINT##*:}"
+  if [[ -n "$_s3_port" && "$_s3_port" != "$_console_port" ]]; then
+    BKT_S3_ENDPOINT="$(echo "$BKT_ENDPOINT" | sed -E 's#:[0-9]+/?$##'):${_s3_port}"
+  else
+    BKT_S3_ENDPOINT="$BKT_ENDPOINT"
+  fi
+fi
 
 if [[ -z "$BKT_PASSWORD" ]]; then
   echo "Error: BKT_PASSWORD required. Pass --password or set ADMIN_PASSWORD in .env"
@@ -84,6 +96,8 @@ JWT_TOKEN=""; REFRESH_TOKEN=""
 ACCESS_KEY=""; SECRET_KEY=""; ACCESS_KEY_ID=""
 TEST_BUCKET=""              # set per storage-backend pass (see run_storage_suite)
 CREATED_BUCKETS=()          # every bucket created, for cleanup
+LINKED_BUCKET=""            # pre-provisioned S3 bucket the s3 pass links to (from S3_BUCKETS)
+LINKED_PREREGISTERED=false  # true when that bucket was already registered in bkt
 AWS_PROFILE="bkt-smoke-$$"
 TEMP_FILES=()
 
@@ -131,6 +145,9 @@ cleanup() {
     [[ -n "$ACCESS_KEY" ]] && \
       aws s3 rm "s3://${b}" --recursive \
         --endpoint-url "$BKT_S3_ENDPOINT" --no-verify-ssl --profile "$AWS_PROFILE" &>/dev/null || true
+    # Keep the registration of an operator-provisioned linked bucket — only the
+    # test objects (removed above) belong to this run.
+    [[ "$b" == "${LINKED_BUCKET:-}" && "$LINKED_PREREGISTERED" == "true" ]] && continue
     [[ -n "$JWT_TOKEN" ]] && \
       api -X DELETE "${BKT_ENDPOINT}/api/buckets/${b}" \
         -H "Authorization: Bearer ${JWT_TOKEN}" &>/dev/null || true
@@ -404,6 +421,18 @@ if isinstance(keys, list):
 test_create_bucket() {
   local backend="${1:-local}"
   TEST_BUCKET="bkt-smoke-${backend}-$(date +%s)-${RANDOM}"
+  # A least-privilege IAM user typically may NOT create buckets on AWS. When
+  # .env pins the allowed bucket(s) via S3_BUCKETS, link the s3 pass to the
+  # first allowed bucket (bkt's create API links to an existing S3 bucket of
+  # the same name) instead of inventing a name IAM will deny.
+  if [[ "$backend" == "s3" ]]; then
+    local allowed; allowed=$(load_env_var "S3_BUCKETS" | cut -d, -f1 | tr -d ' ')
+    if [[ -n "$allowed" ]]; then
+      TEST_BUCKET="$allowed"
+      LINKED_BUCKET="$allowed"
+      log "s3 pass uses pre-provisioned bucket '${TEST_BUCKET}' (from S3_BUCKETS)"
+    fi
+  fi
   CREATED_BUCKETS+=("$TEST_BUCKET")
   bold "Bucket management — ${backend} backend (${TEST_BUCKET})"
 
@@ -413,9 +442,25 @@ test_create_bucket() {
     -H "Content-Type: application/json" \
     -d "{\"name\":\"${TEST_BUCKET}\",\"storage_backend\":\"${backend}\"}")
 
-  echo "$resp" | grep -q '"name"' \
-    && pass "POST /api/buckets → ${backend} bucket '${TEST_BUCKET}' created" \
-    || { fail "POST /api/buckets (${backend})" "$resp"; return 1; }
+  if echo "$resp" | grep -q '"name"'; then
+    pass "POST /api/buckets → ${backend} bucket '${TEST_BUCKET}' created"
+  elif [[ -n "$LINKED_BUCKET" && "$TEST_BUCKET" == "$LINKED_BUCKET" ]] \
+      && echo "$resp" | grep -qi "already exists"; then
+    # The operator registered the pre-provisioned bucket themselves (e.g. via
+    # the UI) — reuse it, and validate the backend binding from a GET instead.
+    LINKED_PREREGISTERED=true
+    pass "POST /api/buckets → pre-provisioned bucket already registered (reusing)"
+    resp=$(api "${BKT_ENDPOINT}/api/buckets/${TEST_BUCKET}" \
+      -H "Authorization: Bearer ${JWT_TOKEN}")
+  else
+    fail "POST /api/buckets (${backend})" "$resp"; return 1
+  fi
+
+  # Start the pass from an empty bucket — a linked pre-provisioned bucket may
+  # hold leftovers from an earlier aborted run, which would skew count checks.
+  if [[ "$backend" == "s3" ]]; then
+    s3 rm "s3://${TEST_BUCKET}" --recursive &>/dev/null || true
+  fi
 
   # Confirm the server actually recorded the requested backend
   echo "$resp" | grep -q "\"storage_backend\":\"${backend}\"" \

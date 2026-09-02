@@ -28,11 +28,17 @@ type DatabaseConfig struct {
 }
 
 type ServerConfig struct {
-	Port        string
-	Host        string
-	ConsolePort string // Web UI + REST API listener (browser-facing)
-	S3APIPort   string // S3-compatible API listener (aws-cli/s3fs, root paths)
-	FrontendURL string // URL where frontend is served (for SSO redirects)
+	Port           string
+	Host           string
+	ConsolePort    string   // Web UI + REST API listener (browser-facing)
+	S3APIPort      string   // S3-compatible API listener (aws-cli/s3fs, root paths)
+	FrontendURL    string   // URL where frontend is served (for SSO redirects)
+	TrustedProxies []string // CIDRs/IPs whose X-Forwarded-For is trusted; empty = trust none
+	MetricsToken   string   // when set, /metrics requires "Authorization: Bearer <token>"
+	// S3PublicEndpoint is the base URL clients use to reach the S3 listener
+	// (embedded in presigned URLs). Empty = derive from the request host +
+	// S3APIPort, which is right whenever console and S3 share a hostname.
+	S3PublicEndpoint string
 }
 
 type TLSConfig struct {
@@ -52,13 +58,23 @@ type AuthConfig struct {
 	AdminEmail           string
 	AllowRegistration    bool
 	AuthRateLimit        int // requests per minute per IP on auth endpoints (default 5)
+	S3RateLimit          int // requests per minute per IP on the S3 listener (0 = disabled)
 }
 
 type StorageConfig struct {
 	Backend     string // "local" or "s3"
 	RootPath    string // For local storage
 	MaxFileSize int64
-	S3          S3Config
+	// EnforceContentTypeDetection, when true, ignores the client's Content-Type,
+	// detects it from magic bytes, and rejects "unsafe" types. Default false —
+	// S3's contract is that Content-Type is client-declared metadata, and
+	// rejecting binaries breaks CI artifacts, container layers, and backups.
+	EnforceContentTypeDetection bool
+	// S3SSE, when true, requests SSE-S3 (AES256) server-side encryption on
+	// every object written through the S3 backend. Local-backend bytes are NOT
+	// encrypted by bkt — use disk-level encryption (see docs).
+	S3SSE bool
+	S3    S3Config
 }
 
 type S3Config struct {
@@ -119,7 +135,10 @@ func Load() *Config {
 		Server: ServerConfig{
 			Port:        getEnv("SERVER_PORT", "9000"),
 			Host:        getEnv("SERVER_HOST", "0.0.0.0"),
-			ConsolePort: getEnv("CONSOLE_PORT", "9443"),
+			ConsolePort:    getEnv("CONSOLE_PORT", "9443"),
+			TrustedProxies: splitAndTrim(getEnv("TRUSTED_PROXIES", ""), ","),
+			MetricsToken:     getEnv("METRICS_TOKEN", ""),
+			S3PublicEndpoint: getEnv("S3_PUBLIC_ENDPOINT", ""),
 			S3APIPort:   getEnv("S3_API_PORT", "9000"),
 			FrontendURL: getEnv("FRONTEND_URL", "https://localhost"),
 		},
@@ -133,11 +152,14 @@ func Load() *Config {
 			AdminEmail:         getEnv("ADMIN_EMAIL", "admin@localhost"),
 			AllowRegistration:  getEnv("ALLOW_REGISTRATION", "false") == "true",
 			AuthRateLimit:      getEnvInt("AUTH_RATE_LIMIT", 5),
+			S3RateLimit:        getEnvInt("S3_RATE_LIMIT", 0),
 		},
 		Storage: StorageConfig{
-			Backend:     getEnv("STORAGE_BACKEND", "local"), // "local" or "s3"
-			RootPath:    getEnv("STORAGE_ROOT", "/data/buckets"),
-			MaxFileSize: 5 * 1024 * 1024 * 1024, // 5GB
+			Backend:                     getEnv("STORAGE_BACKEND", "local"), // "local" or "s3"
+			RootPath:                    getEnv("STORAGE_ROOT", "/data/buckets"),
+			MaxFileSize:                 5 * 1024 * 1024 * 1024, // 5GB
+			EnforceContentTypeDetection: getEnv("CONTENT_TYPE_ENFORCEMENT", "false") == "true",
+			S3SSE:                       getEnv("S3_SSE", "false") == "true",
 			S3: S3Config{
 				Enabled:         getEnv("S3_ENABLED", "false") == "true",
 				Endpoint:        getEnv("S3_ENDPOINT", "s3.amazonaws.com"),

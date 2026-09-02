@@ -1,0 +1,92 @@
+{{- if .Values.postgresql.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-postgresql
+  labels:
+    {{- include "bkt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+spec:
+  clusterIP: None
+  ports:
+    - port: 5432
+      targetPort: postgres
+      name: postgres
+  selector:
+    {{- include "bkt.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-postgresql
+  labels:
+    {{- include "bkt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+spec:
+  serviceName: {{ .Release.Name }}-postgresql
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "bkt.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: postgresql
+  template:
+    metadata:
+      labels:
+        {{- include "bkt.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: postgresql
+    spec:
+      containers:
+        - name: postgresql
+          image: "{{ .Values.postgresql.image.repository }}:{{ .Values.postgresql.image.tag }}"
+          imagePullPolicy: {{ .Values.postgresql.image.pullPolicy }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.postgresql.auth.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.postgresql.auth.username | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "bkt.fullname" . }}-backend
+                  key: DB_PASSWORD
+            # Keep data under a subdirectory so the PVC's lost+found doesn't
+            # trip initdb.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.postgresql.auth.username | quote }}]
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.postgresql.auth.username | quote }}]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.postgresql.resources | nindent 12 }}
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+  {{- if .Values.postgresql.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.postgresql.persistence.size }}
+        {{- if .Values.postgresql.persistence.storageClass }}
+        storageClassName: {{ .Values.postgresql.persistence.storageClass }}
+        {{- end }}
+  {{- else }}
+      volumes:
+        - name: pgdata
+          emptyDir: {}
+  {{- end }}
+{{- end }}

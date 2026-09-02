@@ -6,6 +6,14 @@ This guide explains how to mount your BKT buckets as local filesystems using s3f
 > default — separate from the web console / REST API on `9443`. Always point
 > s3fs (and any other S3 client) at `https://<host>:9000`.
 
+> **Compatibility:** Everything s3fs relies on is fully supported by bkt —
+> multipart uploads (including listing in-progress uploads and
+> `UploadPartCopy`), Range reads, `CopyObject`, `HeadBucket`/`HeadObject`,
+> `DeleteObjects`, and ListObjects V1/V2 with prefixes and delimiters. No
+> `nomultipart` or other degraded-mode workarounds are needed. One deliberate
+> exception: **bucket creation via the S3 API is disabled** — create buckets in
+> the web console first, then mount them.
+
 ## Prerequisites
 
 1. **Install s3fs-fuse**
@@ -320,7 +328,7 @@ chmod +x mount-bkt-buckets.sh
 ## Additional Resources
 
 - s3fs-fuse documentation: https://github.com/s3fs-fuse/s3fs-fuse
-- BKT policy documentation: See POLICIES.md in the docs folder
+- BKT policy documentation: [Policies API](../api/policies.md)
 - BKT access key management: Access through the web UI
 
 ## Support

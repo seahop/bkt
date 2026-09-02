@@ -15,6 +15,7 @@ type MultipartUpload struct {
 	BucketName  string    `gorm:"index;not null" json:"bucket_name"`
 	ObjectKey   string    `gorm:"not null" json:"object_key"`
 	ContentType string    `json:"content_type"`
+	Metadata    *string   `gorm:"type:jsonb" json:"metadata,omitempty"` // x-amz-meta-* captured at initiate, applied at complete
 	Status      string    `gorm:"default:'in-progress';index" json:"status"` // in-progress, completed, aborted
 	CreatedAt   time.Time `gorm:"index" json:"created_at"`
 	ExpiresAt   time.Time `gorm:"index;not null" json:"expires_at"` // 7 days — for abandoned upload cleanup

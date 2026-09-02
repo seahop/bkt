@@ -359,6 +359,114 @@ curl -k -X DELETE https://localhost:9443/api/policies/users/ece39642-19ac-4ea3-b
 
 ---
 
+## Groups
+
+Groups are named sets of users that policies can attach to, so a team's permissions are managed in one place instead of per user. All group endpoints are **admin only** and live under `https://localhost:9443/api/groups`.
+
+**Effective policies:** a user's effective policies are the **union** of their directly attached policies and the policies of every group they belong to. All of them are evaluated together under the same rules as below — an explicit `Deny` in any of them (direct or group) still overrides every `Allow`.
+
+### List Groups
+
+**Endpoint:** `GET /groups`
+
+**Success Response (200 OK):** array of groups, each with its members (`users`) and attached `policies`:
+```json
+[
+  {
+    "id": "uuid",
+    "name": "engineering",
+    "description": "Engineering team",
+    "users": [ { "id": "uuid", "username": "alice", "...": "..." } ],
+    "policies": [ { "id": "uuid", "name": "ReadOnlyPolicy", "...": "..." } ],
+    "created_at": "timestamp",
+    "updated_at": "timestamp"
+  }
+]
+```
+
+### Create Group
+
+**Endpoint:** `POST /groups`
+
+**Request Body:**
+```json
+{
+  "name": "engineering",
+  "description": "Engineering team"
+}
+```
+
+- `name` (string, required) - 2-64 characters, unique
+- `description` (string, optional)
+
+**Success Response (201 Created):** the group object
+
+**Error Responses:**
+- `400 Bad Request` - Invalid name
+- `409 Conflict` - Group already exists
+
+**Example:**
+```bash
+curl -k -X POST https://localhost:9443/api/groups \
+  -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...' \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "engineering", "description": "Engineering team"}'
+```
+
+### Delete Group
+
+**Endpoint:** `DELETE /groups/:id`
+
+Removes the group along with its memberships and policy attachments. The users and policies themselves are untouched.
+
+**Success Response (200 OK):** `{"message": "Group deleted"}`
+
+### Add Member
+
+**Endpoint:** `POST /groups/:id/members`
+
+**Request Body:**
+```json
+{ "user_id": "ece39642-19ac-4ea3-b5cb-e818ce0a9fb9" }
+```
+
+**Success Response (200 OK):** `{"message": "Member added"}` (adding an existing member is a no-op)
+
+**Error Responses:**
+- `400 Bad Request` - Invalid group or user ID
+- `404 Not Found` - Group or user not found
+
+### Remove Member
+
+**Endpoint:** `DELETE /groups/:id/members/:user_id`
+
+**Success Response (200 OK):** `{"message": "Member removed"}`
+
+### Attach Policy to Group
+
+**Endpoint:** `POST /groups/:id/policies`
+
+**Request Body:**
+```json
+{ "policy_id": "b650551f-1059-4927-9d1c-1c4643fcbe75" }
+```
+
+**Success Response (200 OK):** `{"message": "Policy attached"}`
+
+**Error Responses:**
+- `400 Bad Request` - Invalid group or policy ID
+- `404 Not Found` - Group or policy not found
+
+### Detach Policy from Group
+
+**Endpoint:** `DELETE /groups/:id/policies/:policy_id`
+
+**Success Response (200 OK):** `{"message": "Policy detached"}`
+
+> All group operations (create, delete, membership, and policy attachment changes) are recorded in the audit log.
+
+---
+
 ## Policy Evaluation
 
 ### Evaluation Rules
@@ -366,7 +474,7 @@ curl -k -X DELETE https://localhost:9443/api/policies/users/ece39642-19ac-4ea3-b
 1. **DENY-BY-DEFAULT**: Access is denied unless explicitly allowed
 2. **EXPLICIT DENY WINS**: An explicit `Deny` overrides every `Allow` — across **both** the user's identity policies **and** the bucket (resource) policy. A user-policy Deny is honored even when a bucket policy allows the action.
 3. **ADMIN BYPASS**: Admin users automatically pass all policy checks
-4. **MULTIPLE POLICIES**: All user policies plus the bucket policy are evaluated; access is granted if any of them allows and none denies (union of permissions, minus any deny)
+4. **MULTIPLE POLICIES**: All of the user's effective policies (direct policies ∪ group policies) plus the bucket policy are evaluated; access is granted if any of them allows and none denies (union of permissions, minus any deny)
 
 ### Evaluation Flow
 

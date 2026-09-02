@@ -5,6 +5,7 @@ Complete index of all documentation files for bkt.
 ## Quick Reference
 
 - **Getting Started:** [docs/guides/getting-started.md](guides/getting-started.md)
+- **Feature Guide:** [docs/guides/features.md](guides/features.md)
 - **Full API Reference:** [docs/api/API.md](api/API.md)
 - **SSO Setup:** [docs/guides/sso-setup.md](guides/sso-setup.md)
 - **S3fs Mounting:** [docs/guides/MOUNTING.md](guides/MOUNTING.md)
@@ -22,6 +23,7 @@ Complete index of all documentation files for bkt.
 
 ### User Guides
 - [docs/guides/getting-started.md](guides/getting-started.md) - Quick start guide
+- [docs/guides/features.md](guides/features.md) - **Feature guide**: versioning, lifecycle, quotas, retention (WORM), share links, metadata/tags, webhooks, groups, temporary credentials, replication, encryption
 - [docs/guides/admin-guide.md](guides/admin-guide.md) - Administrator's guide
 - [docs/guides/sso-setup.md](guides/sso-setup.md) - SSO configuration and policy integration
 - [docs/guides/MOUNTING.md](guides/MOUNTING.md) - S3fs mounting guide
@@ -33,7 +35,9 @@ Complete index of all documentation files for bkt.
 - [docs/deployment/deployment-options.md](deployment/deployment-options.md) - The three ways to run bkt (omnibus, dev compose, prod/Helm)
 - [docs/deployment/configuration.md](deployment/configuration.md) - Environment-variable reference (`docker run -e …`)
 - [docs/deployment/production-checklist.md](deployment/production-checklist.md) - Production deployment checklist
+- [docs/deployment/backup-restore.md](deployment/backup-restore.md) - Backup & restore procedure (and the ENCRYPTION_KEY dependency)
 - [docs/deployment/vault-oidc-setup.md](deployment/vault-oidc-setup.md) - Vault OIDC SSO setup
+- [charts/bkt/README.md](../charts/bkt/README.md) - Kubernetes deployment with the Helm chart
 
 ### Examples
 - [docs/examples/curl-examples.md](examples/curl-examples.md) - cURL command examples
@@ -42,9 +46,10 @@ Complete index of all documentation files for bkt.
 
 ### For New Users
 1. [Getting Started](guides/getting-started.md)
-2. [Authentication API](api/authentication.md)
-3. [Buckets and Objects API](api/buckets-and-objects.md)
-4. [cURL Examples](examples/curl-examples.md)
+2. [Feature Guide](guides/features.md)
+3. [Authentication API](api/authentication.md)
+4. [Buckets and Objects API](api/buckets-and-objects.md)
+5. [cURL Examples](examples/curl-examples.md)
 
 ### For Administrators
 1. [Admin Guide](guides/admin-guide.md)
@@ -52,6 +57,7 @@ Complete index of all documentation files for bkt.
 3. [Policies API](api/policies.md)
 4. [Security Overview](security/security-overview.md)
 5. [Production Checklist](deployment/production-checklist.md)
+6. [Backup & Restore](deployment/backup-restore.md)
 
 ### For Developers
 1. [Full API Reference](api/API.md)
@@ -67,12 +73,13 @@ Complete index of all documentation files for bkt.
 
 ### Authentication & Authorization
 - [Authentication API](api/authentication.md) - JWT tokens
-- [SSO Setup](guides/sso-setup.md) - Vault JWT and Google OAuth SSO
+- [SSO Setup](guides/sso-setup.md) - Google OIDC and generic OIDC (any standard IdP) SSO
 - [Access Keys API](api/access-keys.md) - Access/secret keys
 - [Policies API](api/policies.md) - IAM policies
 - [Security Overview](security/security-overview.md) - Complete security model
 
 ### Storage Operations
+- [Feature Guide](guides/features.md) - Versioning, lifecycle, quotas, retention, share links, tags, webhooks, replication
 - [Buckets and Objects API](api/buckets-and-objects.md) - All bucket/object operations
 - [cURL Examples](examples/curl-examples.md) - Command-line examples
 
@@ -96,6 +103,7 @@ docs/
 │   └── buckets-and-objects.md
 ├── guides/                            # User guides
 │   ├── getting-started.md
+│   ├── features.md                    # Feature guide (versioning, lifecycle, webhooks, ...)
 │   ├── admin-guide.md
 │   ├── sso-setup.md                   # SSO and policy integration
 │   └── MOUNTING.md                    # S3fs mounting guide
@@ -105,10 +113,14 @@ docs/
 │   ├── deployment-options.md          # The three ways to run bkt
 │   ├── configuration.md               # Environment-variable reference
 │   ├── production-checklist.md
+│   ├── backup-restore.md             # Backup & restore procedure
 │   └── vault-oidc-setup.md
 └── examples/                          # Code examples
     └── curl-examples.md
 ```
+
+The Kubernetes deployment guide lives with the Helm chart at
+[charts/bkt/README.md](../charts/bkt/README.md).
 
 ## Contributing to Documentation
 
@@ -156,4 +168,4 @@ Found an issue or want to improve documentation?
 
 ---
 
-**Last Updated:** 2026-06-04
+**Last Updated:** 2026-09-02

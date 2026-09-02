@@ -33,6 +33,37 @@ func NewPolicyService() *PolicyService {
 }
 
 // CheckBucketAccess checks if a user has permission to perform an action on a bucket
+
+// loadUserWithEffectivePolicies loads a user with their EFFECTIVE policies:
+// directly-attached policies plus the policies of every group they belong to
+// (deduplicated). All authorization checks must resolve policies through this
+// so group membership actually grants access.
+func loadUserWithEffectivePolicies(userID uuid.UUID) (*models.User, error) {
+	var user models.User
+	if err := database.DB.Preload("Policies").First(&user, userID).Error; err != nil {
+		return nil, err
+	}
+	var groupPolicies []models.Policy
+	if err := database.DB.
+		Joins("JOIN group_policies gp ON gp.policy_id = policies.id").
+		Joins("JOIN user_groups ug ON ug.group_id = gp.group_id").
+		Where("ug.user_id = ?", userID).
+		Find(&groupPolicies).Error; err != nil {
+		return nil, err
+	}
+	seen := make(map[uuid.UUID]bool, len(user.Policies))
+	for _, p := range user.Policies {
+		seen[p.ID] = true
+	}
+	for _, p := range groupPolicies {
+		if !seen[p.ID] {
+			user.Policies = append(user.Policies, p)
+			seen[p.ID] = true
+		}
+	}
+	return &user, nil
+}
+
 func (ps *PolicyService) CheckBucketAccess(userID uuid.UUID, bucketName, action string) (result bool, err error) {
 	// Recover from panics to prevent service crash (fail-safe: deny access on panic)
 	defer func() {
@@ -43,10 +74,11 @@ func (ps *PolicyService) CheckBucketAccess(userID uuid.UUID, bucketName, action 
 	}()
 
 	// Get user with policies
-	var user models.User
-	if err := database.DB.Preload("Policies").First(&user, userID).Error; err != nil {
+	userPtr, err := loadUserWithEffectivePolicies(userID)
+	if err != nil {
 		return false, fmt.Errorf("failed to fetch user: %w", err)
 	}
+	user := *userPtr
 
 	// Admin bypass - admins can do anything
 	if user.IsAdmin {
@@ -89,10 +121,11 @@ func (ps *PolicyService) CheckObjectAccess(userID uuid.UUID, bucketName, objectK
 	}()
 
 	// Get user with policies
-	var user models.User
-	if err := database.DB.Preload("Policies").First(&user, userID).Error; err != nil {
+	userPtr, err := loadUserWithEffectivePolicies(userID)
+	if err != nil {
 		return false, fmt.Errorf("failed to fetch user: %w", err)
 	}
+	user := *userPtr
 
 	// Admin bypass - admins can do anything
 	if user.IsAdmin {
@@ -194,10 +227,11 @@ func decide(userResult, bucketResult security.PolicyResult) bool {
 
 // GetUserPolicies retrieves all policies attached to a user
 func (ps *PolicyService) GetUserPolicies(userID uuid.UUID) ([]models.Policy, error) {
-	var user models.User
-	if err := database.DB.Preload("Policies").First(&user, userID).Error; err != nil {
+	userPtr, err := loadUserWithEffectivePolicies(userID)
+	if err != nil {
 		return nil, fmt.Errorf("failed to fetch user: %w", err)
 	}
+	user := *userPtr
 	return user.Policies, nil
 }
 
@@ -268,10 +302,11 @@ func (ps *PolicyService) FilterAccessibleBuckets(userID uuid.UUID, buckets []mod
 	}
 
 	// Load user with policies ONCE (instead of N times)
-	var user models.User
-	if err := database.DB.Preload("Policies").First(&user, userID).Error; err != nil {
+	userPtr, err := loadUserWithEffectivePolicies(userID)
+	if err != nil {
 		return nil, fmt.Errorf("failed to fetch user: %w", err)
 	}
+	user := *userPtr
 
 	// Admin bypass - admins can access all buckets
 	if user.IsAdmin {

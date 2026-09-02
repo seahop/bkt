@@ -25,7 +25,15 @@ data:
   S3_BUCKET_PREFIX: {{ .Values.backend.env.S3_BUCKET_PREFIX | default "" | quote }}
   S3_USE_SSL: {{ .Values.backend.env.S3_USE_SSL | default "true" | quote }}
   S3_FORCE_PATH_STYLE: {{ .Values.backend.env.S3_FORCE_PATH_STYLE | default "false" | quote }}
+  S3_SSE: {{ .Values.backend.env.S3_SSE | default "false" | quote }}
+  S3_BUCKETS: {{ .Values.backend.env.S3_BUCKETS | default "" | quote }}
+  S3_PUBLIC_ENDPOINT: {{ .Values.backend.env.S3_PUBLIC_ENDPOINT | default "" | quote }}
+  AUTH_RATE_LIMIT: {{ .Values.backend.env.AUTH_RATE_LIMIT | default "5" | quote }}
+  CONTENT_TYPE_ENFORCEMENT: {{ .Values.backend.env.CONTENT_TYPE_ENFORCEMENT | default "false" | quote }}
   CORS_ALLOWED_ORIGINS: {{ .Values.backend.env.CORS_ALLOWED_ORIGINS | default "" | quote }}
+  TRUSTED_PROXIES: {{ .Values.backend.env.TRUSTED_PROXIES | default "" | quote }}
+  S3_RATE_LIMIT: {{ .Values.backend.env.S3_RATE_LIMIT | default "0" | quote }}
+  AUDIT_RETENTION_DAYS: {{ .Values.backend.env.AUDIT_RETENTION_DAYS | default "90" | quote }}
   GOOGLE_OIDC_ENABLED: {{ .Values.backend.env.GOOGLE_OIDC_ENABLED | default "false" | quote }}
   GOOGLE_CLIENT_ID: {{ .Values.backend.env.GOOGLE_CLIENT_ID | default "" | quote }}
   GOOGLE_REDIRECT_URL: {{ .Values.backend.env.GOOGLE_REDIRECT_URL | default "" | quote }}

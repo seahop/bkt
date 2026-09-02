@@ -4,6 +4,7 @@ import { listPolicies, createPolicy, updatePolicy, deletePolicy, getPolicyTempla
 import { useAuthStore } from '../store/authStore';
 import { bucketApi, userApi } from '../services/api';
 import type { Bucket, User } from '../types';
+import { getErrorMessage } from '../utils/errors';
 
 // Helper to extract bucket names from a policy document
 const extractBucketsFromPolicy = (document: string): string[] => {
@@ -48,7 +49,7 @@ export default function Policies() {
       setError('');
     } catch (err: any) {
       console.error('Failed to fetch policies:', err);
-      setError(err.response?.data?.message || 'Failed to load policies');
+      setError(getErrorMessage(err, 'Failed to load policies'));
     } finally {
       setLoading(false);
     }
@@ -61,7 +62,7 @@ export default function Policies() {
       await deletePolicy(id);
       await fetchPolicies();
     } catch (err: any) {
-      alert(err.response?.data?.message || 'Failed to delete policy');
+      alert(getErrorMessage(err, 'Failed to delete policy'));
     }
   };
 
@@ -90,50 +91,44 @@ export default function Policies() {
   };
 
   return (
-    <div className="p-8">
-      <div className="mb-8 flex justify-between items-center">
+    <div className="page">
+      <div className="flex items-start justify-between gap-4 mb-8">
         <div>
-          <h1 className="text-3xl font-bold text-dark-text mb-2">Policies</h1>
-          <p className="text-dark-textSecondary">Manage IAM-style access control policies</p>
+          <h1 className="page-title">Policies</h1>
+          <p className="page-subtitle">Manage IAM-style access control policies</p>
         </div>
         {user?.is_admin && (
-          <button
-            onClick={handleCreatePolicy}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
-          >
-            <Plus className="w-5 h-5" />
+          <button onClick={handleCreatePolicy} className="btn-primary">
+            <Plus className="w-4 h-4" />
             Create Policy
           </button>
         )}
       </div>
 
       {error && (
-        <div className="mb-6 bg-red-500/10 border border-red-500 text-red-500 px-4 py-3 rounded-lg flex items-center gap-2">
-          <AlertCircle className="w-5 h-5" />
-          {error}
+        <div className="alert-error mb-6">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span>{error}</span>
         </div>
       )}
 
       {loading ? (
-        <div className="bg-dark-surface border border-dark-border rounded-lg p-12 text-center">
-          <Shield className="w-16 h-16 text-dark-textSecondary mx-auto mb-4 opacity-50 animate-pulse" />
-          <p className="text-dark-textSecondary">Loading policies...</p>
+        <div className="flex flex-col items-center justify-center h-64 gap-3">
+          <div className="spinner" />
+          <p className="text-sm text-dark-textSecondary">Loading policies…</p>
         </div>
       ) : policies.length === 0 ? (
-        <div className="bg-dark-surface border border-dark-border rounded-lg p-12 text-center">
-          <Shield className="w-16 h-16 text-dark-textSecondary mx-auto mb-4 opacity-50" />
-          <h2 className="text-xl font-semibold text-dark-text mb-2">No Policies Yet</h2>
-          <p className="text-dark-textSecondary mb-4">
+        <div className="card empty-state">
+          <Shield className="empty-state-icon" />
+          <h3 className="text-base font-semibold text-dark-text mb-1">No policies yet</h3>
+          <p className="text-sm text-dark-textSecondary mb-5 max-w-sm">
             {user?.is_admin
-              ? 'Create your first policy to control access to buckets and objects'
-              : 'No policies have been assigned to you'}
+              ? 'Create your first policy to control access to buckets and objects.'
+              : 'No policies have been assigned to you.'}
           </p>
           {user?.is_admin && (
-            <button
-              onClick={handleCreatePolicy}
-              className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
-            >
-              <Plus className="w-5 h-5" />
+            <button onClick={handleCreatePolicy} className="btn-secondary">
+              <Plus className="w-4 h-4" />
               Create First Policy
             </button>
           )}
@@ -145,61 +140,64 @@ export default function Policies() {
             return (
               <div
                 key={policy.id}
-                className="bg-dark-surface border border-dark-border rounded-lg p-6 hover:border-blue-500/50 transition-colors"
+                className="card p-6 transition-colors hover:border-dark-borderStrong"
               >
-                <div className="flex items-start justify-between">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-3 mb-2">
-                      <Shield className="w-5 h-5 text-blue-500" />
-                      <h3 className="text-lg font-semibold text-dark-text">{policy.name}</h3>
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2.5 mb-1.5">
+                      <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-blue-600/15 shrink-0">
+                        <Shield className="w-4 h-4 text-blue-500" />
+                      </span>
+                      <h3 className="text-base font-semibold text-dark-text font-mono truncate">
+                        {policy.name}
+                      </h3>
                     </div>
-                    <p className="text-dark-textSecondary mb-3">{policy.description}</p>
+                    {policy.description && (
+                      <p className="text-sm text-dark-textSecondary mb-3">{policy.description}</p>
+                    )}
 
                     {/* Show buckets this policy applies to */}
-                    <div className="flex items-center gap-2 mb-3 flex-wrap">
-                      <Database className="w-4 h-4 text-dark-textSecondary" />
+                    <div className="flex items-center gap-1.5 mb-3 flex-wrap">
+                      <Database className="w-4 h-4 text-dark-textMuted shrink-0" />
                       {policyBuckets.length > 0 ? (
                         policyBuckets.map((bucket) => (
-                          <span
-                            key={bucket}
-                            className="px-2 py-0.5 text-xs bg-blue-500/20 text-blue-400 rounded"
-                          >
+                          <span key={bucket} className="badge-blue font-mono">
                             {bucket}
                           </span>
                         ))
                       ) : (
-                        <span className="text-xs text-dark-textSecondary">All buckets (*)</span>
+                        <span className="badge-gray">All buckets (*)</span>
                       )}
                     </div>
 
-                    <div className="flex items-center gap-4 text-sm text-dark-textSecondary">
-                      <span>Created: {new Date(policy.created_at).toLocaleDateString()}</span>
-                      <span>Updated: {new Date(policy.updated_at).toLocaleDateString()}</span>
+                    <div className="flex items-center gap-4 text-xs text-dark-textMuted tabular-nums">
+                      <span>Created {new Date(policy.created_at).toLocaleDateString()}</span>
+                      <span>Updated {new Date(policy.updated_at).toLocaleDateString()}</span>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1 shrink-0">
                     <button
                       onClick={() => handleViewPolicy(policy)}
-                      className="p-2 hover:bg-dark-bg rounded-lg transition-colors text-dark-textSecondary hover:text-blue-500"
+                      className="btn-icon"
                       title="View policy document"
                     >
-                      <FileText className="w-5 h-5" />
+                      <FileText className="w-4 h-4" />
                     </button>
                     {user?.is_admin && (
                       <>
                         <button
                           onClick={() => handleEditPolicy(policy)}
-                          className="p-2 hover:bg-dark-bg rounded-lg transition-colors text-dark-textSecondary hover:text-green-500"
+                          className="btn-icon"
                           title="Edit policy"
                         >
-                          <Edit className="w-5 h-5" />
+                          <Edit className="w-4 h-4" />
                         </button>
                         <button
                           onClick={() => handleDeletePolicy(policy.id)}
-                          className="p-2 hover:bg-dark-bg rounded-lg transition-colors text-dark-textSecondary hover:text-red-500"
+                          className="btn-icon hover:!text-red-400 hover:!bg-red-500/10"
                           title="Delete policy"
                         >
-                          <Trash2 className="w-5 h-5" />
+                          <Trash2 className="w-4 h-4" />
                         </button>
                       </>
                     )}
@@ -364,6 +362,24 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
   // Track initialization
   const [initialized, setInitialized] = useState(false);
 
+  // Track manual edits to the raw JSON and its validity
+  const [jsonManuallyEdited, setJsonManuallyEdited] = useState(false);
+  const [jsonError, setJsonError] = useState('');
+
+  // Validate the raw JSON document whenever it changes
+  useEffect(() => {
+    if (!document.trim()) {
+      setJsonError('');
+      return;
+    }
+    try {
+      JSON.parse(document);
+      setJsonError('');
+    } catch (err) {
+      setJsonError(`Invalid JSON: ${(err as Error).message}`);
+    }
+  }, [document]);
+
   // Fetch buckets and users
   useEffect(() => {
     const fetchData = async () => {
@@ -376,6 +392,7 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
         setUsers(usersData || []);
       } catch (err) {
         console.error('Failed to fetch data:', err);
+        setError(getErrorMessage(err, 'Failed to load buckets and users'));
       } finally {
         setLoadingBuckets(false);
         setLoadingUsers(false);
@@ -410,10 +427,24 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
     }
   }, [isEditMode, policy, initialized]);
 
+  // Warn before overwriting hand-edited JSON with a builder-generated document.
+  // Returns true if the builder is allowed to regenerate the document.
+  const confirmOverwriteJson = (): boolean => {
+    if (!jsonManuallyEdited) return true;
+    const ok = confirm(
+      'You have manually edited the policy JSON. Changing this selection will overwrite your edits. Continue?'
+    );
+    if (ok) {
+      setJsonManuallyEdited(false);
+    }
+    return ok;
+  };
+
   // Auto-update policy document when selections change (simple mode only)
   useEffect(() => {
     if (!advancedMode && (initialized || !isEditMode)) {
       if (selectedActions.length > 0 || selectedBuckets.length > 0) {
+        if (!confirmOverwriteJson()) return;
         generatePolicyDocument();
       }
     }
@@ -422,6 +453,7 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
   // Auto-update policy document in advanced mode
   useEffect(() => {
     if (advancedMode && selectedBuckets.length > 0) {
+      if (!confirmOverwriteJson()) return;
       generateAdvancedPolicyDocument();
     }
   }, [bucketPermissions, advancedMode, selectedBuckets]);
@@ -510,6 +542,14 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
       return;
     }
 
+    // Validate that the policy document is well-formed JSON before submitting
+    try {
+      JSON.parse(document);
+    } catch (parseErr) {
+      setError(`Policy document is not valid JSON: ${(parseErr as Error).message}`);
+      return;
+    }
+
     setLoading(true);
 
     try {
@@ -523,7 +563,7 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
       }
       onSuccess();
     } catch (err: any) {
-      setError(err.response?.data?.message || `Failed to ${isEditMode ? 'update' : 'create'} policy`);
+      setError(getErrorMessage(err, `Failed to ${isEditMode ? 'update' : 'create'} policy`));
     } finally {
       setLoading(false);
     }
@@ -670,50 +710,51 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-black bg-opacity-50 flex items-center justify-center p-4">
-      <div className="bg-dark-surface rounded-lg max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col">
-        <div className="p-6 border-b border-dark-border">
-          <h2 className="text-2xl font-bold text-dark-text">
+    <div className="modal-overlay">
+      <div className="modal-panel !max-w-4xl !p-0 !overflow-hidden flex flex-col">
+        <div className="p-6 border-b border-dark-border shrink-0">
+          <h2 className="modal-title">
             {isEditMode ? 'Edit Policy' : 'Create Policy'}
           </h2>
-          <p className="text-dark-textSecondary mt-1">
+          <p className="text-sm text-dark-textSecondary mt-1">
             {isEditMode ? 'Modify the policy settings and permissions' : 'Define an IAM-style access control policy for users or teams'}
           </p>
         </div>
 
         <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-6 space-y-6">
           {error && (
-            <div className="bg-red-500/10 border border-red-500 text-red-500 px-4 py-3 rounded-lg">
-              {error}
+            <div className="alert-error">
+              <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+              <span>{error}</span>
             </div>
           )}
 
           {/* Policy Name - Always editable, first field */}
           <div>
-            <label className="block text-sm font-medium text-dark-text mb-2">
-              Policy Name <span className="text-red-500">*</span>
+            <label className="label">
+              Policy Name <span className="text-red-400">*</span>
             </label>
             <input
               type="text"
               value={name}
               onChange={(e) => handleNameChange(e.target.value)}
-              className="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="input"
               placeholder="e.g., team-engineering-access, devops-readonly"
               required
             />
-            <p className="text-xs text-dark-textSecondary mt-1">
+            <p className="help-text">
               Use a descriptive name. For SSO, this name must match the policy name in your JWT claims.
             </p>
           </div>
 
           {/* Description */}
           <div>
-            <label className="block text-sm font-medium text-dark-text mb-2">Description</label>
+            <label className="label">Description</label>
             <input
               type="text"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              className="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="input"
               placeholder="Brief description of what this policy does"
             />
           </div>
@@ -721,16 +762,16 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
           {/* User selection - only show in create mode */}
           {!isEditMode && (
             <div>
-              <label className="block text-sm font-medium text-dark-text mb-2">
-                <div className="flex items-center gap-2">
-                  <UserIcon className="w-4 h-4" />
+              <label className="label">
+                <span className="inline-flex items-center gap-2">
+                  <UserIcon className="w-4 h-4 text-dark-textMuted" />
                   Attach to User (Optional)
-                </div>
+                </span>
               </label>
               <select
                 value={selectedUserId}
                 onChange={(e) => setSelectedUserId(e.target.value)}
-                className="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="input"
                 disabled={loadingUsers}
               >
                 <option value="">No user (Team/SSO policy)</option>
@@ -740,33 +781,31 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
                   </option>
                 ))}
               </select>
-              <p className="text-xs text-dark-textSecondary mt-1">
+              <p className="help-text">
                 Leave empty to create a team policy for SSO, or select a user to attach immediately
               </p>
             </div>
           )}
 
           {/* Multi-bucket selection */}
-          <div className="border border-dark-border rounded-lg p-4">
-            <div className="flex items-center justify-between mb-3">
-              <label className="text-sm font-medium text-dark-text">
-                <div className="flex items-center gap-2">
-                  <FolderOpen className="w-4 h-4" />
-                  Select Buckets
-                </div>
-              </label>
+          <div className="bg-dark-inset border border-dark-border rounded-lg p-4">
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <h3 className="text-base font-semibold text-dark-text flex items-center gap-2">
+                <FolderOpen className="w-4 h-4 text-dark-textMuted" />
+                Buckets
+              </h3>
               <div className="flex gap-2">
                 <button
                   type="button"
                   onClick={handleSelectAllBuckets}
-                  className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors"
+                  className="btn-secondary btn-sm"
                 >
                   {selectedBuckets.length === buckets.length ? 'Deselect All' : 'Select All'}
                 </button>
                 <button
                   type="button"
                   onClick={() => setSelectedBuckets([])}
-                  className="px-3 py-1 text-xs bg-dark-bg hover:bg-dark-border text-dark-textSecondary rounded transition-colors"
+                  className="btn-ghost btn-sm"
                 >
                   Clear
                 </button>
@@ -774,57 +813,57 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
             </div>
 
             {loadingBuckets ? (
-              <p className="text-dark-textSecondary text-sm">Loading buckets...</p>
+              <p className="text-sm text-dark-textSecondary">Loading buckets…</p>
             ) : buckets.length === 0 ? (
-              <p className="text-dark-textSecondary text-sm">No buckets available</p>
+              <p className="text-sm text-dark-textSecondary">No buckets available</p>
             ) : (
               <div className="grid grid-cols-2 md:grid-cols-3 gap-2 max-h-40 overflow-y-auto">
                 {buckets.map((bucket) => (
                   <label
                     key={bucket.id}
-                    className={`flex items-center gap-2 p-2 rounded cursor-pointer transition-colors ${
+                    className={`flex items-center gap-2.5 p-2.5 rounded-lg border cursor-pointer transition-colors ${
                       selectedBuckets.includes(bucket.name)
-                        ? 'bg-blue-500/20 border border-blue-500'
-                        : 'bg-dark-bg border border-dark-border hover:border-blue-500/50'
+                        ? 'bg-accent-soft border-blue-500/50'
+                        : 'bg-dark-surface border-dark-border hover:border-dark-borderStrong'
                     }`}
                   >
                     <input
                       type="checkbox"
                       checked={selectedBuckets.includes(bucket.name)}
                       onChange={() => handleBucketToggle(bucket.name)}
-                      className="text-blue-600"
+                      className="accent-blue-600 shrink-0"
                     />
                     <div className="flex-1 min-w-0">
-                      <div className="text-sm text-dark-text truncate">{bucket.name}</div>
-                      <div className="text-xs text-dark-textSecondary">{bucket.storage_backend}</div>
+                      <div className="text-sm text-dark-text font-mono truncate">{bucket.name}</div>
+                      <div className="text-xs text-dark-textMuted">{bucket.storage_backend}</div>
                     </div>
                   </label>
                 ))}
               </div>
             )}
 
-            <p className="text-xs text-dark-textSecondary mt-2">
+            <p className="help-text mt-3">
               {selectedBuckets.length === 0
-                ? 'No buckets selected - policy will apply to all buckets (*)'
+                ? 'No buckets selected — policy will apply to all buckets (*)'
                 : `${selectedBuckets.length} bucket${selectedBuckets.length > 1 ? 's' : ''} selected`}
             </p>
           </div>
 
           {/* Mode Toggle - Only show when multiple buckets selected */}
           {selectedBuckets.length > 1 && (
-            <div className="flex items-center justify-between p-4 bg-dark-bg rounded-lg border border-dark-border">
+            <div className="flex items-center justify-between gap-3 bg-dark-inset border border-dark-border rounded-lg p-4">
               <div className="flex items-center gap-2">
-                <Settings2 className="w-4 h-4 text-dark-textSecondary" />
-                <span className="text-sm text-dark-text">Permission Mode</span>
+                <Settings2 className="w-4 h-4 text-dark-textMuted" />
+                <span className="text-sm font-medium text-dark-text">Permission Mode</span>
               </div>
-              <div className="flex gap-2">
+              <div className="flex gap-1 bg-dark-surface border border-dark-border rounded-lg p-1">
                 <button
                   type="button"
                   onClick={() => setAdvancedMode(false)}
-                  className={`px-3 py-1.5 text-sm rounded transition-colors ${
+                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
                     !advancedMode
                       ? 'bg-blue-600 text-white'
-                      : 'bg-dark-surface text-dark-textSecondary hover:text-dark-text'
+                      : 'text-dark-textSecondary hover:text-dark-text'
                   }`}
                 >
                   Simple (Same for all)
@@ -840,10 +879,10 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
                     }
                     setBucketPermissions(newPerms);
                   }}
-                  className={`px-3 py-1.5 text-sm rounded transition-colors ${
+                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
                     advancedMode
                       ? 'bg-blue-600 text-white'
-                      : 'bg-dark-surface text-dark-textSecondary hover:text-dark-text'
+                      : 'text-dark-textSecondary hover:text-dark-text'
                   }`}
                 >
                   Advanced (Per-bucket)
@@ -854,23 +893,21 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
 
           {/* Simple Mode - Action Selector */}
           {!advancedMode && (
-            <div className="border border-dark-border rounded-lg p-4">
-              <div className="flex items-center justify-between mb-4">
-                <label className="text-sm font-medium text-dark-text">
-                  Select Permissions
-                </label>
+            <div className="bg-dark-inset border border-dark-border rounded-lg p-4">
+              <div className="flex items-center justify-between gap-3 mb-4">
+                <h3 className="text-base font-semibold text-dark-text">Permissions</h3>
                 <div className="flex gap-2">
                   <button
                     type="button"
                     onClick={handleSelectAllActions}
-                    className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors"
+                    className="btn-secondary btn-sm"
                   >
                     Select All
                   </button>
                   <button
                     type="button"
                     onClick={() => setSelectedActions([])}
-                    className="px-3 py-1 text-xs bg-dark-bg hover:bg-dark-border text-dark-textSecondary rounded transition-colors"
+                    className="btn-ghost btn-sm"
                   >
                     Clear All
                   </button>
@@ -878,25 +915,25 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
               </div>
 
               <div className="mb-4">
-                <label className="text-sm font-medium text-dark-text mb-2 block">Effect</label>
+                <label className="label">Effect</label>
                 <div className="flex gap-4">
                   <label className="flex items-center gap-2 cursor-pointer">
                     <input
                       type="radio"
                       checked={effect === 'Allow'}
                       onChange={() => setEffect('Allow')}
-                      className="text-blue-600"
+                      className="accent-blue-600"
                     />
-                    <span className="text-sm text-dark-text">Allow</span>
+                    <span className="badge-green">Allow</span>
                   </label>
                   <label className="flex items-center gap-2 cursor-pointer">
                     <input
                       type="radio"
                       checked={effect === 'Deny'}
                       onChange={() => setEffect('Deny')}
-                      className="text-red-600"
+                      className="accent-red-600"
                     />
-                    <span className="text-sm text-dark-text">Deny</span>
+                    <span className="badge-red">Deny</span>
                   </label>
                 </div>
               </div>
@@ -905,11 +942,11 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
                 {(['read', 'write', 'bucket'] as const).map((category) => (
                   <div key={category} className="space-y-2">
                     <div className="flex items-center justify-between mb-2">
-                      <h4 className="text-xs font-semibold text-dark-text uppercase">{category}</h4>
+                      <h4 className="text-xs font-medium uppercase tracking-wider text-dark-textSecondary">{category}</h4>
                       <button
                         type="button"
                         onClick={() => handleSelectCategoryActions(category)}
-                        className="text-xs text-blue-500 hover:text-blue-400"
+                        className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
                       >
                         {S3_ACTIONS[category].every(a => selectedActions.includes(a.action)) ? 'Deselect' : 'Select'} All
                       </button>
@@ -920,11 +957,11 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
                           type="checkbox"
                           checked={selectedActions.includes(action)}
                           onChange={() => handleActionToggle(action)}
-                          className="mt-1 text-blue-600"
+                          className="mt-1 accent-blue-600"
                         />
                         <div>
-                          <div className="text-sm text-dark-text group-hover:text-blue-500">{label}</div>
-                          <div className="text-xs text-dark-textSecondary">{description}</div>
+                          <div className="text-sm text-dark-text group-hover:text-blue-400 transition-colors">{label}</div>
+                          <div className="text-xs text-dark-textMuted">{description}</div>
                         </div>
                       </label>
                     ))}
@@ -932,25 +969,21 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
                 ))}
               </div>
 
-              <div className="mt-4 flex items-center gap-2 text-sm">
-                <span className="text-dark-textSecondary">
-                  {selectedActions.length} action{selectedActions.length !== 1 ? 's' : ''} selected
-                </span>
-              </div>
+              <p className="help-text mt-4">
+                {selectedActions.length} action{selectedActions.length !== 1 ? 's' : ''} selected
+              </p>
             </div>
           )}
 
           {/* Advanced Mode - Per-bucket permissions */}
           {advancedMode && selectedBuckets.length > 0 && (
-            <div className="border border-dark-border rounded-lg p-4">
-              <div className="flex items-center justify-between mb-4">
-                <label className="text-sm font-medium text-dark-text">
-                  Per-Bucket Permissions
-                </label>
+            <div className="bg-dark-inset border border-dark-border rounded-lg p-4">
+              <div className="flex items-center justify-between gap-3 mb-4">
+                <h3 className="text-base font-semibold text-dark-text">Per-Bucket Permissions</h3>
                 <button
                   type="button"
                   onClick={applyFullAccessToAllBuckets}
-                  className="px-3 py-1 text-xs bg-green-600 hover:bg-green-700 text-white rounded transition-colors"
+                  className="btn-secondary btn-sm"
                 >
                   Full Access to All
                 </button>
@@ -963,28 +996,26 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
                   const actionCount = perms.actions.length;
 
                   return (
-                    <div key={bucketName} className="border border-dark-border rounded-lg overflow-hidden">
+                    <div key={bucketName} className="bg-dark-surface border border-dark-border rounded-lg overflow-hidden">
                       <button
                         type="button"
                         onClick={() => toggleBucketExpanded(bucketName)}
-                        className="w-full flex items-center justify-between p-3 bg-dark-bg hover:bg-dark-border transition-colors"
+                        className="w-full flex items-center justify-between gap-3 p-3 hover:bg-dark-surfaceHover transition-colors"
                       >
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
                           {isExpanded ? (
-                            <ChevronDown className="w-4 h-4 text-dark-textSecondary" />
+                            <ChevronDown className="w-4 h-4 text-dark-textMuted shrink-0" />
                           ) : (
-                            <ChevronRight className="w-4 h-4 text-dark-textSecondary" />
+                            <ChevronRight className="w-4 h-4 text-dark-textMuted shrink-0" />
                           )}
-                          <Database className="w-4 h-4 text-blue-500" />
-                          <span className="text-sm font-medium text-dark-text">{bucketName}</span>
+                          <Database className="w-4 h-4 text-blue-500 shrink-0" />
+                          <span className="text-sm font-medium text-dark-text font-mono truncate">{bucketName}</span>
                         </div>
-                        <div className="flex items-center gap-2">
-                          <span className={`px-2 py-0.5 text-xs rounded ${
-                            perms.effect === 'Allow' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
-                          }`}>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className={perms.effect === 'Allow' ? 'badge-green' : 'badge-red'}>
                             {perms.effect}
                           </span>
-                          <span className="text-xs text-dark-textSecondary">
+                          <span className="text-xs text-dark-textMuted tabular-nums">
                             {actionCount} action{actionCount !== 1 ? 's' : ''}
                           </span>
                         </div>
@@ -992,31 +1023,31 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
 
                       {isExpanded && (
                         <div className="p-4 border-t border-dark-border space-y-4">
-                          <div className="flex items-center justify-between">
+                          <div className="flex items-center justify-between gap-3">
                             <div className="flex gap-4">
                               <label className="flex items-center gap-2 cursor-pointer">
                                 <input
                                   type="radio"
                                   checked={perms.effect === 'Allow'}
                                   onChange={() => handleBucketEffectChange(bucketName, 'Allow')}
-                                  className="text-green-600"
+                                  className="accent-green-600"
                                 />
-                                <span className="text-sm text-dark-text">Allow</span>
+                                <span className="badge-green">Allow</span>
                               </label>
                               <label className="flex items-center gap-2 cursor-pointer">
                                 <input
                                   type="radio"
                                   checked={perms.effect === 'Deny'}
                                   onChange={() => handleBucketEffectChange(bucketName, 'Deny')}
-                                  className="text-red-600"
+                                  className="accent-red-600"
                                 />
-                                <span className="text-sm text-dark-text">Deny</span>
+                                <span className="badge-red">Deny</span>
                               </label>
                             </div>
                             <button
                               type="button"
                               onClick={() => handleBucketSelectAll(bucketName)}
-                              className="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors"
+                              className="btn-secondary btn-sm"
                             >
                               {ALL_ACTIONS.every(a => perms.actions.includes(a)) ? 'Deselect All' : 'Select All'}
                             </button>
@@ -1031,7 +1062,7 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
                                     type="checkbox"
                                     checked={perms.actions.includes(action)}
                                     onChange={() => handleBucketActionToggle(bucketName, action)}
-                                    className="text-blue-600"
+                                    className="accent-blue-600"
                                   />
                                   <span className="text-dark-text">{actionInfo?.label || action}</span>
                                 </label>
@@ -1049,29 +1080,27 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
 
           {/* Quick Templates - Simple mode only */}
           {!advancedMode && (
-            <div className="border-t border-dark-border pt-4">
-              <label className="block text-sm font-medium text-dark-text mb-2">
-                Quick Templates
-              </label>
+            <div className="border-t border-dark-border pt-5">
+              <label className="label">Quick Templates</label>
               <div className="flex gap-2 flex-wrap">
                 <button
                   type="button"
                   onClick={() => applyTemplate('readOnly')}
-                  className="px-3 py-1.5 text-sm bg-dark-bg hover:bg-dark-border rounded text-dark-textSecondary hover:text-dark-text border border-dark-border transition-colors"
+                  className="btn-secondary btn-sm"
                 >
                   Read Only
                 </button>
                 <button
                   type="button"
                   onClick={() => applyTemplate('fullAccess')}
-                  className="px-3 py-1.5 text-sm bg-dark-bg hover:bg-dark-border rounded text-dark-textSecondary hover:text-dark-text border border-dark-border transition-colors"
+                  className="btn-secondary btn-sm"
                 >
                   Full Access
                 </button>
                 <button
                   type="button"
                   onClick={() => applyTemplate('denyAll')}
-                  className="px-3 py-1.5 text-sm bg-dark-bg hover:bg-dark-border rounded text-dark-textSecondary hover:text-dark-text border border-dark-border transition-colors"
+                  className="btn-secondary btn-sm"
                 >
                   Deny All
                 </button>
@@ -1081,35 +1110,41 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
 
           {/* Policy Document Preview */}
           <div>
-            <label className="block text-sm font-medium text-dark-text mb-2">
-              Policy Document (JSON)
-              <span className="ml-2 text-xs text-dark-textSecondary">
-                (Auto-generated, or edit manually)
-              </span>
-            </label>
+            <div className="flex items-baseline justify-between gap-3 mb-1.5">
+              <h3 className="text-base font-semibold text-dark-text">Policy Document (JSON)</h3>
+              <span className="text-xs text-dark-textMuted">Auto-generated, or edit manually</span>
+            </div>
             <textarea
               value={document}
-              onChange={(e) => setDocument(e.target.value)}
-              className="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              onChange={(e) => {
+                setDocument(e.target.value);
+                setJsonManuallyEdited(true);
+              }}
+              className={`input font-mono min-h-[220px] ${
+                jsonError ? '!border-red-500/60 focus:!ring-red-500/50' : ''
+              }`}
               rows={10}
               placeholder='{"Version": "2012-10-17", "Statement": [...]}'
             />
+            {jsonError && (
+              <div className="alert-error mt-2">
+                <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+                <span>{jsonError}</span>
+              </div>
+            )}
           </div>
         </form>
 
-        <div className="p-6 border-t border-dark-border flex justify-end gap-3">
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-4 py-2 bg-dark-bg hover:bg-dark-border text-dark-text rounded-lg transition-colors"
-          >
+        <div className="p-6 border-t border-dark-border flex justify-end gap-2 shrink-0">
+          <button type="button" onClick={onClose} className="btn-ghost">
             Cancel
           </button>
           <button
             onClick={handleSubmit}
-            disabled={loading}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors disabled:opacity-50"
+            disabled={loading || !!jsonError}
+            className="btn-primary"
           >
+            {loading && <span className="spinner !w-4 !h-4" />}
             {loading
               ? (isEditMode ? 'Saving...' : 'Creating...')
               : isEditMode
@@ -1137,25 +1172,24 @@ function ViewPolicyModal({ policy, onClose }: { policy: Policy; onClose: () => v
   }, [policy]);
 
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-black bg-opacity-50 flex items-center justify-center p-4">
-      <div className="bg-dark-surface rounded-lg max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col">
-        <div className="p-6 border-b border-dark-border">
-          <h2 className="text-2xl font-bold text-dark-text">{policy.name}</h2>
-          <p className="text-dark-textSecondary mt-1">{policy.description}</p>
+    <div className="modal-overlay">
+      <div className="modal-panel !max-w-4xl !p-0 !overflow-hidden flex flex-col">
+        <div className="p-6 border-b border-dark-border shrink-0">
+          <h2 className="modal-title font-mono">{policy.name}</h2>
+          {policy.description && (
+            <p className="text-sm text-dark-textSecondary mt-1">{policy.description}</p>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto p-6">
-          <h3 className="text-sm font-medium text-dark-text mb-2">Policy Document</h3>
-          <pre className="bg-dark-bg border border-dark-border rounded-lg p-4 text-sm text-dark-text font-mono overflow-x-auto">
+          <h3 className="text-base font-semibold text-dark-text mb-3">Policy Document</h3>
+          <pre className="bg-dark-inset border border-dark-border rounded-lg p-4 text-sm text-dark-text font-mono overflow-x-auto">
             {formattedDoc}
           </pre>
         </div>
 
-        <div className="p-6 border-t border-dark-border flex justify-end">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 bg-dark-bg hover:bg-dark-border text-dark-text rounded-lg transition-colors"
-          >
+        <div className="p-6 border-t border-dark-border flex justify-end shrink-0">
+          <button onClick={onClose} className="btn-ghost">
             Close
           </button>
         </div>

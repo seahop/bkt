@@ -50,6 +50,7 @@ func InitializeStartupBuckets(cfg *config.Config) error {
 		cfg.Storage.S3.BucketPrefix,
 		cfg.Storage.S3.UseSSL,
 		cfg.Storage.S3.ForcePathStyle,
+		cfg.Storage.S3SSE,
 	)
 	if err != nil {
 		log.Printf("⚠️  Cannot provision S3 buckets: failed to init S3 backend: %v", err)

@@ -245,6 +245,29 @@ func lookupAndDecryptKey(c *gin.Context, accessKey string) (*models.AccessKey, s
 		return nil, "", false
 	}
 
+	// Reject expired keys.
+	if key.ExpiresAt != nil && time.Now().After(*key.ExpiresAt) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"Code":    "InvalidAccessKeyId",
+			"Message": "The access key ID you provided has expired",
+		})
+		return nil, "", false
+	}
+
+	// Read-only keys may only perform non-mutating operations.
+	if key.ReadOnly {
+		switch c.Request.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			// allowed
+		default:
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"Code":    "AccessDenied",
+				"Message": "This access key is read-only",
+			})
+			return nil, "", false
+		}
+	}
+
 	secretKey, err := security.DecryptSecretKey(key.SecretKeyEncrypted)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
@@ -257,11 +280,17 @@ func lookupAndDecryptKey(c *gin.Context, accessKey string) (*models.AccessKey, s
 	return &key, secretKey, true
 }
 
-// updateLastUsed updates the access key's last used timestamp (best-effort)
+// updateLastUsed updates the access key's last-used timestamp (best-effort).
+// It writes only the single column (not the whole row) and throttles to at most
+// once per minute per key, to avoid write amplification / hot-row contention on
+// every S3 request — especially for a shared key under load.
 func updateLastUsed(key *models.AccessKey) {
 	now := time.Now()
+	if key.LastUsedAt != nil && now.Sub(*key.LastUsedAt) < time.Minute {
+		return
+	}
 	key.LastUsedAt = &now
-	database.DB.Save(key)
+	database.DB.Model(&models.AccessKey{}).Where("id = ?", key.ID).Update("last_used_at", now)
 }
 
 // extractAccessKey extracts the access key from the Authorization header

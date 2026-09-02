@@ -12,15 +12,14 @@
 # =============================================================================
 
 # ── Stage 1: build the frontend ──────────────────────────────────────────────
-FROM node:20-alpine AS web
+FROM node:24-alpine AS web
 WORKDIR /web
 COPY frontend/package*.json ./
 RUN npm install
 COPY frontend/ ./
-# Use vite directly rather than `npm run build` (which is `tsc && vite build`):
-# bundling does not need the strict tsc type-check gate, and type errors are a
-# separate lint concern that shouldn't block the image build.
-RUN npx vite build         # -> /web/dist
+# `npm run build` == `tsc && vite build`: run the strict TypeScript type-check
+# gate before bundling so type errors fail the image build instead of shipping.
+RUN npm run build          # -> /web/dist
 
 # ── Stage 2: build the Go binary with the UI embedded ────────────────────────
 FROM golang:1.25-alpine AS builder

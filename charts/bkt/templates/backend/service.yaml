@@ -9,7 +9,7 @@ spec:
   type: {{ .Values.backend.service.type }}
   ports:
     - port: {{ .Values.backend.service.port }}
-      targetPort: https
+      targetPort: console
       protocol: TCP
       name: https
     - port: {{ .Values.backend.service.s3Port }}

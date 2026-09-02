@@ -6,6 +6,16 @@ This guide covers setting up HashiCorp Vault as an OIDC identity provider for bk
 
 bkt supports browser-based SSO using Vault's Identity OIDC provider with PKCE (Proof Key for Code Exchange). This allows users to sign in to bkt by authenticating through Vault - if they're already logged into Vault, they'll be signed in seamlessly.
 
+> **Not just Vault**: the OIDC flow is generic. bkt fetches the authorization,
+> token, and JWKS endpoints from the provider's discovery document
+> (`<VAULT_OIDC_PROVIDER_URL>/.well-known/openid-configuration`), so **any
+> standard OIDC identity provider** works through the same `VAULT_OIDC_*`
+> variables (the prefix is historical). It has been validated against
+> **Keycloak 26** — see the [Keycloak example](#example-any-oidc-idp-keycloak)
+> below. This guide covers the Vault-specific setup.
+
+SSO logins (like local logins) are recorded in bkt's audit log with provider metadata.
+
 ## Prerequisites
 
 - HashiCorp Vault with Identity secrets engine enabled
@@ -128,6 +138,30 @@ FRONTEND_URL=https://your-bkt-frontend
 | `VAULT_OIDC_REDIRECT_URL` | Backend callback URL (must match Vault client config) | `https://bkt.example.com:9443/api/auth/vault/callback` |
 | `VAULT_OIDC_SCOPES` | OIDC scopes to request | `openid profile` |
 | `FRONTEND_URL` | Frontend URL for post-auth redirect | `https://bkt.example.com` |
+
+## Example: Any OIDC IdP (Keycloak)
+
+The same variables work with any standard OIDC provider. For Keycloak
+(validated against Keycloak 26):
+
+1. Create a **public** OpenID Connect client in your realm (no client secret —
+   bkt uses PKCE with the S256 challenge), with redirect URI
+   `https://<console-host>/api/auth/vault/callback`.
+2. Use the **realm URL** as the provider URL:
+
+```bash
+VAULT_OIDC_ENABLED=true
+VAULT_OIDC_CLIENT_ID=bkt
+VAULT_OIDC_PROVIDER_URL=https://kc.example.com/realms/myrealm
+VAULT_OIDC_REDIRECT_URL=https://bkt.example.com/api/auth/vault/callback
+VAULT_OIDC_SCOPES=openid profile
+FRONTEND_URL=https://bkt.example.com
+```
+
+3. Optional — for automatic policy assignment, add a mapper that emits a
+   `policies` claim (JSON array of bkt policy names) in the ID token; bkt syncs
+   the user's policies to that list on every login, exactly as described for
+   Vault groups below.
 
 ## Automatic Policy Sync from Vault Groups
 

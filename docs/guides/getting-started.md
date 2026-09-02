@@ -83,7 +83,7 @@ Save the `token` from the response - you'll need it for authentication.
 ### 2. Create a Bucket
 
 ```bash
-# Replace YOUR_TOKEN with the token from step 3
+# Replace YOUR_TOKEN with the token from step 1
 export TOKEN="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
 
 curl -k -X POST https://localhost:9443/api/buckets \
@@ -128,9 +128,24 @@ Congratulations! 🎉 You've successfully:
 - ✅ Created a bucket
 - ✅ Uploaded and downloaded a file
 
+A few things you can do with that file right away (details in the
+[Feature guide](features.md)):
+
+- **Share it** — the Share action in the console (or
+  `POST /api/buckets/{name}/objects/presign`) creates a time-limited download
+  link that works without login. See
+  [Presigned share links](features.md#presigned-share-links).
+- **Version it** — enable versioning in the bucket's Settings and overwrites
+  and deletes become recoverable, with per-file history and restore. See
+  [Object versioning](features.md#object-versioning).
+- **Script against it safely** — mint short-lived, optionally read-only S3
+  credentials from Profile → Temporary credentials. See
+  [Temporary credentials](features.md#temporary-credentials-bkt-sts).
+
 ## Next Steps
 
 ### For Users
+- [Feature Guide](features.md) - Versioning, lifecycle, quotas, share links, webhooks, and more
 - [Admin Guide](admin-guide.md) - Learn about access keys, policies, and more
 - [API Documentation](../api/API.md) - Explore all available endpoints
 
@@ -188,6 +203,10 @@ curl -k -X DELETE https://localhost:9443/api/buckets/my-first-bucket/objects/tes
   -H "Authorization: Bearer $TOKEN"
 ```
 
+On a bucket with [versioning](features.md#object-versioning) enabled, this
+hides the object behind a delete marker instead of destroying it — you can
+restore it from the file's History in the console.
+
 ### Delete a Bucket
 
 ```bash
@@ -206,6 +225,11 @@ Access keys are useful for scripts, CLI tools, and long-running applications.
 curl -k -X POST https://localhost:9443/api/access-keys \
   -H "Authorization: Bearer $TOKEN"
 ```
+
+The body is optional — you can pass `{"name": "...", "expires_in_days": 30,
+"read_only": true}` to create a named, expiring, or read-only key. For
+short-lived credentials (default 1 hour, max 12) use
+[temporary credentials](features.md#temporary-credentials-bkt-sts) instead.
 
 **Response:**
 ```json
@@ -267,7 +291,9 @@ docker compose ps
 
 ### Invalid Token
 
-JWT tokens expire after 24 hours. Login again to get a new token:
+Access tokens are short-lived (15 minutes by default, configurable with
+`ACCESS_TOKEN_EXPIRY`); when one expires — in the web console or in scripts —
+simply log in again for a new token:
 
 ```bash
 curl -k -X POST https://localhost:9443/api/auth/login \
@@ -329,9 +355,15 @@ The setup script creates a default admin account:
 
 ## What's Next?
 
-Now that you have the basics, explore more features:
+Now that you have the basics, explore more features (most are covered in
+depth in the [Feature guide](features.md)):
 
 - **Policies**: Create fine-grained access control policies
+- **Versioning & Retention**: Keep object history, restore versions, and protect data with WORM retention
+- **Lifecycle & Quotas**: Auto-expire objects and cap bucket sizes
+- **Share Links**: Generate time-limited presigned download URLs
+- **Webhooks**: Get notified on object created/removed events
+- **Replication**: Mirror a bucket into another bkt bucket
 - **Public Buckets**: Share files publicly
 - **Storage Backends**: Use local or AWS S3 storage per bucket
 - **Folder Organization**: Create virtual folders to organize files

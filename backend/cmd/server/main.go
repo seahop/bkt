@@ -10,6 +10,7 @@ import (
 	"bkt/internal/metrics"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 )
@@ -54,9 +55,39 @@ func main() {
 			if err := database.CleanupExpiredTokens(); err != nil {
 				log.Printf("Failed to clean up expired tokens: %v", err)
 			}
-			if err := database.CleanupAbandonedMultipartUploads(); err != nil {
+			if err := database.CleanupAbandonedMultipartUploads(cfg); err != nil {
 				log.Printf("Failed to clean up abandoned multipart uploads: %v", err)
 			}
+			if err := database.CleanupOldAuditLogs(auditRetentionDays()); err != nil {
+				log.Printf("Failed to prune old audit logs: %v", err)
+			}
+			if err := database.CleanupExpiredTemporaryKeys(); err != nil {
+				log.Printf("Failed to prune expired temporary keys: %v", err)
+			}
+		}
+	}()
+
+	// Mirror replicating buckets every 5 minutes.
+	go func() {
+		time.Sleep(45 * time.Second)
+		api.RunReplicationSweep(cfg)
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			api.RunReplicationSweep(cfg)
+		}
+	}()
+
+	// Apply bucket lifecycle rules hourly (age-based expiry of current
+	// objects and noncurrent versions), with one pass shortly after startup
+	// so restarts don't defer overdue expirations by up to an hour.
+	go func() {
+		time.Sleep(30 * time.Second)
+		api.RunLifecycleSweep(cfg)
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			api.RunLifecycleSweep(cfg)
 		}
 	}()
 
@@ -102,9 +133,31 @@ func main() {
 	log.Println("Server exited")
 }
 
+// auditRetentionDays returns the audit-log retention window in days
+// (AUDIT_RETENTION_DAYS, default 90; 0 disables pruning).
+func auditRetentionDays() int {
+	if v := os.Getenv("AUDIT_RETENTION_DAYS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return 90
+}
+
 // startServer launches an http.Server in a goroutine, using TLS when enabled.
 func startServer(name, addr string, handler http.Handler, cfg *config.Config) *http.Server {
-	srv := &http.Server{Addr: addr, Handler: handler}
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: handler,
+		// Slowloris protection. ReadTimeout/WriteTimeout are intentionally left
+		// unset: this server streams arbitrarily large object bodies in both
+		// directions, and a fixed whole-request deadline would abort legitimate
+		// large transfers. ReadHeaderTimeout + IdleTimeout bound the cheap-to-
+		// abuse phases without capping transfer duration.
+		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1 MiB
+	}
 	go func() {
 		if cfg.TLS.Enabled {
 			log.Printf("Starting %s server (HTTPS) on %s", name, addr)

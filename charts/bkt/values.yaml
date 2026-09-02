@@ -12,6 +12,9 @@ global:
 # ─────────────────────────────────────────
 backend:
   image:
+    # MUST be the backend-only image (Dockerfile --target backend). Do NOT use
+    # the omnibus image (ghcr.io/seahop/bkt) here — it bundles its own
+    # Postgres inside the container and ignores the chart's database.
     repository: ghcr.io/seahop/bkt-backend
     # tag: overrides global.imageTag
     pullPolicy: ""  # falls back to global.imagePullPolicy
@@ -62,9 +65,34 @@ backend:
     S3_BUCKET_PREFIX: ""
     S3_USE_SSL: "true"
     S3_FORCE_PATH_STYLE: "false"
+    # Request SSE-S3 (AES256) on every object written through the S3 backend.
+    S3_SSE: "false"
+    # Comma-separated pre-provisioned S3 buckets to link/create on startup.
+    S3_BUCKETS: ""
+    # Browser-facing base URL of the S3 listener, embedded in console-generated
+    # presigned URLs (e.g. https://s3.bkt.example.com). Set this whenever the
+    # S3 API is reached through an ingress/LB — host derivation only works when
+    # console and S3 share a hostname.
+    S3_PUBLIC_ENDPOINT: ""
 
     # CORS — set to your frontend domain
     CORS_ALLOWED_ORIGINS: ""
+    # Login attempts per minute per IP (default 5; raise for shared egress IPs).
+    AUTH_RATE_LIMIT: "5"
+    # Detect content types from magic bytes and reject unsafe ones (off by
+    # default — S3's contract is client-declared Content-Type).
+    CONTENT_TYPE_ENFORCEMENT: "false"
+
+    # Comma-separated CIDRs/IPs of reverse proxies whose X-Forwarded-For is
+    # trusted for rate limiting. Empty (default) = trust none.
+    TRUSTED_PROXIES: ""
+    # Per-IP requests/minute on the S3 API listener. "0" (default) disables.
+    S3_RATE_LIMIT: "0"
+    # Days to keep audit log rows (default 90); "-1" (or any <= 0) disables pruning.
+    AUDIT_RETENTION_DAYS: "90"
+    # When set, GET /metrics requires "Authorization: Bearer <token>".
+    # Empty (default) leaves the endpoint open. Stored as a Secret.
+    METRICS_TOKEN: ""
 
     # Google OIDC SSO
     GOOGLE_OIDC_ENABLED: "false"
@@ -81,12 +109,32 @@ backend:
 
     FRONTEND_URL: ""
 
-  # Persistent storage for local object storage
+  # Persistent storage for local object storage. Holds object bytes, archived
+  # versions (.versions/) and multipart staging (.multipart/).
+  #
+  # SCALING NOTE: with STORAGE_BACKEND=local, replicaCount MUST stay 1 unless
+  # accessMode is ReadWriteMany (shared filesystem) — the chart refuses to
+  # render otherwise. With STORAGE_BACKEND=s3 the pods are stateless and
+  # replicaCount can be raised freely (migrations are advisory-locked).
   persistence:
     enabled: true
     storageClass: ""  # default storage class
     size: 50Gi
     accessMode: ReadWriteOnce
+
+  # Pod scheduling passthroughs
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  # The published image currently runs as root (needed for /data ownership on
+  # first boot). Tighten here if your PSP/PSA policy requires it — e.g.
+  # podSecurityContext: {fsGroup: 1000} + containerSecurityContext:
+  # {runAsUser: 1000, runAsNonRoot: true} with a pre-chowned volume.
+  podSecurityContext: {}
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
 
   # Which env vars should be treated as Secrets (stored in K8s Secret, not ConfigMap)
   secretEnvKeys:
@@ -96,6 +144,7 @@ backend:
     - GOOGLE_CLIENT_SECRET
     - S3_SECRET_ACCESS_KEY
     - S3_ACCESS_KEY_ID
+    - METRICS_TOKEN
 
 # ─────────────────────────────────────────
 # ─────────────────────────────────────────
@@ -110,6 +159,8 @@ ingress:
   annotations: {}
     # cert-manager.io/cluster-issuer: letsencrypt-prod
     # nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # With backend.tls.enabled the upstream speaks HTTPS:
+    # nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
   hosts:
     - host: bkt.example.com
       paths:
@@ -120,24 +171,55 @@ ingress:
     #   hosts:
     #     - bkt.example.com
 
+  # Optional dedicated host for the S3-compatible API (aws-cli/s3fs/SDKs).
+  # Uses path-style addressing, so a single host is enough. Remember to also
+  # set backend.env.S3_PUBLIC_ENDPOINT to this URL so presigned links work,
+  # and raise the body-size limit for large uploads (nginx example below).
+  s3:
+    enabled: false
+    host: s3.bkt.example.com
+    annotations: {}
+      # nginx.ingress.kubernetes.io/proxy-body-size: "0"
+      # nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+    tls: []
+      # - secretName: bkt-s3-tls
+      #   hosts: [s3.bkt.example.com]
+
+# Prometheus Operator ServiceMonitor for the /metrics endpoint.
+serviceMonitor:
+  enabled: false
+  interval: 60s
+  # When backend.env.METRICS_TOKEN is set, give the scraper the same token:
+  # bearerTokenSecret: {name: bkt-backend, key: METRICS_TOKEN}
+
 # ─────────────────────────────────────────
-# PostgreSQL (bitnami subchart)
+# PostgreSQL (in-chart StatefulSet, official postgres image)
 # ─────────────────────────────────────────
-# Set postgresql.enabled=false and configure backend.env.DB_* to use an external DB
+# A deliberately small, self-contained Postgres — the same image the compose
+# stack uses. No third-party subchart (the Bitnami catalog purge broke pinned
+# tags for new pulls). Set postgresql.enabled=false and fill in
+# externalDatabase to bring your own database instead.
 postgresql:
   enabled: true
+  image:
+    repository: postgres
+    tag: "16-alpine"
+    pullPolicy: IfNotPresent
   auth:
     database: objectstore
     username: objectstore
     password: ""        # REQUIRED: set this before deploying
-    existingSecret: ""  # or point to an existing secret
-  primary:
-    persistence:
-      enabled: true
-      size: 10Gi
-  # SSL is managed at the app level; disable bundled SSL for simplicity in K8s
-  tls:
-    enabled: false
+  persistence:
+    enabled: true
+    storageClass: ""
+    size: 10Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
 
 # When postgresql.enabled=false, configure an external database:
 externalDatabase:

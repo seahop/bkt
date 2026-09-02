@@ -20,10 +20,11 @@ import (
 type S3Storage struct {
 	client       *s3.Client
 	bucketPrefix string
+	sse          bool // request SSE-S3 (AES256) on every write
 }
 
 // NewS3Storage creates a new S3 storage backend
-func NewS3Storage(endpoint, region, accessKeyID, secretAccessKey, bucketPrefix string, useSSL, forcePathStyle bool) (*S3Storage, error) {
+func NewS3Storage(endpoint, region, accessKeyID, secretAccessKey, bucketPrefix string, useSSL, forcePathStyle, sse bool) (*S3Storage, error) {
 	// Create custom endpoint resolver for S3-compatible services
 	customResolver := aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
 		if endpoint != "" && endpoint != "s3.amazonaws.com" {
@@ -63,6 +64,7 @@ func NewS3Storage(endpoint, region, accessKeyID, secretAccessKey, bucketPrefix s
 	return &S3Storage{
 		client:       client,
 		bucketPrefix: bucketPrefix,
+		sse:          sse,
 	}, nil
 }
 
@@ -148,7 +150,7 @@ func (s3s *S3Storage) BucketExists(bucketName string) (bool, error) {
 }
 
 // PutObject stores an object in S3
-func (s3s *S3Storage) PutObject(bucketName, objectKey string, data io.Reader, size int64, contentType string) error {
+func (s3s *S3Storage) PutObject(bucketName, objectKey string, data io.Reader, size int64, contentType string, metadata map[string]string) error {
 	ctx := context.Background()
 	actualBucketName := s3s.getBucketName(bucketName)
 
@@ -184,13 +186,20 @@ func (s3s *S3Storage) PutObject(bucketName, objectKey string, data io.Reader, si
 	}
 
 	// Upload object
-	_, err = s3s.client.PutObject(ctx, &s3.PutObjectInput{
+	putInput := &s3.PutObjectInput{
 		Bucket:        aws.String(actualBucketName),
 		Key:           aws.String(objectKey),
 		Body:          data,
 		ContentLength: aws.Int64(size),
 		ContentType:   aws.String(contentType),
-	})
+	}
+	if len(metadata) > 0 {
+		putInput.Metadata = metadata
+	}
+	if s3s.sse {
+		putInput.ServerSideEncryption = types.ServerSideEncryptionAes256
+	}
+	_, err = s3s.client.PutObject(ctx, putInput)
 	if err != nil {
 		return fmt.Errorf("failed to upload object: %w", err)
 	}
@@ -237,17 +246,20 @@ func (s3s *S3Storage) ListObjects(bucketName, prefix string) ([]ObjectInfo, erro
 	actualBucketName := s3s.getBucketName(bucketName)
 	objects := make([]ObjectInfo, 0)
 
-	// Check if bucket exists
+	// Check if bucket exists. Return the error rather than an empty slice — a
+	// transient failure (throttling, network, expired credentials) must NOT be
+	// reported as "bucket is empty", because the caller reconciles the DB index
+	// against this listing and would otherwise mass-delete valid metadata.
 	_, err := s3s.client.HeadBucket(ctx, &s3.HeadBucketInput{
 		Bucket: aws.String(actualBucketName),
 	})
 	if err != nil {
-		return objects, nil // Return empty list if bucket doesn't exist
+		return nil, fmt.Errorf("failed to access bucket %q: %w", bucketName, err)
 	}
 
-	// List objects with a reasonable limit to prevent memory exhaustion
-	// S3 returns up to 1000 per page, we'll fetch up to 10 pages (10,000 objects)
-	const maxObjects = 10000
+	// List objects with a reasonable limit to prevent memory exhaustion.
+	// S3 returns up to 1000 per page; MaxListObjects caps the total.
+	const maxObjects = MaxListObjects
 	paginator := s3.NewListObjectsV2Paginator(s3s.client, &s3.ListObjectsV2Input{
 		Bucket:  aws.String(actualBucketName),
 		Prefix:  aws.String(prefix),
@@ -264,6 +276,11 @@ func (s3s *S3Storage) ListObjects(bucketName, prefix string) ([]ObjectInfo, erro
 			// Stop if we've reached the limit
 			if len(objects) >= maxObjects {
 				return objects, nil
+			}
+			// Hide bkt-managed version storage from listings — these keys are
+			// version bytes, not objects (and reconcile must never see them).
+			if strings.HasPrefix(aws.ToString(obj.Key), s3VersionPrefix) {
+				continue
 			}
 			// Infer content type from file extension (avoids N+1 HeadObject calls)
 			contentType := mime.TypeByExtension(filepath.Ext(*obj.Key))
@@ -372,13 +389,20 @@ func (s3s *S3Storage) CopyObject(bucketName, srcKey, dstKey string) error {
 	return nil
 }
 
-func (s3s *S3Storage) CreateMultipartUpload(bucketName, objectKey, contentType string) (string, error) {
+func (s3s *S3Storage) CreateMultipartUpload(bucketName, objectKey, contentType string, metadata map[string]string) (string, error) {
 	ctx := context.Background()
-	out, err := s3s.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+	mpuInput := &s3.CreateMultipartUploadInput{
 		Bucket:      aws.String(s3s.getBucketName(bucketName)),
 		Key:         aws.String(objectKey),
 		ContentType: aws.String(contentType),
-	})
+	}
+	if len(metadata) > 0 {
+		mpuInput.Metadata = metadata
+	}
+	if s3s.sse {
+		mpuInput.ServerSideEncryption = types.ServerSideEncryptionAes256
+	}
+	out, err := s3s.client.CreateMultipartUpload(ctx, mpuInput)
 	if err != nil {
 		return "", fmt.Errorf("failed to create multipart upload: %w", err)
 	}

@@ -9,6 +9,7 @@ import (
 	"bkt/internal/database"
 	"bkt/internal/models"
 	"bkt/internal/security"
+	"bkt/internal/services"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -16,11 +17,22 @@ import (
 )
 
 type PolicyHandler struct {
-	config *config.Config
+	config       *config.Config
+	auditService *services.AuditService
 }
 
 func NewPolicyHandler(cfg *config.Config) *PolicyHandler {
-	return &PolicyHandler{config: cfg}
+	return &PolicyHandler{config: cfg, auditService: services.NewAuditService()}
+}
+
+// actor extracts the authenticated admin's id/username from the request context
+// for audit logging.
+func actor(c *gin.Context) (uuid.UUID, string) {
+	id, _ := c.Get("user_id")
+	name, _ := c.Get("username")
+	uid, _ := id.(uuid.UUID)
+	uname, _ := name.(string)
+	return uid, uname
 }
 
 // ListPolicies lists all policies (admin only) or user's attached policies
@@ -141,6 +153,9 @@ func (h *PolicyHandler) CreatePolicy(c *gin.Context) {
 		})
 		return
 	}
+
+	uid, uname := actor(c)
+	h.auditService.LogSuccess(c, uid, uname, "policy.create", "policy", policy.ID.String(), policy.Name, nil)
 
 	c.JSON(http.StatusCreated, policy)
 }
@@ -280,6 +295,9 @@ func (h *PolicyHandler) UpdatePolicy(c *gin.Context) {
 		return
 	}
 
+	uid, uname := actor(c)
+	h.auditService.LogSuccess(c, uid, uname, "policy.update", "policy", policy.ID.String(), policy.Name, nil)
+
 	c.JSON(http.StatusOK, policy)
 }
 
@@ -343,6 +361,9 @@ func (h *PolicyHandler) DeletePolicy(c *gin.Context) {
 		})
 		return
 	}
+
+	uid, uname := actor(c)
+	h.auditService.LogSuccess(c, uid, uname, "policy.delete", "policy", policy.ID.String(), policy.Name, nil)
 
 	c.JSON(http.StatusOK, models.SuccessResponse{
 		Message: "Policy deleted successfully",
@@ -439,6 +460,9 @@ func (h *PolicyHandler) AttachPolicyToUser(c *gin.Context) {
 		return
 	}
 
+	uid, uname := actor(c)
+	h.auditService.LogSuccess(c, uid, uname, "policy.attach", "user", userUUID.String(), "", map[string]interface{}{"policy_id": req.PolicyID})
+
 	c.JSON(http.StatusOK, models.SuccessResponse{
 		Message: "Policy attached successfully",
 	})
@@ -524,6 +548,9 @@ func (h *PolicyHandler) DetachPolicyFromUser(c *gin.Context) {
 		}
 		return
 	}
+
+	uid, uname := actor(c)
+	h.auditService.LogSuccess(c, uid, uname, "policy.detach", "user", userUUID.String(), "", map[string]interface{}{"policy_id": policyUUID.String()})
 
 	c.JSON(http.StatusOK, models.SuccessResponse{
 		Message: "Policy detached successfully",

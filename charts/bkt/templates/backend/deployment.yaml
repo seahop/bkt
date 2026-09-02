@@ -1,3 +1,12 @@
+{{- /*
+Guard: the local storage backend keeps object bytes on the PVC, which is
+mounted ReadWriteOnce by default. More than one replica would need every pod
+on the same filesystem — silently corrupting writes otherwise. Scale-out is
+supported with STORAGE_BACKEND=s3 (stateless pods) or an RWX storage class.
+*/ -}}
+{{- if and (gt (int .Values.backend.replicaCount) 1) (eq (.Values.backend.env.STORAGE_BACKEND | default "local") "local") (ne .Values.backend.persistence.accessMode "ReadWriteMany") }}
+{{- fail "backend.replicaCount > 1 with STORAGE_BACKEND=local requires backend.persistence.accessMode=ReadWriteMany (shared filesystem). Use the s3 storage backend for stateless scale-out, or set replicaCount=1." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -16,13 +25,28 @@ spec:
       labels:
         {{- include "bkt.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: backend
+      annotations:
+        # Roll pods automatically when configuration or secrets change.
+        checksum/config: {{ include (print $.Template.BasePath "/backend/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/backend/secret.yaml") . | sha256sum }}
+        {{- with .Values.backend.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
+      {{- with .Values.backend.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: backend
           image: "{{ .Values.backend.image.repository }}:{{ include "bkt.backendTag" . }}"
           imagePullPolicy: {{ include "bkt.backendPullPolicy" . }}
+          {{- with .Values.backend.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
-            - name: https
+            - name: console
               containerPort: 9443
               protocol: TCP
             - name: s3
@@ -44,14 +68,14 @@ spec:
             httpGet:
               path: /live
               port: 9443
-              scheme: HTTPS
+              scheme: {{ if .Values.backend.tls.enabled }}HTTPS{{ else }}HTTP{{ end }}
             initialDelaySeconds: 15
             periodSeconds: 20
           readinessProbe:
             httpGet:
               path: /ready
               port: 9443
-              scheme: HTTPS
+              scheme: {{ if .Values.backend.tls.enabled }}HTTPS{{ else }}HTTP{{ end }}
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:
@@ -64,6 +88,18 @@ spec:
               mountPath: /certs
               readOnly: true
             {{- end }}
+      {{- with .Values.backend.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.backend.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.backend.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       volumes:
         - name: bucket-data
           {{- if .Values.backend.persistence.enabled }}

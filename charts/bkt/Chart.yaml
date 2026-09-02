@@ -2,7 +2,7 @@ apiVersion: v2
 name: bkt
 description: Self-hosted S3-compatible object storage gateway
 type: application
-version: 0.1.0
+version: 0.2.0
 appVersion: "latest"
 home: https://bkt.tips
 sources:
@@ -16,8 +16,3 @@ maintainers:
   - name: bkt-storage
     url: https://bkt.tips
 
-dependencies:
-  - name: postgresql
-    version: "15.x.x"
-    repository: https://charts.bitnami.com/bitnami
-    condition: postgresql.enabled

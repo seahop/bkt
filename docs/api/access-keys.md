@@ -15,7 +15,8 @@ https://localhost:9443/api/access-keys
 - **Secret Storage:** Bcrypt hashed (cost 12), never stored in plaintext
 - **Secret Display:** Shown only once during creation
 - **Validation:** Constant-time comparison to prevent timing attacks
-- **Limits:** Maximum 5 active keys per user
+- **Limits:** Maximum 5 active **regular** keys per user (temporary bkt-STS keys are excluded from the limit)
+- **Scoping:** Keys can be named, given an expiry, and marked read-only (read-only denies all mutating S3 operations)
 
 ## Endpoints
 
@@ -27,7 +28,19 @@ Create a new access key pair.
 
 **Authentication:** Required (Bearer token)
 
-**Request Body:** None
+**Request Body (optional):** an empty body creates an unnamed, non-expiring, full-access key.
+
+```json
+{
+  "name": "ci-deploy",
+  "read_only": false,
+  "expires_in_days": 90
+}
+```
+
+- `name` (string, optional) - Human-readable key name
+- `read_only` (boolean, optional) - Deny all mutating S3 operations with this key
+- `expires_in_days` (integer, optional) - Auto-expire after N days (0/omitted = never)
 
 **Success Response (201 Created):**
 ```json
@@ -35,7 +48,10 @@ Create a new access key pair.
   "message": "Access key created successfully",
   "access_key": "AKGAUJicHqerbIjN9m7WSCCyRtZJ0",
   "secret_key": "SKMUprmvSZ_eBYwIgOKRENHXHBIiGOxX_xOm8FHNmmBP_4xDPQY41TeA",
-  "created_at": "2025-12-08T21:30:11.064968622Z",
+  "name": "ci-deploy",
+  "read_only": false,
+  "expires_at": "2026-12-01T21:30:11Z",
+  "created_at": "2026-09-02T21:30:11.064968622Z",
   "warning": "Save your secret key now. It will not be shown again!"
 }
 ```
@@ -43,14 +59,21 @@ Create a new access key pair.
 ⚠️ **IMPORTANT:** The `secret_key` is shown **only once** during creation. Save it securely. You cannot retrieve it later.
 
 **Error Responses:**
-- `400 Bad Request` - Maximum keys reached (5 keys per user)
+- `400 Bad Request` - Maximum keys reached (5 active regular keys per user), or malformed body
 - `401 Unauthorized` - Invalid or expired token
 - `500 Internal Server Error` - Key generation failed
 
 **Example:**
 ```bash
+# Unscoped key
 curl -k -X POST https://localhost:9443/api/access-keys \
   -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
+
+# Named, read-only key expiring in 30 days
+curl -k -X POST https://localhost:9443/api/access-keys \
+  -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...' \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "reporting", "read_only": true, "expires_in_days": 30}'
 ```
 
 ---
@@ -70,9 +93,12 @@ List all access keys for the authenticated user.
     "id": "f98f3285-3156-44d5-8c57-ee003cefe0ea",
     "user_id": "ece39642-19ac-4ea3-b5cb-e818ce0a9fb9",
     "access_key": "AKGAUJicHqerbIjN9m7WSCCyRtZJ0",
+    "name": "ci-deploy",
+    "read_only": false,
     "is_active": true,
-    "last_used_at": "2025-12-08T21:35:42Z",
-    "created_at": "2025-12-08T21:30:11.064968Z"
+    "expires_at": null,
+    "last_used_at": "2026-09-01T21:35:42Z",
+    "created_at": "2026-09-01T21:30:11.064968Z"
   }
 ]
 ```
@@ -80,7 +106,8 @@ List all access keys for the authenticated user.
 **Notes:**
 - Secret key hashes are **never** returned
 - `last_used_at` is updated each time the key is used for authentication
-- Only active and revoked keys are shown (soft delete)
+- Only **active** keys are shown — revoked keys are soft-deleted for the audit trail and hidden from this list (admins see the full history, including revoked keys, via `GET /api/users/:id/access-keys`)
+- Temporary bkt-STS keys are excluded from this list
 
 **Error Responses:**
 - `401 Unauthorized` - Invalid or expired token
@@ -95,7 +122,7 @@ curl -k -X GET https://localhost:9443/api/access-keys \
 
 ### Revoke Access Key
 
-Deactivate an access key (soft delete for audit trail).
+Deactivate an access key. Revocation is a **soft delete**: the key stops working immediately, but the record is retained for the audit trail. Revoked keys disappear from the user's own key list; admins can still see them via `GET /api/users/:id/access-keys`.
 
 **Endpoint:** `DELETE /access-keys/:id`
 
@@ -149,12 +176,64 @@ Get statistics about access keys for the authenticated user.
 **Fields:**
 - `active_keys` - Number of currently active keys
 - `total_keys` - Total keys (including revoked)
-- `max_keys` - Maximum allowed active keys (5)
+- `max_keys` - Maximum allowed active regular keys (5)
 
 **Example:**
 ```bash
 curl -k -X GET https://localhost:9443/api/access-keys/stats \
   -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
+```
+
+---
+
+## Temporary Credentials (bkt-STS)
+
+bkt can mint **short-lived S3 access key pairs** for the authenticated user — handy for scripts, demos, or handing a colleague scoped access without creating a long-lived key.
+
+> ⚠️ **Not AWS STS:** bkt-STS is **not** compatible with the AWS STS API (`AssumeRole`, `GetSessionToken`, etc.). It is a simple REST endpoint that issues expiring access key pairs usable against bkt's S3-compatible API.
+
+**Properties:**
+- Default lifetime **1 hour**, maximum **12 hours** (minimum 1 minute)
+- **Excluded** from the 5-active-key limit and from `GET /api/access-keys`
+- Automatically **hard-deleted** after expiry
+- Optionally read-only
+- Issuance is recorded in the audit log as `sts.issue`
+
+### Issue Temporary Credentials
+
+**Endpoint:** `POST /sts/credentials` (i.e. `https://localhost:9443/api/sts/credentials`)
+
+**Authentication:** Required (Bearer token)
+
+**Request Body (optional):**
+```json
+{
+  "duration_seconds": 3600,
+  "read_only": true
+}
+```
+
+- `duration_seconds` (integer, optional) - Lifetime in seconds (default 3600, max 43200)
+- `read_only` (boolean, optional) - Deny all mutating S3 operations
+
+**Success Response (201 Created):**
+```json
+{
+  "access_key": "AK...",
+  "secret_key": "SK...",
+  "expires_at": "2026-09-02T13:00:00Z",
+  "read_only": true
+}
+```
+
+⚠️ The `secret_key` is shown only once, like a regular key.
+
+**Example:**
+```bash
+curl -k -X POST https://localhost:9443/api/sts/credentials \
+  -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...' \
+  -H 'Content-Type: application/json' \
+  -d '{"duration_seconds": 7200, "read_only": true}'
 ```
 
 ---

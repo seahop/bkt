@@ -1,6 +1,7 @@
 package services
 
 import (
+	"log"
 	"bkt/internal/database"
 	"bkt/internal/models"
 	"encoding/json"
@@ -43,11 +44,12 @@ func (as *AuditService) LogAction(
 	// Get User-Agent
 	userAgent := c.GetHeader("User-Agent")
 
-	// Convert metadata to JSON string
-	var metadataJSON string
+	// Convert metadata to a JSON string. The column is jsonb, so it must always
+	// hold valid JSON — an empty string is rejected (SQLSTATE 22P02). Default to
+	// "{}" when no metadata (or marshalling fails) is supplied.
+	metadataJSON := "{}"
 	if metadata != nil {
-		metadataBytes, err := json.Marshal(metadata)
-		if err == nil {
+		if metadataBytes, err := json.Marshal(metadata); err == nil {
 			metadataJSON = string(metadataBytes)
 		}
 	}
@@ -69,8 +71,12 @@ func (as *AuditService) LogAction(
 		CreatedAt:    time.Now(),
 	}
 
-	// Save to database
+	// Save to database. Callers historically discard this error, so surface it
+	// here — a failing audit trail should at least be visible in the logs.
 	result := database.DB.Create(&auditLog)
+	if result.Error != nil {
+		log.Printf("audit: failed to record action %q for %q: %v", action, username, result.Error)
+	}
 	return result.Error
 }
 
@@ -196,6 +202,6 @@ func (as *AuditService) GetAuditLogs(
 	}
 
 	var logs []models.AuditLog
-	result := query.Preload("User").Find(&logs)
+	result := query.Find(&logs)
 	return logs, result.Error
 }

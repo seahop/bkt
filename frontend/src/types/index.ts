@@ -3,6 +3,9 @@ export interface User {
   username: string
   email: string
   is_admin: boolean
+  is_locked?: boolean
+  sso_provider?: string
+  policies?: Policy[]
   created_at: string
   updated_at: string
 }
@@ -35,6 +38,13 @@ export interface Bucket {
   region: string
   storage_backend: string
   s3_config_id?: string
+  versioning?: string
+  lifecycle?: string
+  quota_bytes?: number
+  retention_days?: number
+  webhook_url?: string
+  webhook_events?: string
+  replicate_to?: string
   created_at: string
   updated_at: string
   owner?: User
@@ -71,9 +81,19 @@ export interface AccessKeyResponse {
 export interface Policy {
   id: string
   name: string
+  description?: string
   document: string
   created_at: string
   updated_at: string
+}
+
+export interface Group {
+  id: string
+  name: string
+  description?: string
+  users?: User[]
+  policies?: Policy[]
+  created_at: string
 }
 
 export interface ApiError {

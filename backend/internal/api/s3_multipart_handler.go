@@ -5,10 +5,12 @@ import (
 	"bkt/internal/models"
 	"bkt/internal/services"
 	"bkt/internal/storage"
+	"bkt/internal/validation"
 	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -57,6 +59,32 @@ type ListPartsResult struct {
 	Parts                []ListPartEntry `xml:"Part"`
 }
 
+type ListMultipartUploadsResult struct {
+	XMLName        xml.Name               `xml:"ListMultipartUploadsResult"`
+	Xmlns          string                 `xml:"xmlns,attr"`
+	Bucket         string                 `xml:"Bucket"`
+	KeyMarker      string                 `xml:"KeyMarker"`
+	UploadIdMarker string                 `xml:"UploadIdMarker"`
+	Prefix         string                 `xml:"Prefix"`
+	MaxUploads     int                    `xml:"MaxUploads"`
+	IsTruncated    bool                   `xml:"IsTruncated"`
+	Uploads        []MultipartUploadEntry `xml:"Upload"`
+}
+
+type MultipartUploadEntry struct {
+	Key          string    `xml:"Key"`
+	UploadId     string    `xml:"UploadId"`
+	Initiated    time.Time `xml:"Initiated"`
+	StorageClass string    `xml:"StorageClass"`
+}
+
+type CopyPartResult struct {
+	XMLName      xml.Name  `xml:"CopyPartResult"`
+	Xmlns        string    `xml:"xmlns,attr"`
+	ETag         string    `xml:"ETag"`
+	LastModified time.Time `xml:"LastModified"`
+}
+
 type ListPartEntry struct {
 	PartNumber   int       `xml:"PartNumber"`
 	LastModified time.Time `xml:"LastModified"`
@@ -84,6 +112,13 @@ func (h *S3APIHandler) CreateMultipartUpload(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 	userUUID := userID.(uuid.UUID)
 
+	// Same key validation as PutObject: without it a bad key is only caught by
+	// path containment at Complete time, after the client uploaded every part.
+	if err := validation.ValidateObjectKey(objectKey); err != nil {
+		h.s3Error(c, "InvalidArgument", err.Error(), objectKey, http.StatusBadRequest)
+		return
+	}
+
 	if allowed, _ := h.policyService.CheckObjectAccess(userUUID, bucketName, objectKey, services.ActionPutObject); !allowed {
 		h.s3Error(c, "AccessDenied", "Access Denied", objectKey, http.StatusForbidden)
 		return
@@ -100,13 +135,21 @@ func (h *S3APIHandler) CreateMultipartUpload(c *gin.Context) {
 		contentType = "application/octet-stream"
 	}
 
+	// x-amz-meta-* captured at initiate, applied to the object at complete
+	// (and passed to the real-S3 backend so the stored object carries it too).
+	userMeta, err := extractUserMetadata(c)
+	if err != nil {
+		h.s3Error(c, "MetadataTooLarge", err.Error(), objectKey, http.StatusBadRequest)
+		return
+	}
+
 	storageBackend, err := h.bucketHandler.getStorageBackend(&bucket)
 	if err != nil {
 		h.s3Error(c, "InternalError", "Failed to initialize storage", objectKey, http.StatusInternalServerError)
 		return
 	}
 
-	uploadID, err := storageBackend.CreateMultipartUpload(bucketName, objectKey, contentType)
+	uploadID, err := storageBackend.CreateMultipartUpload(bucketName, objectKey, contentType, userMeta)
 	if err != nil {
 		h.s3Error(c, "InternalError", "Failed to create multipart upload", objectKey, http.StatusInternalServerError)
 		return
@@ -119,10 +162,17 @@ func (h *S3APIHandler) CreateMultipartUpload(c *gin.Context) {
 		BucketName:  bucketName,
 		ObjectKey:   objectKey,
 		ContentType: contentType,
+		Metadata:    mapToJSONPtr(userMeta),
 		Status:      "in-progress",
 		ExpiresAt:   time.Now().Add(7 * 24 * time.Hour),
 	}
-	database.DB.Create(&mpu)
+	if err := database.DB.Create(&mpu).Error; err != nil {
+		// Without the tracking row every later op on this uploadId would 404,
+		// so don't hand out an unusable id — clean up the staging area and fail.
+		_ = storageBackend.AbortMultipartUpload(bucketName, objectKey, uploadID)
+		h.s3Error(c, "InternalError", "Failed to record multipart upload", objectKey, http.StatusInternalServerError)
+		return
+	}
 
 	c.Header("x-amz-request-id", uuid.New().String())
 	c.XML(http.StatusOK, InitiateMultipartUploadResult{
@@ -131,6 +181,85 @@ func (h *S3APIHandler) CreateMultipartUpload(c *gin.Context) {
 		Key:      objectKey,
 		UploadId: uploadID,
 	})
+}
+
+// maxBytesReader wraps a reader and returns an error once more than `remaining`
+// bytes have been read, so an object/part body cannot exceed the configured
+// maximum even when the client understates its size (e.g. via chunked encoding
+// or a spoofed X-Amz-Decoded-Content-Length). Unlike io.LimitReader it fails
+// loudly rather than silently truncating.
+type maxBytesReader struct {
+	r         io.Reader
+	remaining int64
+}
+
+func (m *maxBytesReader) Read(p []byte) (int, error) {
+	if m.remaining < 0 {
+		return 0, fmt.Errorf("request body exceeds maximum allowed size")
+	}
+	n, err := m.r.Read(p)
+	m.remaining -= int64(n)
+	if m.remaining < 0 {
+		return n, fmt.Errorf("request body exceeds maximum allowed size")
+	}
+	return n, err
+}
+
+// authorizeMultipartUpload loads the tracked multipart upload, verifies it
+// belongs to the caller (or the caller is an admin) and matches the addressed
+// bucket/key, and enforces the given policy action. It returns the authoritative
+// upload record and bucket so callers operate on the recorded bucket/key rather
+// than trusting request parameters. Without this, any authenticated caller could
+// write into, complete, abort, or list another user's in-flight upload.
+func (h *S3APIHandler) authorizeMultipartUpload(c *gin.Context, bucketName, objectKey, uploadID, action string) (*models.MultipartUpload, *models.Bucket, bool) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		h.s3Error(c, "AccessDenied", "Access Denied", objectKey, http.StatusForbidden)
+		return nil, nil, false
+	}
+	userUUID, ok := userID.(uuid.UUID)
+	if !ok {
+		h.s3Error(c, "AccessDenied", "Access Denied", objectKey, http.StatusForbidden)
+		return nil, nil, false
+	}
+	isAdminVal, _ := c.Get("is_admin")
+	admin, _ := isAdminVal.(bool)
+
+	if uploadID == "" {
+		h.s3Error(c, "InvalidArgument", "uploadId is required", objectKey, http.StatusBadRequest)
+		return nil, nil, false
+	}
+
+	var mpu models.MultipartUpload
+	if err := database.DB.Where("upload_id = ?", uploadID).First(&mpu).Error; err != nil {
+		h.s3Error(c, "NoSuchUpload", "The specified upload does not exist", uploadID, http.StatusNotFound)
+		return nil, nil, false
+	}
+
+	// The request-addressed bucket/key must match what the upload was created
+	// for, and the caller must own the upload unless they are an admin.
+	if mpu.BucketName != bucketName || mpu.ObjectKey != objectKey {
+		h.s3Error(c, "NoSuchUpload", "The specified upload does not exist", uploadID, http.StatusNotFound)
+		return nil, nil, false
+	}
+	if !admin && mpu.UserID != userUUID {
+		h.s3Error(c, "AccessDenied", "Access Denied", objectKey, http.StatusForbidden)
+		return nil, nil, false
+	}
+
+	// Enforce the object-level policy for the action.
+	if allowed, err := h.policyService.CheckObjectAccess(userUUID, mpu.BucketName, mpu.ObjectKey, action); err != nil || !allowed {
+		h.s3Error(c, "AccessDenied", "Access Denied", objectKey, http.StatusForbidden)
+		return nil, nil, false
+	}
+
+	var bucket models.Bucket
+	if err := database.DB.Where("name = ?", mpu.BucketName).First(&bucket).Error; err != nil {
+		h.s3Error(c, "NoSuchBucket", "The specified bucket does not exist", mpu.BucketName, http.StatusNotFound)
+		return nil, nil, false
+	}
+
+	return &mpu, &bucket, true
 }
 
 // UploadPart handles PUT /{bucket}/{key}?partNumber=N&uploadId=X
@@ -146,13 +275,12 @@ func (h *S3APIHandler) UploadPart(c *gin.Context) {
 		return
 	}
 
-	var bucket models.Bucket
-	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
-		h.s3Error(c, "NoSuchBucket", "The specified bucket does not exist", bucketName, http.StatusNotFound)
+	mpu, bucket, ok := h.authorizeMultipartUpload(c, bucketName, objectKey, uploadID, services.ActionPutObject)
+	if !ok {
 		return
 	}
 
-	storageBackend, err := h.bucketHandler.getStorageBackend(&bucket)
+	storageBackend, err := h.bucketHandler.getStorageBackend(bucket)
 	if err != nil {
 		h.s3Error(c, "InternalError", "Failed to initialize storage", objectKey, http.StatusInternalServerError)
 		return
@@ -168,7 +296,11 @@ func (h *S3APIHandler) UploadPart(c *gin.Context) {
 	if c.GetHeader("Content-Encoding") == "aws-chunked" {
 		bodyReader = newAWSChunkedReader(c.Request.Body)
 	}
-	etag, err := storageBackend.UploadPart(bucketName, objectKey, uploadID, partNumber, bodyReader, size)
+	// Bound the part body so a client can't stream past the configured max by
+	// understating its declared size.
+	bodyReader = &maxBytesReader{r: bodyReader, remaining: h.config.Storage.MaxFileSize}
+
+	etag, err := storageBackend.UploadPart(mpu.BucketName, mpu.ObjectKey, uploadID, partNumber, bodyReader, size)
 	if err != nil {
 		h.s3Error(c, "InternalError", "Failed to upload part", objectKey, http.StatusInternalServerError)
 		return
@@ -197,13 +329,12 @@ func (h *S3APIHandler) CompleteMultipartUpload(c *gin.Context) {
 		return
 	}
 
-	var bucket models.Bucket
-	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
-		h.s3Error(c, "NoSuchBucket", "The specified bucket does not exist", bucketName, http.StatusNotFound)
+	mpu, bucket, ok := h.authorizeMultipartUpload(c, bucketName, objectKey, uploadID, services.ActionPutObject)
+	if !ok {
 		return
 	}
 
-	storageBackend, err := h.bucketHandler.getStorageBackend(&bucket)
+	storageBackend, err := h.bucketHandler.getStorageBackend(bucket)
 	if err != nil {
 		h.s3Error(c, "InternalError", "Failed to initialize storage", objectKey, http.StatusInternalServerError)
 		return
@@ -214,42 +345,72 @@ func (h *S3APIHandler) CompleteMultipartUpload(c *gin.Context) {
 		parts[i] = storage.CompletedPart{PartNumber: p.PartNumber, ETag: strings.Trim(p.ETag, `"`)}
 	}
 
-	if err := storageBackend.CompleteMultipartUpload(bucketName, objectKey, uploadID, parts); err != nil {
-		h.s3Error(c, "InternalError", "Failed to complete multipart upload", objectKey, http.StatusInternalServerError)
+	// Quota: assembled size is only known post-assembly, so enforce that the
+	// bucket isn't already at/over quota before assembling.
+	if qerr := checkBucketQuota(bucket, 0); qerr != nil {
+		h.s3Error(c, "QuotaExceeded", qerr.Error(), objectKey, http.StatusForbidden)
 		return
 	}
 
-	// Update DB metadata
-	objInfo, _ := storageBackend.GetObjectInfo(bucketName, objectKey)
-	if objInfo != nil {
-		var existing models.Object
-		if database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, objectKey).First(&existing).Error == nil {
-			existing.Size = objInfo.Size
-			existing.ETag = objInfo.ETag
-			database.DB.Save(&existing)
-		} else {
-			var mpu models.MultipartUpload
-			database.DB.Where("upload_id = ?", uploadID).First(&mpu)
-			database.DB.Create(&models.Object{
-				BucketID:    bucket.ID,
-				Key:         objectKey,
-				Size:        objInfo.Size,
-				ContentType: mpu.ContentType,
-				ETag:        objInfo.ETag,
-				StoragePath: objectKey,
-			})
-		}
+	// Versioning: archive the current version before the assembled object
+	// replaces it.
+	archivedVID, verr := prepareVersionedWrite(storageBackend, bucket, mpu.ObjectKey)
+	if verr != nil {
+		h.s3Error(c, "InternalError", "Failed to version existing object", objectKey, http.StatusInternalServerError)
+		return
+	}
+
+	if err := storageBackend.CompleteMultipartUpload(mpu.BucketName, mpu.ObjectKey, uploadID, parts); err != nil {
+		rollbackVersionedWrite(storageBackend, bucket, mpu.ObjectKey, archivedVID)
+		h.s3Error(c, "InternalError", "Failed to complete multipart upload", objectKey, http.StatusInternalServerError)
+		return
+	}
+	newVersionID := ""
+	if bucket.Versioning == models.VersioningEnabled {
+		newVersionID = uuid.New().String()
+		c.Header("x-amz-version-id", newVersionID)
+	}
+
+	// Update DB metadata. If we can't read back the assembled object, that's a
+	// real failure — return an error rather than dereferencing a nil result.
+	objInfo, err := storageBackend.GetObjectInfo(mpu.BucketName, mpu.ObjectKey)
+	if err != nil || objInfo == nil {
+		h.s3Error(c, "InternalError", "Failed to finalize multipart upload", objectKey, http.StatusInternalServerError)
+		return
+	}
+
+	var existing models.Object
+	if database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, mpu.ObjectKey).First(&existing).Error == nil {
+		existing.Size = objInfo.Size
+		existing.ETag = objInfo.ETag
+		existing.ContentType = mpu.ContentType
+		existing.Metadata = mpu.Metadata
+		existing.VersionID = newVersionID
+		database.DB.Save(&existing)
+	} else {
+		database.DB.Create(&models.Object{
+			BucketID:    bucket.ID,
+			Key:         mpu.ObjectKey,
+			Size:        objInfo.Size,
+			ContentType: mpu.ContentType,
+			ETag:        objInfo.ETag,
+			StoragePath: mpu.ObjectKey,
+			Metadata:    mpu.Metadata,
+			VersionID:   newVersionID,
+		})
 	}
 
 	// Mark multipart upload completed
 	database.DB.Model(&models.MultipartUpload{}).Where("upload_id = ?", uploadID).Update("status", "completed")
 
+	notifyObjectEvent(bucket, services.EventObjectCreated, mpu.ObjectKey, objInfo.Size, objInfo.ETag, newVersionID)
+
 	c.Header("x-amz-request-id", uuid.New().String())
 	c.XML(http.StatusOK, CompleteMultipartUploadResult{
 		Xmlns:    "http://s3.amazonaws.com/doc/2006-03-01/",
-		Location: fmt.Sprintf("/%s/%s", bucketName, objectKey),
-		Bucket:   bucketName,
-		Key:      objectKey,
+		Location: fmt.Sprintf("/%s/%s", mpu.BucketName, mpu.ObjectKey),
+		Bucket:   mpu.BucketName,
+		Key:      mpu.ObjectKey,
 		ETag:     objInfo.ETag,
 	})
 }
@@ -260,19 +421,18 @@ func (h *S3APIHandler) AbortMultipartUpload(c *gin.Context) {
 	objectKey := strings.TrimPrefix(c.Param("key"), "/")
 	uploadID := c.Query("uploadId")
 
-	var bucket models.Bucket
-	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
-		h.s3Error(c, "NoSuchBucket", "The specified bucket does not exist", bucketName, http.StatusNotFound)
+	mpu, bucket, ok := h.authorizeMultipartUpload(c, bucketName, objectKey, uploadID, services.ActionPutObject)
+	if !ok {
 		return
 	}
 
-	storageBackend, err := h.bucketHandler.getStorageBackend(&bucket)
+	storageBackend, err := h.bucketHandler.getStorageBackend(bucket)
 	if err != nil {
 		h.s3Error(c, "InternalError", "Failed to initialize storage", objectKey, http.StatusInternalServerError)
 		return
 	}
 
-	if err := storageBackend.AbortMultipartUpload(bucketName, objectKey, uploadID); err != nil {
+	if err := storageBackend.AbortMultipartUpload(mpu.BucketName, mpu.ObjectKey, uploadID); err != nil {
 		h.s3Error(c, "InternalError", "Failed to abort multipart upload", objectKey, http.StatusInternalServerError)
 		return
 	}
@@ -289,19 +449,18 @@ func (h *S3APIHandler) ListPartsHandler(c *gin.Context) {
 	objectKey := strings.TrimPrefix(c.Param("key"), "/")
 	uploadID := c.Query("uploadId")
 
-	var bucket models.Bucket
-	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
-		h.s3Error(c, "NoSuchBucket", "The specified bucket does not exist", bucketName, http.StatusNotFound)
+	mpu, bucket, ok := h.authorizeMultipartUpload(c, bucketName, objectKey, uploadID, services.ActionPutObject)
+	if !ok {
 		return
 	}
 
-	storageBackend, err := h.bucketHandler.getStorageBackend(&bucket)
+	storageBackend, err := h.bucketHandler.getStorageBackend(bucket)
 	if err != nil {
 		h.s3Error(c, "InternalError", "Failed to initialize storage", objectKey, http.StatusInternalServerError)
 		return
 	}
 
-	parts, err := storageBackend.ListParts(bucketName, objectKey, uploadID)
+	parts, err := storageBackend.ListParts(mpu.BucketName, mpu.ObjectKey, uploadID)
 	if err != nil {
 		h.s3Error(c, "NoSuchUpload", "The specified upload does not exist", uploadID, http.StatusNotFound)
 		return
@@ -326,5 +485,203 @@ func (h *S3APIHandler) ListPartsHandler(c *gin.Context) {
 		StorageClass: "STANDARD",
 		IsTruncated:  false,
 		Parts:        entries,
+	})
+}
+
+// ListMultipartUploadsHandler handles GET /{bucket}?uploads
+func (h *S3APIHandler) ListMultipartUploadsHandler(c *gin.Context) {
+	bucketName := c.Param("bucket")
+
+	userID, exists := c.Get("user_id")
+	if !exists {
+		h.s3Error(c, "AccessDenied", "Access Denied", bucketName, http.StatusForbidden)
+		return
+	}
+	userUUID, ok := userID.(uuid.UUID)
+	if !ok {
+		h.s3Error(c, "AccessDenied", "Access Denied", bucketName, http.StatusForbidden)
+		return
+	}
+	isAdminVal, _ := c.Get("is_admin")
+	admin, _ := isAdminVal.(bool)
+
+	var bucket models.Bucket
+	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
+		h.s3Error(c, "NoSuchBucket", "The specified bucket does not exist", bucketName, http.StatusNotFound)
+		return
+	}
+
+	if allowed, _ := h.policyService.CheckBucketAccess(userUUID, bucketName, services.ActionListBucket); !allowed {
+		h.s3Error(c, "AccessDenied", "Access Denied", bucketName, http.StatusForbidden)
+		return
+	}
+
+	query := database.DB.Where("bucket_name = ? AND status = ?", bucketName, "in-progress")
+	// Non-admin callers see only their own uploads, mirroring the ownership
+	// rule authorizeMultipartUpload enforces on per-upload operations.
+	if !admin {
+		query = query.Where("user_id = ?", userUUID)
+	}
+	prefix := c.Query("prefix")
+	if prefix != "" {
+		query = query.Where("object_key LIKE ?", validation.EscapeLikeWildcards(prefix)+"%")
+	}
+
+	var uploads []models.MultipartUpload
+	if err := query.Order("created_at ASC").Limit(1000).Find(&uploads).Error; err != nil {
+		h.s3Error(c, "InternalError", "Failed to list multipart uploads", bucketName, http.StatusInternalServerError)
+		return
+	}
+
+	entries := make([]MultipartUploadEntry, len(uploads))
+	for i, u := range uploads {
+		entries[i] = MultipartUploadEntry{
+			Key:          u.ObjectKey,
+			UploadId:     u.UploadID,
+			Initiated:    u.CreatedAt.UTC(),
+			StorageClass: "STANDARD",
+		}
+	}
+
+	c.Header("x-amz-request-id", uuid.New().String())
+	c.XML(http.StatusOK, ListMultipartUploadsResult{
+		Xmlns:       "http://s3.amazonaws.com/doc/2006-03-01/",
+		Bucket:      bucketName,
+		Prefix:      prefix,
+		MaxUploads:  1000,
+		IsTruncated: false,
+		Uploads:     entries,
+	})
+}
+
+// parseCopySourceRange parses an x-amz-copy-source-range header of the form
+// "bytes=start-end" (both bounds required, inclusive) and validates it against
+// the source object size.
+func parseCopySourceRange(header string, size int64) (start, end int64, err error) {
+	spec, ok := strings.CutPrefix(header, "bytes=")
+	if !ok {
+		return 0, 0, fmt.Errorf("copy source range must be of the form bytes=start-end")
+	}
+	dash := strings.Index(spec, "-")
+	if dash <= 0 || dash == len(spec)-1 {
+		return 0, 0, fmt.Errorf("copy source range must be of the form bytes=start-end")
+	}
+	start, serr := strconv.ParseInt(spec[:dash], 10, 64)
+	end, eerr := strconv.ParseInt(spec[dash+1:], 10, 64)
+	if serr != nil || eerr != nil {
+		return 0, 0, fmt.Errorf("copy source range must be of the form bytes=start-end")
+	}
+	if start < 0 || end < start || end >= size {
+		return 0, 0, fmt.Errorf("the requested range is not satisfiable for the source object")
+	}
+	return start, end, nil
+}
+
+// UploadPartCopy handles PUT /{bucket}/{key}?partNumber=N&uploadId=X with an
+// x-amz-copy-source header: the part's bytes come from an existing object
+// (optionally a byte range of it) instead of the request body.
+func (h *S3APIHandler) UploadPartCopy(c *gin.Context) {
+	bucketName := c.Param("bucket")
+	objectKey := strings.TrimPrefix(c.Param("key"), "/")
+	uploadID := c.Query("uploadId")
+
+	partNumber, err := strconv.Atoi(c.Query("partNumber"))
+	if err != nil || partNumber < 1 || partNumber > 10000 {
+		h.s3Error(c, "InvalidArgument", "Invalid part number", objectKey, http.StatusBadRequest)
+		return
+	}
+
+	// Authorize the destination upload (also verifies ownership and PutObject
+	// policy on the recorded bucket/key).
+	mpu, bucket, ok := h.authorizeMultipartUpload(c, bucketName, objectKey, uploadID, services.ActionPutObject)
+	if !ok {
+		return
+	}
+	userID, _ := c.Get("user_id")
+	userUUID := userID.(uuid.UUID) // validated by authorizeMultipartUpload
+
+	// Parse the copy source exactly like CopyObject does: it may be
+	// URL-encoded, format is /srcBucket/srcKey.
+	copySource := c.GetHeader("x-amz-copy-source")
+	decoded, derr := url.PathUnescape(copySource)
+	if derr != nil {
+		decoded = copySource
+	}
+	decoded = strings.TrimPrefix(decoded, "/")
+	slashIdx := strings.Index(decoded, "/")
+	if slashIdx < 0 {
+		h.s3Error(c, "InvalidArgument", "Invalid copy source", copySource, http.StatusBadRequest)
+		return
+	}
+	srcBucket := decoded[:slashIdx]
+	srcKey := decoded[slashIdx+1:]
+
+	// Permission: GetObject on source
+	if allowed, _ := h.policyService.CheckObjectAccess(userUUID, srcBucket, srcKey, services.ActionGetObject); !allowed {
+		h.s3Error(c, "AccessDenied", "Access Denied on source", srcKey, http.StatusForbidden)
+		return
+	}
+
+	var srcBucketModel models.Bucket
+	if err := database.DB.Where("name = ?", srcBucket).First(&srcBucketModel).Error; err != nil {
+		h.s3Error(c, "NoSuchBucket", "Source bucket does not exist", srcBucket, http.StatusNotFound)
+		return
+	}
+	var srcObj models.Object
+	if err := database.DB.Where("bucket_id = ? AND key = ?", srcBucketModel.ID, srcKey).First(&srcObj).Error; err != nil {
+		h.s3Error(c, "NoSuchKey", "Source key does not exist", srcKey, http.StatusNotFound)
+		return
+	}
+
+	// Optional x-amz-copy-source-range: bytes=start-end (inclusive).
+	offset := int64(0)
+	length := srcObj.Size
+	if rangeHeader := c.GetHeader("x-amz-copy-source-range"); rangeHeader != "" {
+		start, end, rerr := parseCopySourceRange(rangeHeader, srcObj.Size)
+		if rerr != nil {
+			h.s3Error(c, "InvalidRange", rerr.Error(), srcKey, http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		offset = start
+		length = end - start + 1
+	}
+
+	srcStorage, err := h.bucketHandler.getStorageBackend(&srcBucketModel)
+	if err != nil {
+		h.s3Error(c, "InternalError", "Failed to initialize source storage", srcKey, http.StatusInternalServerError)
+		return
+	}
+	destStorage, err := h.bucketHandler.getStorageBackend(bucket)
+	if err != nil {
+		h.s3Error(c, "InternalError", "Failed to initialize storage", objectKey, http.StatusInternalServerError)
+		return
+	}
+
+	reader, err := srcStorage.GetObject(srcBucket, srcKey)
+	if err != nil {
+		h.s3Error(c, "InternalError", "Failed to read source object", srcKey, http.StatusInternalServerError)
+		return
+	}
+	defer reader.Close()
+
+	if offset > 0 {
+		if _, err := io.CopyN(io.Discard, reader, offset); err != nil {
+			h.s3Error(c, "InternalError", "Failed to read source object", srcKey, http.StatusInternalServerError)
+			return
+		}
+	}
+	partReader := io.LimitReader(reader, length)
+
+	etag, err := destStorage.UploadPart(mpu.BucketName, mpu.ObjectKey, uploadID, partNumber, partReader, length)
+	if err != nil {
+		h.s3Error(c, "InternalError", "Failed to upload part", objectKey, http.StatusInternalServerError)
+		return
+	}
+
+	c.Header("x-amz-request-id", uuid.New().String())
+	c.XML(http.StatusOK, CopyPartResult{
+		Xmlns:        "http://s3.amazonaws.com/doc/2006-03-01/",
+		ETag:         fmt.Sprintf(`"%s"`, etag),
+		LastModified: time.Now().UTC(),
 	})
 }

@@ -6,6 +6,7 @@ import (
 	"bkt/internal/database"
 	"bkt/internal/models"
 	"bkt/internal/security"
+	"bkt/internal/services"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -13,11 +14,12 @@ import (
 )
 
 type S3ConfigHandler struct {
-	config *config.Config
+	config       *config.Config
+	auditService *services.AuditService
 }
 
 func NewS3ConfigHandler(cfg *config.Config) *S3ConfigHandler {
-	return &S3ConfigHandler{config: cfg}
+	return &S3ConfigHandler{config: cfg, auditService: services.NewAuditService()}
 }
 
 // ListS3Configs lists all S3 configurations (admin only)
@@ -164,6 +166,10 @@ func (h *S3ConfigHandler) CreateS3Config(c *gin.Context) {
 	// Invalidate S3 config cache after creation
 	InvalidateS3ConfigCache()
 
+	{
+		uid, uname := actor(c)
+		h.auditService.LogSuccess(c, uid, uname, "s3config.create", "s3_configuration", s3Config.ID.String(), s3Config.Name, nil)
+	}
 	c.JSON(http.StatusCreated, s3Config)
 }
 
@@ -334,6 +340,10 @@ func (h *S3ConfigHandler) UpdateS3Config(c *gin.Context) {
 	// Invalidate S3 config cache after update
 	InvalidateS3ConfigCache()
 
+	{
+		uid, uname := actor(c)
+		h.auditService.LogSuccess(c, uid, uname, "s3config.update", "s3_configuration", s3Config.ID.String(), s3Config.Name, nil)
+	}
 	c.JSON(http.StatusOK, s3Config)
 }
 
@@ -400,6 +410,11 @@ func (h *S3ConfigHandler) DeleteS3Config(c *gin.Context) {
 
 	// Invalidate S3 config cache after deletion
 	InvalidateS3ConfigCache()
+
+	{
+		uid, uname := actor(c)
+		h.auditService.LogSuccess(c, uid, uname, "s3config.delete", "s3_configuration", s3Config.ID.String(), s3Config.Name, nil)
+	}
 
 	c.JSON(http.StatusOK, models.SuccessResponse{
 		Message: "S3 configuration deleted successfully",

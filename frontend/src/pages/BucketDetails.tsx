@@ -1,8 +1,10 @@
 import { useEffect, useState, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { FolderOpen, Upload, Download, Trash2, File as FileIcon, ArrowLeft, RefreshCw, Folder, FolderPlus, Home, Loader2, Pencil, Columns2, Info, FolderInput, Copy, ExternalLink, Search, X, Calendar, Filter } from 'lucide-react'
+import { FolderOpen, Upload, Download, Trash2, File as FileIcon, ArrowLeft, RefreshCw, Folder, FolderPlus, Home, Loader2, Pencil, Columns2, Info, Copy, ExternalLink, Search, X, Calendar, Filter, ChevronRight, CheckCircle2, XCircle, Link2, Check, History, Settings2 } from 'lucide-react'
 import { bucketApi } from '../services/api'
-import type { Object as StorageObject } from '../types'
+import type { ObjectVersion } from '../services/api'
+import type { Object as StorageObject, Bucket } from '../types'
+import { getErrorMessage } from '../utils/errors'
 
 interface ContextMenuState {
   show: boolean
@@ -40,6 +42,11 @@ export default function BucketDetails() {
   const [loading, setLoading] = useState(true)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')
+  // Truncation state: set when the backend indicates more objects are available
+  // than were returned (buckets with >1000 objects).
+  const [truncated, setTruncated] = useState(false)
+  const [continuationToken, setContinuationToken] = useState<string | undefined>(undefined)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [showCreateFolderModal, setShowCreateFolderModal] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
   const [createFolderPane, setCreateFolderPane] = useState<'left' | 'right'>('left')
@@ -47,6 +54,10 @@ export default function BucketDetails() {
   const [activeUploads, setActiveUploads] = useState<ActiveUpload[]>([])
   const [uploadTargetPane, setUploadTargetPane] = useState<'left' | 'right' | 'single'>('left')
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // Tracks whether the component is still mounted so the recursive upload
+  // poller can stop scheduling timeouts / setState calls after unmount.
+  const isMountedRef = useRef(true)
 
   // Rename state
   const [showRenameModal, setShowRenameModal] = useState(false)
@@ -74,6 +85,42 @@ export default function BucketDetails() {
   const [showFileInfo, setShowFileInfo] = useState(false)
   const [fileInfoTarget, setFileInfoTarget] = useState<StorageObject | null>(null)
 
+  // Share (presigned URL) modal state
+  const [shareTarget, setShareTarget] = useState<string | null>(null)
+  const [shareExpiry, setShareExpiry] = useState(3600)
+  const [shareResult, setShareResult] = useState<{ url: string; expires_at: string; capped_by_key: boolean; signing_key_name?: string } | null>(null)
+  const [shareLoading, setShareLoading] = useState(false)
+  const [shareError, setShareError] = useState('')
+  const [shareNeedsKey, setShareNeedsKey] = useState(false)
+  const [shareCopied, setShareCopied] = useState(false)
+
+  // Version history modal state
+  const [versionsTarget, setVersionsTarget] = useState<string | null>(null)
+  const [versions, setVersions] = useState<ObjectVersion[]>([])
+  const [versionsLoading, setVersionsLoading] = useState(false)
+  const [versionsError, setVersionsError] = useState('')
+  const [versionsBucketState, setVersionsBucketState] = useState('')
+
+  // Bucket settings modal state
+  const [showBucketSettings, setShowBucketSettings] = useState(false)
+  const [bucketInfo, setBucketInfo] = useState<Bucket | null>(null)
+  const [settingsLoading, setSettingsLoading] = useState(false)
+  const [settingsError, setSettingsError] = useState('')
+  const [settingsSuccess, setSettingsSuccess] = useState('')
+  const [lifecycleExpireDays, setLifecycleExpireDays] = useState('')
+  const [lifecyclePrefix, setLifecyclePrefix] = useState('')
+  const [lifecycleNoncurrentDays, setLifecycleNoncurrentDays] = useState('')
+  const [lifecycleSaving, setLifecycleSaving] = useState(false)
+  // Quota / retention / notifications & replication settings state
+  const [quotaMb, setQuotaMb] = useState('')
+  const [retentionDays, setRetentionDays] = useState('')
+  const [webhookUrl, setWebhookUrl] = useState('')
+  const [webhookSecret, setWebhookSecret] = useState('')
+  const [webhookCreated, setWebhookCreated] = useState(false)
+  const [webhookRemoved, setWebhookRemoved] = useState(false)
+  const [replicateTo, setReplicateTo] = useState('')
+  const [generalSaving, setGeneralSaving] = useState(false)
+
   // Search and filter state
   const [searchQuery, setSearchQuery] = useState('')
   const [showFilters, setShowFilters] = useState(false)
@@ -91,27 +138,74 @@ export default function BucketDetails() {
     return () => document.removeEventListener('click', handleClick)
   }, [])
 
+  // Mark the component unmounted so in-flight pollers stop.
+  useEffect(() => {
+    isMountedRef.current = true
+    return () => {
+      isMountedRef.current = false
+    }
+  }, [])
+
+  // The listing is fetched unscoped (see loadObjects), so folder navigation
+  // doesn't need a refetch — only a bucket change does.
   useEffect(() => {
     if (bucketName) {
       loadObjects()
       loadActiveUploads()
     }
-  }, [bucketName, currentPrefix])
+  }, [bucketName])
 
   const loadObjects = async () => {
     if (!bucketName) return
 
     try {
       setError('')
+      // Fetch unscoped: split view, global search, and folder derivation all
+      // read from this single `objects` state and assume it spans the whole
+      // bucket, so a prefix-scoped fetch would break any pane/search outside
+      // the current folder. Buckets past the page size surface is_truncated
+      // and page in via the continuation token instead.
       const data = await bucketApi.listObjects(bucketName)
       // Handle both array response and object response with objects property
-      const objectList = Array.isArray(data) ? data : (data as any).objects || []
+      const objectList = Array.isArray(data) ? data : data.objects || []
       setObjects(objectList)
+      if (!Array.isArray(data)) {
+        setTruncated(!!data.is_truncated)
+        setContinuationToken(data.next_continuation_token)
+      } else {
+        setTruncated(false)
+        setContinuationToken(undefined)
+      }
     } catch (error: any) {
       console.error('Failed to load objects:', error)
-      setError(error.response?.data?.message || 'Failed to load objects')
+      setError(getErrorMessage(error, 'Failed to load objects'))
     } finally {
       setLoading(false)
+    }
+  }
+
+  // Fetch the next page of objects (when the listing was truncated) and append.
+  const loadMoreObjects = async () => {
+    if (!bucketName || !continuationToken) return
+
+    try {
+      setLoadingMore(true)
+      setError('')
+      const data = await bucketApi.listObjects(bucketName, { continuationToken })
+      const more = Array.isArray(data) ? data : data.objects || []
+      setObjects(prev => [...prev, ...more])
+      if (!Array.isArray(data)) {
+        setTruncated(!!data.is_truncated)
+        setContinuationToken(data.next_continuation_token)
+      } else {
+        setTruncated(false)
+        setContinuationToken(undefined)
+      }
+    } catch (error: any) {
+      console.error('Failed to load more objects:', error)
+      setError(getErrorMessage(error, 'Failed to load more objects'))
+    } finally {
+      setLoadingMore(false)
     }
   }
 
@@ -151,8 +245,13 @@ export default function BucketDetails() {
     let attempts = 0
 
     const poll = async () => {
+      // Stop polling entirely if the component has unmounted / navigated away.
+      if (!isMountedRef.current) return
+
       try {
         const status = await bucketApi.getUploadStatus(uploadId)
+
+        if (!isMountedRef.current) return
 
         setActiveUploads(prev =>
           prev.map(u =>
@@ -170,12 +269,14 @@ export default function BucketDetails() {
         if (status.status === 'completed') {
           // Remove from active uploads after a brief delay
           setTimeout(() => {
+            if (!isMountedRef.current) return
             setActiveUploads(prev => prev.filter(u => u.uploadId !== uploadId))
           }, 2000)
           await loadObjects()
         } else if (status.status === 'failed') {
           // Keep failed upload visible for user to see error
           setTimeout(() => {
+            if (!isMountedRef.current) return
             setActiveUploads(prev => prev.filter(u => u.uploadId !== uploadId))
           }, 10000)
         } else if (attempts < maxAttempts) {
@@ -184,6 +285,7 @@ export default function BucketDetails() {
         }
       } catch (error) {
         console.error('Failed to poll upload status:', error)
+        if (!isMountedRef.current) return
         setActiveUploads(prev => prev.filter(u => u.uploadId !== uploadId))
       }
     }
@@ -478,7 +580,7 @@ export default function BucketDetails() {
             pollUploadStatus(response.upload_id, file.name)
           } catch (error: any) {
             console.error('Failed to start async upload:', error)
-            setError(error.response?.data?.message || `Failed to upload ${file.name}`)
+            setError(getErrorMessage(error, `Failed to upload ${file.name}`))
           }
         } else {
           // Use synchronous upload for smaller files
@@ -495,7 +597,7 @@ export default function BucketDetails() {
       }
     } catch (error: any) {
       console.error('Failed to upload file:', error)
-      setError(error.response?.data?.message || 'Failed to upload file')
+      setError(getErrorMessage(error, 'Failed to upload file'))
     } finally {
       setUploading(false)
     }
@@ -522,7 +624,7 @@ export default function BucketDetails() {
       await loadObjects()
     } catch (error: any) {
       console.error('Failed to create folder:', error)
-      setError(error.response?.data?.message || 'Failed to create folder')
+      setError(getErrorMessage(error, 'Failed to create folder'))
     }
   }
 
@@ -543,7 +645,7 @@ export default function BucketDetails() {
       window.URL.revokeObjectURL(url)
     } catch (error: any) {
       console.error('Failed to download object:', error)
-      setError(error.response?.data?.message || 'Failed to download object')
+      setError(getErrorMessage(error, 'Failed to download object'))
     }
   }
 
@@ -557,7 +659,7 @@ export default function BucketDetails() {
       await loadObjects()
     } catch (error: any) {
       console.error('Failed to delete object:', error)
-      setError(error.response?.data?.message || 'Failed to delete object')
+      setError(getErrorMessage(error, 'Failed to delete object'))
     }
   }
 
@@ -582,7 +684,7 @@ export default function BucketDetails() {
       await loadObjects()
     } catch (error: any) {
       console.error('Failed to rename object:', error)
-      setError(error.response?.data?.message || 'Failed to rename object')
+      setError(getErrorMessage(error, 'Failed to rename object'))
     }
   }
 
@@ -632,7 +734,7 @@ export default function BucketDetails() {
         await loadObjects()
       } catch (error: any) {
         console.error('Failed to move folder:', error)
-        setError(error.response?.data?.message || 'Failed to move folder')
+        setError(getErrorMessage(error, 'Failed to move folder'))
       } finally {
         setDraggedItem(null)
       }
@@ -653,7 +755,7 @@ export default function BucketDetails() {
         await loadObjects()
       } catch (error: any) {
         console.error('Failed to move object:', error)
-        setError(error.response?.data?.message || 'Failed to move object')
+        setError(getErrorMessage(error, 'Failed to move object'))
       } finally {
         setDraggedItem(null)
       }
@@ -695,6 +797,309 @@ export default function BucketDetails() {
     setContextMenu(prev => ({ ...prev, show: false }))
   }
 
+  // Share (presigned URL) handlers
+  const handleShareClick = (object: StorageObject) => {
+    setShareTarget(object.key)
+    setShareExpiry(3600)
+    setShareResult(null)
+    setShareError('')
+    setShareNeedsKey(false)
+    setShareCopied(false)
+    setContextMenu(prev => ({ ...prev, show: false }))
+  }
+
+  const closeShareModal = () => {
+    setShareTarget(null)
+    setShareExpiry(3600)
+    setShareResult(null)
+    setShareError('')
+    setShareNeedsKey(false)
+    setShareCopied(false)
+  }
+
+  const handleGenerateLink = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!bucketName || shareTarget === null) return
+
+    setShareLoading(true)
+    setShareError('')
+    setShareNeedsKey(false)
+
+    try {
+      const result = await bucketApi.presignObject(bucketName, shareTarget, shareExpiry)
+      setShareResult(result)
+    } catch (error: any) {
+      console.error('Failed to generate share link:', error)
+      if (error?.response?.status === 409) {
+        setShareNeedsKey(true)
+      } else {
+        setShareError(getErrorMessage(error, 'Failed to generate share link'))
+      }
+    } finally {
+      setShareLoading(false)
+    }
+  }
+
+  const handleCopyShareUrl = () => {
+    if (!shareResult) return
+    navigator.clipboard.writeText(shareResult.url)
+    setShareCopied(true)
+    setTimeout(() => {
+      if (!isMountedRef.current) return
+      setShareCopied(false)
+    }, 2000)
+  }
+
+  // Version history handlers
+  const loadVersions = async (key: string) => {
+    if (!bucketName) return
+
+    setVersionsLoading(true)
+    setVersionsError('')
+
+    try {
+      const data = await bucketApi.listObjectVersions(bucketName, key)
+      const sorted = [...(data.versions || [])].sort(
+        (a, b) => new Date(b.last_modified).getTime() - new Date(a.last_modified).getTime()
+      )
+      setVersions(sorted)
+      setVersionsBucketState(data.versioning || '')
+    } catch (error: any) {
+      console.error('Failed to load object versions:', error)
+      setVersionsError(getErrorMessage(error, 'Failed to load version history'))
+    } finally {
+      setVersionsLoading(false)
+    }
+  }
+
+  const handleVersionHistoryClick = (object: StorageObject) => {
+    setVersionsTarget(object.key)
+    setVersions([])
+    setVersionsError('')
+    setVersionsBucketState('')
+    setContextMenu(prev => ({ ...prev, show: false }))
+    loadVersions(object.key)
+  }
+
+  const closeVersionsModal = () => {
+    setVersionsTarget(null)
+    setVersions([])
+    setVersionsError('')
+    setVersionsBucketState('')
+  }
+
+  const handleRestoreVersion = async (versionId: string) => {
+    if (!bucketName || versionsTarget === null) return
+
+    try {
+      setVersionsError('')
+      await bucketApi.restoreObjectVersion(bucketName, versionsTarget, versionId)
+      await loadVersions(versionsTarget)
+      await loadObjects()
+    } catch (error: any) {
+      console.error('Failed to restore version:', error)
+      setVersionsError(getErrorMessage(error, 'Failed to restore version'))
+    }
+  }
+
+  const handleDeleteVersion = async (versionId: string) => {
+    if (!bucketName || versionsTarget === null) return
+    if (!confirm('Permanently delete this version? This cannot be undone.')) return
+
+    try {
+      setVersionsError('')
+      await bucketApi.deleteObjectVersion(bucketName, versionsTarget, versionId)
+      await loadVersions(versionsTarget)
+      await loadObjects()
+    } catch (error: any) {
+      console.error('Failed to delete version:', error)
+      setVersionsError(getErrorMessage(error, 'Failed to delete version'))
+    }
+  }
+
+  // Bucket settings handlers
+  const applyLifecyclePrefill = (bucket: Bucket) => {
+    let expireDays = ''
+    let prefix = ''
+    let noncurrentDays = ''
+    if (bucket.lifecycle) {
+      try {
+        const cfg = JSON.parse(bucket.lifecycle)
+        if (cfg && typeof cfg === 'object') {
+          if (cfg.expire_days) expireDays = String(cfg.expire_days)
+          if (cfg.prefix) prefix = String(cfg.prefix)
+          if (cfg.noncurrent_expire_days) noncurrentDays = String(cfg.noncurrent_expire_days)
+        }
+      } catch {
+        // Malformed lifecycle JSON — leave the form empty.
+      }
+    }
+    setLifecycleExpireDays(expireDays)
+    setLifecyclePrefix(prefix)
+    setLifecycleNoncurrentDays(noncurrentDays)
+  }
+
+  // Compose the webhook events CSV in a stable order ("created,removed").
+  const composeWebhookEvents = (created: boolean, removed: boolean): string =>
+    [created ? 'created' : '', removed ? 'removed' : ''].filter(Boolean).join(',')
+
+  const applySettingsPrefill = (bucket: Bucket) => {
+    setQuotaMb(bucket.quota_bytes ? String(Math.round(bucket.quota_bytes / (1024 * 1024))) : '')
+    setRetentionDays(bucket.retention_days ? String(bucket.retention_days) : '')
+    setWebhookUrl(bucket.webhook_url || '')
+    setWebhookSecret('') // never returned by the backend; only sent when the user types one
+    const events = (bucket.webhook_events || '').split(',').map(e => e.trim())
+    setWebhookCreated(events.includes('created'))
+    setWebhookRemoved(events.includes('removed'))
+    setReplicateTo(bucket.replicate_to || '')
+  }
+
+  const handleSaveGeneralSettings = async () => {
+    if (!bucketName) return
+
+    setSettingsError('')
+    setSettingsSuccess('')
+
+    // Only send the fields the user actually changed.
+    const payload: {
+      quota_bytes?: number
+      retention_days?: number
+      webhook_url?: string
+      webhook_secret?: string
+      webhook_events?: string
+      replicate_to?: string
+    } = {}
+
+    const newQuotaBytes = quotaMb.trim() === '' ? 0 : Math.round((parseFloat(quotaMb) || 0) * 1024 * 1024)
+    if (newQuotaBytes !== (bucketInfo?.quota_bytes || 0)) {
+      payload.quota_bytes = newQuotaBytes
+    }
+
+    const newRetentionDays = parseInt(retentionDays, 10) || 0
+    if (newRetentionDays !== (bucketInfo?.retention_days || 0)) {
+      payload.retention_days = newRetentionDays
+    }
+
+    if (webhookUrl.trim() !== (bucketInfo?.webhook_url || '')) {
+      payload.webhook_url = webhookUrl.trim()
+    }
+    if (webhookSecret) {
+      payload.webhook_secret = webhookSecret
+    }
+
+    const storedEvents = (bucketInfo?.webhook_events || '').split(',').map(e => e.trim())
+    const storedCsv = composeWebhookEvents(storedEvents.includes('created'), storedEvents.includes('removed'))
+    const newCsv = composeWebhookEvents(webhookCreated, webhookRemoved)
+    if (newCsv !== storedCsv) {
+      payload.webhook_events = newCsv
+    }
+
+    if (replicateTo.trim() !== (bucketInfo?.replicate_to || '')) {
+      payload.replicate_to = replicateTo.trim()
+    }
+
+    if (Object.keys(payload).length === 0) {
+      setSettingsSuccess('No changes to save')
+      return
+    }
+
+    setGeneralSaving(true)
+    try {
+      await bucketApi.setBucketSettings(bucketName, payload)
+      setSettingsSuccess('Settings saved')
+      const bucket = await bucketApi.getBucket(bucketName)
+      setBucketInfo(bucket)
+      applySettingsPrefill(bucket)
+    } catch (error: any) {
+      console.error('Failed to save bucket settings:', error)
+      setSettingsError(getErrorMessage(error, 'Failed to save bucket settings'))
+    } finally {
+      setGeneralSaving(false)
+    }
+  }
+
+  const openBucketSettings = async () => {
+    if (!bucketName) return
+
+    setShowBucketSettings(true)
+    setSettingsError('')
+    setSettingsSuccess('')
+    setSettingsLoading(true)
+
+    try {
+      const bucket = await bucketApi.getBucket(bucketName)
+      setBucketInfo(bucket)
+      applyLifecyclePrefill(bucket)
+      applySettingsPrefill(bucket)
+    } catch (error: any) {
+      console.error('Failed to load bucket:', error)
+      setSettingsError(getErrorMessage(error, 'Failed to load bucket settings'))
+    } finally {
+      setSettingsLoading(false)
+    }
+  }
+
+  const closeBucketSettings = () => {
+    setShowBucketSettings(false)
+    setSettingsError('')
+    setSettingsSuccess('')
+  }
+
+  const handleSetVersioning = async (versioning: 'enabled' | 'suspended') => {
+    if (!bucketName) return
+
+    setSettingsError('')
+    setSettingsSuccess('')
+
+    try {
+      await bucketApi.setBucketVersioning(bucketName, versioning)
+      const bucket = await bucketApi.getBucket(bucketName)
+      setBucketInfo(bucket)
+      setSettingsSuccess(versioning === 'enabled' ? 'Versioning enabled' : 'Versioning suspended')
+    } catch (error: any) {
+      console.error('Failed to update versioning:', error)
+      if (error?.response?.status === 403) {
+        setSettingsError('Only the bucket owner or an admin can change this')
+      } else {
+        setSettingsError(getErrorMessage(error, 'Failed to update versioning'))
+      }
+    }
+  }
+
+  const handleSaveLifecycle = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!bucketName) return
+
+    setSettingsError('')
+    setSettingsSuccess('')
+    setLifecycleSaving(true)
+
+    try {
+      const expireDays = parseInt(lifecycleExpireDays, 10) || 0
+      const noncurrentDays = parseInt(lifecycleNoncurrentDays, 10) || 0
+      await bucketApi.setBucketLifecycle(bucketName, {
+        expire_days: expireDays,
+        prefix: lifecyclePrefix.trim() || undefined,
+        noncurrent_expire_days: noncurrentDays,
+      })
+      setSettingsSuccess(
+        expireDays === 0 && noncurrentDays === 0 ? 'Lifecycle rules cleared' : 'Lifecycle rules saved'
+      )
+      const bucket = await bucketApi.getBucket(bucketName)
+      setBucketInfo(bucket)
+      applyLifecyclePrefill(bucket)
+    } catch (error: any) {
+      console.error('Failed to save lifecycle rules:', error)
+      if (error?.response?.status === 403) {
+        setSettingsError('Only the bucket owner or an admin can change this')
+      } else {
+        setSettingsError(getErrorMessage(error, 'Failed to save lifecycle rules'))
+      }
+    } finally {
+      setLifecycleSaving(false)
+    }
+  }
+
   const handleOpenInNewTab = (item: FileItem) => {
     if (!bucketName) return
     // Create a download URL and open in new tab
@@ -715,8 +1120,9 @@ export default function BucketDetails() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-full">
-        <div className="text-dark-textSecondary">Loading objects...</div>
+      <div className="flex flex-col items-center justify-center h-64 gap-3">
+        <div className="spinner" />
+        <p className="text-sm text-dark-textSecondary">Loading objects…</p>
       </div>
     )
   }
@@ -733,22 +1139,27 @@ export default function BucketDetails() {
   const isSearchMode = !!hasActiveFilters
 
   return (
-    <div className="p-8">
+    <div className="page">
       {/* Header */}
       <div className="mb-8">
-        <Link to="/buckets" className="inline-flex items-center gap-2 text-blue-500 hover:text-blue-400 mb-4">
+        <Link
+          to="/buckets"
+          className="inline-flex items-center gap-1.5 text-sm text-dark-textSecondary hover:text-dark-text transition-colors mb-4"
+        >
           <ArrowLeft className="w-4 h-4" />
           Back to Buckets
         </Link>
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-3">
-            <FolderOpen className="w-8 h-8 text-blue-500" />
-            <div>
-              <h1 className="text-3xl font-bold text-dark-text">{bucketName}</h1>
-              <p className="text-dark-textSecondary">{browserItems.length} items</p>
-            </div>
+        <div className="flex items-start justify-between gap-4 mb-6">
+          <div>
+            <h1 className="page-title font-mono">{bucketName}</h1>
+            <p className="page-subtitle">
+              {browserItems.length} item{browserItems.length !== 1 ? 's' : ''}
+            </p>
           </div>
-          <div className="flex gap-3">
+          <div className="flex items-center gap-2">
+            <button onClick={openBucketSettings} className="btn-icon" title="Bucket settings">
+              <Settings2 className="w-4 h-4" />
+            </button>
             <button
               onClick={() => {
                 setSplitView(!splitView)
@@ -756,32 +1167,28 @@ export default function BucketDetails() {
                   setRightPrefix(currentPrefix) // Initialize right pane to same location
                 }
               }}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
+              className={
                 splitView
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-dark-surface border border-dark-border hover:bg-dark-surfaceHover text-dark-text'
-              }`}
+                  ? 'btn-secondary !bg-accent-soft !text-blue-400 !border-blue-500/40'
+                  : 'btn-secondary'
+              }
               title={splitView ? 'Exit split view' : 'Enable split view'}
             >
-              <Columns2 className="w-5 h-5" />
+              <Columns2 className="w-4 h-4" />
               Split View
             </button>
-            <button
-              onClick={loadObjects}
-              className="flex items-center gap-2 bg-dark-surface border border-dark-border hover:bg-dark-surfaceHover text-dark-text px-4 py-2 rounded-lg transition-colors"
-            >
-              <RefreshCw className="w-5 h-5" />
-              Refresh
+            <button onClick={loadObjects} className="btn-icon" title="Refresh">
+              <RefreshCw className="w-4 h-4" />
             </button>
             <button
               onClick={() => {
                 setCreateFolderFromContextMenu(false)
                 setShowCreateFolderModal(true)
               }}
-              className="flex items-center gap-2 bg-dark-surface border border-dark-border hover:bg-dark-surfaceHover text-dark-text px-4 py-2 rounded-lg transition-colors"
+              className="btn-secondary"
             >
-              <FolderPlus className="w-5 h-5" />
-              Create Folder
+              <FolderPlus className="w-4 h-4" />
+              New Folder
             </button>
             <button
               onClick={() => {
@@ -789,9 +1196,9 @@ export default function BucketDetails() {
                 handleUploadClick()
               }}
               disabled={uploading}
-              className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors disabled:opacity-50"
+              className="btn-primary"
             >
-              <Upload className="w-5 h-5" />
+              <Upload className="w-4 h-4" />
               {uploading ? 'Uploading...' : 'Upload Files'}
             </button>
             <input
@@ -805,22 +1212,23 @@ export default function BucketDetails() {
         </div>
 
         {/* Search and Filter Bar */}
-        <div className="bg-dark-surface border border-dark-border rounded-lg p-4">
-          <div className="flex items-center gap-4">
+        <div className="card p-4">
+          <div className="flex items-center gap-2">
             {/* Search Input */}
             <div className="flex-1 relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-dark-textSecondary" />
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-dark-textMuted pointer-events-none" />
               <input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search files... (use * for wildcard, e.g., *.jpg, report*)"
-                className="w-full pl-10 pr-10 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text placeholder-dark-textSecondary focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="Search files… (use * for wildcard, e.g. *.jpg, report*)"
+                className="input !pl-9 !pr-9 !py-2"
               />
               {searchQuery && (
                 <button
                   onClick={() => setSearchQuery('')}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-dark-textSecondary hover:text-dark-text"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 btn-icon !w-6 !h-6"
+                  title="Clear search"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -830,16 +1238,16 @@ export default function BucketDetails() {
             {/* Filter Toggle Button */}
             <button
               onClick={() => setShowFilters(!showFilters)}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
+              className={
                 showFilters || (filterDateFrom || filterDateTo || filterExtension || filterMinSize || filterMaxSize || filterMaxDepth)
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-dark-bg border border-dark-border text-dark-text hover:bg-dark-surfaceHover'
-              }`}
+                  ? 'btn-secondary !bg-accent-soft !text-blue-400 !border-blue-500/40'
+                  : 'btn-secondary'
+              }
             >
               <Filter className="w-4 h-4" />
               Filters
               {(filterDateFrom || filterDateTo || filterExtension || filterMinSize || filterMaxSize || filterMaxDepth) && (
-                <span className="bg-white/20 text-xs px-1.5 py-0.5 rounded">
+                <span className="badge-blue !px-1.5 !py-0">
                   {[filterDateFrom, filterDateTo, filterExtension, filterMinSize, filterMaxSize, filterMaxDepth].filter(Boolean).length}
                 </span>
               )}
@@ -847,10 +1255,7 @@ export default function BucketDetails() {
 
             {/* Clear Filters */}
             {hasActiveFilters && (
-              <button
-                onClick={clearFilters}
-                className="flex items-center gap-2 px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-textSecondary hover:text-dark-text hover:bg-dark-surfaceHover transition-colors"
-              >
+              <button onClick={clearFilters} className="btn-ghost">
                 <X className="w-4 h-4" />
                 Clear
               </button>
@@ -864,46 +1269,46 @@ export default function BucketDetails() {
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {/* Extension Filter */}
                 <div>
-                  <label className="block text-sm font-medium text-dark-textSecondary mb-1">File Extension</label>
+                  <label className="label">File Extension</label>
                   <input
                     type="text"
                     value={filterExtension}
                     onChange={(e) => setFilterExtension(e.target.value)}
-                    placeholder="e.g., jpg, png, pdf"
-                    className="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text placeholder-dark-textSecondary focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                    placeholder="e.g. jpg, png, pdf"
+                    className="input !py-2"
                   />
                 </div>
 
                 {/* Max Depth Filter */}
                 <div>
-                  <label className="block text-sm font-medium text-dark-textSecondary mb-1">Max Folder Depth</label>
+                  <label className="label">Max Folder Depth</label>
                   <input
                     type="number"
                     min="0"
                     value={filterMaxDepth}
                     onChange={(e) => setFilterMaxDepth(e.target.value)}
-                    placeholder="e.g., 2 (0 = root only)"
-                    className="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text placeholder-dark-textSecondary focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                    placeholder="e.g. 2 (0 = root only)"
+                    className="input !py-2"
                   />
                 </div>
 
                 {/* Size Filter */}
                 <div className="sm:col-span-2 lg:col-span-1">
-                  <label className="block text-sm font-medium text-dark-textSecondary mb-1">File Size</label>
+                  <label className="label">File Size</label>
                   <div className="flex gap-2">
                     <input
                       type="text"
                       value={filterMinSize}
                       onChange={(e) => setFilterMinSize(e.target.value)}
-                      placeholder="Min (e.g., 1MB)"
-                      className="flex-1 px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text placeholder-dark-textSecondary focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                      placeholder="Min (e.g. 1MB)"
+                      className="input !py-2 flex-1"
                     />
                     <input
                       type="text"
                       value={filterMaxSize}
                       onChange={(e) => setFilterMaxSize(e.target.value)}
-                      placeholder="Max (e.g., 10MB)"
-                      className="flex-1 px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text placeholder-dark-textSecondary focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                      placeholder="Max (e.g. 10MB)"
+                      className="input !py-2 flex-1"
                     />
                   </div>
                 </div>
@@ -913,28 +1318,28 @@ export default function BucketDetails() {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 {/* Date From Filter */}
                 <div>
-                  <label className="block text-sm font-medium text-dark-textSecondary mb-1">Modified After</label>
+                  <label className="label">Modified After</label>
                   <div className="relative">
-                    <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-dark-textSecondary" />
+                    <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-dark-textMuted pointer-events-none" />
                     <input
                       type="date"
                       value={filterDateFrom}
                       onChange={(e) => setFilterDateFrom(e.target.value)}
-                      className="w-full pl-10 pr-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                      className="input !py-2 !pl-9"
                     />
                   </div>
                 </div>
 
                 {/* Date To Filter */}
                 <div>
-                  <label className="block text-sm font-medium text-dark-textSecondary mb-1">Modified Before</label>
+                  <label className="label">Modified Before</label>
                   <div className="relative">
-                    <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-dark-textSecondary" />
+                    <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-dark-textMuted pointer-events-none" />
                     <input
                       type="date"
                       value={filterDateTo}
                       onChange={(e) => setFilterDateTo(e.target.value)}
-                      className="w-full pl-10 pr-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                      className="input !py-2 !pl-9"
                     />
                   </div>
                 </div>
@@ -945,53 +1350,53 @@ export default function BucketDetails() {
           {/* Search Tips */}
           {searchQuery && !filterDateFrom && !filterDateTo && !filterExtension && !filterMinSize && !filterMaxSize && (
             <p className="mt-2 text-xs text-dark-textSecondary">
-              Tip: Use <code className="bg-dark-bg px-1 rounded">*</code> for any characters, <code className="bg-dark-bg px-1 rounded">?</code> for single character
+              Tip: Use <code className="kbd-mono">*</code> for any characters, <code className="kbd-mono">?</code> for a single character
             </p>
           )}
 
           {/* Active Filter Summary */}
           {hasActiveFilters && (
-            <div className="mt-3 flex flex-wrap gap-2">
+            <div className="mt-3 flex flex-wrap gap-1.5">
               {searchQuery && (
-                <span className="inline-flex items-center gap-1 px-2 py-1 bg-blue-500/20 text-blue-400 rounded text-sm">
+                <span className="badge-blue">
                   Search: "{searchQuery}"
                   <button onClick={() => setSearchQuery('')} className="hover:text-blue-300"><X className="w-3 h-3" /></button>
                 </span>
               )}
               {filterExtension && (
-                <span className="inline-flex items-center gap-1 px-2 py-1 bg-green-500/20 text-green-400 rounded text-sm">
+                <span className="badge-green">
                   Extension: {filterExtension}
                   <button onClick={() => setFilterExtension('')} className="hover:text-green-300"><X className="w-3 h-3" /></button>
                 </span>
               )}
               {filterDateFrom && (
-                <span className="inline-flex items-center gap-1 px-2 py-1 bg-purple-500/20 text-purple-400 rounded text-sm">
+                <span className="badge-purple">
                   After: {filterDateFrom}
                   <button onClick={() => setFilterDateFrom('')} className="hover:text-purple-300"><X className="w-3 h-3" /></button>
                 </span>
               )}
               {filterDateTo && (
-                <span className="inline-flex items-center gap-1 px-2 py-1 bg-purple-500/20 text-purple-400 rounded text-sm">
+                <span className="badge-purple">
                   Before: {filterDateTo}
                   <button onClick={() => setFilterDateTo('')} className="hover:text-purple-300"><X className="w-3 h-3" /></button>
                 </span>
               )}
               {filterMinSize && (
-                <span className="inline-flex items-center gap-1 px-2 py-1 bg-orange-500/20 text-orange-400 rounded text-sm">
+                <span className="badge-yellow">
                   Min: {filterMinSize}
-                  <button onClick={() => setFilterMinSize('')} className="hover:text-orange-300"><X className="w-3 h-3" /></button>
+                  <button onClick={() => setFilterMinSize('')} className="hover:text-yellow-300"><X className="w-3 h-3" /></button>
                 </span>
               )}
               {filterMaxSize && (
-                <span className="inline-flex items-center gap-1 px-2 py-1 bg-orange-500/20 text-orange-400 rounded text-sm">
+                <span className="badge-yellow">
                   Max: {filterMaxSize}
-                  <button onClick={() => setFilterMaxSize('')} className="hover:text-orange-300"><X className="w-3 h-3" /></button>
+                  <button onClick={() => setFilterMaxSize('')} className="hover:text-yellow-300"><X className="w-3 h-3" /></button>
                 </span>
               )}
               {filterMaxDepth && (
-                <span className="inline-flex items-center gap-1 px-2 py-1 bg-cyan-500/20 text-cyan-400 rounded text-sm">
+                <span className="badge-gray">
                   Depth: {filterMaxDepth}
-                  <button onClick={() => setFilterMaxDepth('')} className="hover:text-cyan-300"><X className="w-3 h-3" /></button>
+                  <button onClick={() => setFilterMaxDepth('')} className="hover:text-dark-text"><X className="w-3 h-3" /></button>
                 </span>
               )}
             </div>
@@ -1000,7 +1405,7 @@ export default function BucketDetails() {
           {/* Search Results Info */}
           {isSearchMode && (
             <div className="mt-3 flex items-center gap-2 text-sm text-dark-textSecondary">
-              <Search className="w-4 h-4" />
+              <Search className="w-4 h-4 text-dark-textMuted" />
               <span>
                 Showing <span className="text-dark-text font-medium">{browserItems.length}</span> result{browserItems.length !== 1 ? 's' : ''} from entire bucket
               </span>
@@ -1012,25 +1417,27 @@ export default function BucketDetails() {
 
       {/* Active Uploads Progress */}
       {activeUploads.length > 0 && (
-        <div className="mb-6 space-y-3">
+        <div className="card mb-6 divide-y divide-dark-border/60">
           {activeUploads.map((upload) => (
-            <div key={upload.uploadId} className="bg-dark-surface border border-dark-border rounded-lg p-4">
-              <div className="flex items-center justify-between mb-2">
-                <div className="flex items-center gap-2">
+            <div key={upload.uploadId} className="px-4 py-3">
+              <div className="flex items-center justify-between gap-3 mb-2">
+                <div className="flex items-center gap-2 min-w-0">
                   {upload.status === 'completed' ? (
-                    <div className="text-green-500 text-sm font-medium">✓ Completed</div>
+                    <CheckCircle2 className="w-4 h-4 text-green-400 shrink-0" />
                   ) : upload.status === 'failed' ? (
-                    <div className="text-red-500 text-sm font-medium">✗ Failed</div>
+                    <XCircle className="w-4 h-4 text-red-400 shrink-0" />
                   ) : (
-                    <Loader2 className="w-4 h-4 text-blue-500 animate-spin" />
+                    <Loader2 className="w-4 h-4 text-blue-500 animate-spin shrink-0" />
                   )}
-                  <span className="text-dark-text font-medium">{upload.filename}</span>
+                  <span className="text-sm font-medium text-dark-text truncate">{upload.filename}</span>
                 </div>
-                <span className="text-dark-textSecondary text-sm">{Math.round(upload.progress)}%</span>
+                <span className="tabular-nums text-xs text-dark-textSecondary shrink-0">
+                  {Math.round(upload.progress)}%
+                </span>
               </div>
-              <div className="w-full bg-dark-bg rounded-full h-2">
+              <div className="w-full h-1.5 rounded-full bg-dark-inset overflow-hidden">
                 <div
-                  className={`h-2 rounded-full transition-all duration-300 ${
+                  className={`h-1.5 rounded-full transition-all duration-300 ${
                     upload.status === 'completed' ? 'bg-green-500' :
                     upload.status === 'failed' ? 'bg-red-500' :
                     'bg-blue-500'
@@ -1039,7 +1446,7 @@ export default function BucketDetails() {
                 />
               </div>
               {upload.error && (
-                <div className="mt-2 text-red-500 text-sm">{upload.error}</div>
+                <p className="mt-2 text-xs text-red-400">{upload.error}</p>
               )}
             </div>
           ))}
@@ -1047,9 +1454,19 @@ export default function BucketDetails() {
       )}
 
       {/* Error Message */}
-      {error && (
-        <div className="bg-red-500/10 border border-red-500 text-red-500 px-4 py-3 rounded-lg mb-6">
-          {error}
+      {error && <div className="alert-error mb-6">{error}</div>}
+
+      {/* Truncation notice */}
+      {truncated && (
+        <div className="alert-info mb-6 !items-center justify-between gap-4">
+          <span>Results are truncated — this bucket contains more objects than are shown.</span>
+          <button
+            onClick={loadMoreObjects}
+            disabled={loadingMore || !continuationToken}
+            className="btn-secondary btn-sm shrink-0"
+          >
+            {loadingMore ? 'Loading...' : 'Load more'}
+          </button>
         </div>
       )}
 
@@ -1058,48 +1475,55 @@ export default function BucketDetails() {
         // Dual pane view
         <div className="flex gap-4">
           {/* Left Pane */}
-          <div className="flex-1 min-w-0">
-            {/* Left Breadcrumbs */}
-            <div className="flex items-center gap-2 text-sm mb-4">
-              <button
-                onClick={() => navigateToFolder('', 'left')}
-                onDragOver={(e) => handleDragOver(e, '')}
-                onDragLeave={handleDragLeave}
-                onDrop={(e) => handleDrop(e, '')}
-                className={`flex items-center gap-1 px-2 py-1 rounded transition-colors ${
-                  dropTarget === ''
-                    ? 'bg-blue-500/20 ring-2 ring-blue-500 text-blue-400'
-                    : 'text-blue-500 hover:text-blue-400'
-                }`}
-              >
-                <Home className="w-4 h-4" />
-                <span>{bucketName}</span>
-              </button>
-              {leftBreadcrumbs.map((crumb, index) => (
-                <div key={index} className="flex items-center gap-2">
-                  <span className="text-dark-textSecondary">/</span>
-                  <button
-                    onClick={() => navigateToFolder(crumb.prefix, 'left')}
-                    onDragOver={(e) => handleDragOver(e, crumb.prefix)}
-                    onDragLeave={handleDragLeave}
-                    onDrop={(e) => handleDrop(e, crumb.prefix)}
-                    className={`px-2 py-1 rounded transition-colors ${
-                      dropTarget === crumb.prefix
-                        ? 'bg-blue-500/20 ring-2 ring-blue-500 text-blue-400'
-                        : 'text-blue-500 hover:text-blue-400'
-                    }`}
-                  >
-                    {crumb.name}
-                  </button>
-                </div>
-              ))}
+          <div className="card flex-1 min-w-0 overflow-hidden flex flex-col">
+            {/* Left Pane Header: breadcrumbs + label */}
+            <div className="flex items-center justify-between gap-3 px-3 py-2 border-b border-dark-border bg-dark-inset/50">
+              <div className="flex items-center gap-1 text-sm min-w-0 flex-wrap">
+                <button
+                  onClick={() => navigateToFolder('', 'left')}
+                  onDragOver={(e) => handleDragOver(e, '')}
+                  onDragLeave={handleDragLeave}
+                  onDrop={(e) => handleDrop(e, '')}
+                  className={`flex items-center gap-1.5 px-1.5 py-0.5 rounded-md transition-colors ${
+                    dropTarget === ''
+                      ? 'bg-accent-soft ring-1 ring-blue-500/50 text-blue-400'
+                      : leftBreadcrumbs.length === 0
+                        ? 'text-dark-text font-medium'
+                        : 'text-dark-textSecondary hover:text-dark-text'
+                  }`}
+                >
+                  <Home className="w-3.5 h-3.5" />
+                  <span className="truncate">{bucketName}</span>
+                </button>
+                {leftBreadcrumbs.map((crumb, index) => (
+                  <div key={index} className="flex items-center gap-1">
+                    <ChevronRight className="w-3.5 h-3.5 text-dark-textMuted shrink-0" />
+                    <button
+                      onClick={() => navigateToFolder(crumb.prefix, 'left')}
+                      onDragOver={(e) => handleDragOver(e, crumb.prefix)}
+                      onDragLeave={handleDragLeave}
+                      onDrop={(e) => handleDrop(e, crumb.prefix)}
+                      className={`px-1.5 py-0.5 rounded-md transition-colors truncate ${
+                        dropTarget === crumb.prefix
+                          ? 'bg-accent-soft ring-1 ring-blue-500/50 text-blue-400'
+                          : index === leftBreadcrumbs.length - 1
+                            ? 'text-dark-text font-medium'
+                            : 'text-dark-textSecondary hover:text-dark-text'
+                      }`}
+                    >
+                      {crumb.name}
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <span className="badge-gray shrink-0">Left</span>
             </div>
             {/* Left Table */}
             <div
-              className={`bg-dark-surface border rounded-lg overflow-hidden transition-colors min-h-[300px] flex flex-col ${
+              className={`overflow-hidden transition-colors min-h-[300px] flex-1 flex flex-col ${
                 dropTarget === `pane:left:${currentPrefix}`
-                  ? 'border-blue-500 bg-blue-500/10'
-                  : 'border-dark-border'
+                  ? 'bg-accent-soft ring-1 ring-inset ring-blue-500/50'
+                  : ''
               }`}
               onContextMenu={(e) => handleContextMenu(e, 'pane', 'left')}
               onDragOver={(e) => {
@@ -1123,21 +1547,21 @@ export default function BucketDetails() {
                 }
               }}
             >
-              <table className="w-full">
-                <thead className="bg-dark-bg border-b border-dark-border">
+              <table className="table">
+                <thead>
                   <tr>
-                    <th className="text-left px-4 py-3 text-sm font-semibold text-dark-text">Name</th>
-                    <th className="text-left px-4 py-3 text-sm font-semibold text-dark-text">Size</th>
-                    <th className="text-right px-4 py-3 text-sm font-semibold text-dark-text">Actions</th>
+                    <th>Name</th>
+                    <th className="!text-right">Size</th>
+                    <th className="!text-right">Actions</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-dark-border">
+                <tbody>
                   {browserItems.map((item, index) => (
                     item.isFolder ? (
                       <tr
                         key={`left-folder-${index}`}
-                        className={`hover:bg-dark-surfaceHover transition-colors cursor-pointer ${
-                          dropTarget === item.prefix ? 'bg-blue-500/20 ring-2 ring-blue-500 ring-inset' : ''
+                        className={`cursor-pointer ${
+                          dropTarget === item.prefix ? 'bg-accent-soft ring-1 ring-blue-500/50 ring-inset' : ''
                         } ${draggedItem?.isFolder && (draggedItem as FolderItem).prefix === item.prefix ? 'opacity-50' : ''}`}
                         draggable
                         onContextMenu={(e) => handleContextMenu(e, 'folder', 'left', item)}
@@ -1147,29 +1571,29 @@ export default function BucketDetails() {
                         onDragLeave={handleDragLeave}
                         onDrop={(e) => { e.stopPropagation(); handleDrop(e, item.prefix) }}
                       >
-                        <td className="px-4 py-3" onClick={() => navigateToFolder(item.prefix, 'left')}>
-                          <div className="flex items-center gap-2">
-                            <Folder className={`w-4 h-4 ${dropTarget === item.prefix ? 'text-blue-500' : 'text-yellow-500'}`} />
+                        <td onClick={() => navigateToFolder(item.prefix, 'left')}>
+                          <div className="flex items-center gap-2.5">
+                            <Folder className={`w-4 h-4 shrink-0 ${dropTarget === item.prefix ? 'text-blue-300' : 'text-blue-400'}`} />
                             <span className="text-dark-text font-medium truncate">{item.name}/</span>
                           </div>
                         </td>
-                        <td className="px-4 py-3 text-dark-textSecondary">—</td>
-                        <td className="px-4 py-3"></td>
+                        <td className="!text-right tabular-nums text-xs !text-dark-textMuted">—</td>
+                        <td></td>
                       </tr>
                     ) : (
                       <tr
                         key={`left-${item.id}`}
-                        className={`hover:bg-dark-surfaceHover transition-colors ${
+                        className={
                           draggedItem && !draggedItem.isFolder && draggedItem.id === item.id ? 'opacity-50' : ''
-                        }`}
+                        }
                         draggable={!isSearchMode}
                         onContextMenu={(e) => handleContextMenu(e, 'file', 'left', item)}
                         onDragStart={(e) => !isSearchMode && handleDragStart(e, item)}
                         onDragEnd={handleDragEnd}
                       >
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-2">
-                            <FileIcon className="w-4 h-4 text-blue-500" />
+                        <td>
+                          <div className="flex items-center gap-2.5">
+                            <FileIcon className="w-4 h-4 shrink-0 text-dark-textMuted" />
                             <div className="min-w-0">
                               <span className="text-dark-text truncate block">{item.key.split('/').pop()}</span>
                               {isSearchMode && (
@@ -1187,12 +1611,14 @@ export default function BucketDetails() {
                             </div>
                           </div>
                         </td>
-                        <td className="px-4 py-3 text-dark-textSecondary text-sm">{formatFileSize(item.size)}</td>
-                        <td className="px-4 py-3">
+                        <td className="!text-right tabular-nums !text-dark-textSecondary text-xs whitespace-nowrap">{formatFileSize(item.size)}</td>
+                        <td>
                           <div className="flex items-center justify-end gap-1">
-                            <button onClick={() => handleRenameClick(item)} className="p-1.5 hover:bg-yellow-600 hover:text-white text-yellow-500 rounded" title="Rename"><Pencil className="w-3.5 h-3.5" /></button>
-                            <button onClick={() => handleDownload(item)} className="p-1.5 hover:bg-blue-600 hover:text-white text-blue-500 rounded" title="Download"><Download className="w-3.5 h-3.5" /></button>
-                            <button onClick={() => handleDelete(item)} className="p-1.5 hover:bg-red-600 hover:text-white text-red-500 rounded" title="Delete"><Trash2 className="w-3.5 h-3.5" /></button>
+                            <button onClick={() => handleRenameClick(item)} className="btn-icon" title="Rename"><Pencil className="w-4 h-4" /></button>
+                            <button onClick={() => handleDownload(item)} className="btn-icon" title="Download"><Download className="w-4 h-4" /></button>
+                            <button onClick={() => handleShareClick(item)} className="btn-icon" title="Get shareable link"><Link2 className="w-4 h-4" /></button>
+                            <button onClick={() => handleVersionHistoryClick(item)} className="btn-icon" title="Version history"><History className="w-4 h-4" /></button>
+                            <button onClick={() => handleDelete(item)} className="btn-icon hover:!text-red-400 hover:!bg-red-500/10" title="Delete"><Trash2 className="w-4 h-4" /></button>
                           </div>
                         </td>
                       </tr>
@@ -1203,52 +1629,56 @@ export default function BucketDetails() {
             </div>
           </div>
 
-          {/* Divider */}
-          <div className="w-px bg-dark-border" />
-
           {/* Right Pane */}
-          <div className="flex-1 min-w-0">
-            {/* Right Breadcrumbs */}
-            <div className="flex items-center gap-2 text-sm mb-4">
-              <button
-                onClick={() => navigateToFolder('', 'right')}
-                onDragOver={(e) => handleDragOver(e, '')}
-                onDragLeave={handleDragLeave}
-                onDrop={(e) => handleDrop(e, '')}
-                className={`flex items-center gap-1 px-2 py-1 rounded transition-colors ${
-                  dropTarget === ''
-                    ? 'bg-blue-500/20 ring-2 ring-blue-500 text-blue-400'
-                    : 'text-blue-500 hover:text-blue-400'
-                }`}
-              >
-                <Home className="w-4 h-4" />
-                <span>{bucketName}</span>
-              </button>
-              {rightBreadcrumbs.map((crumb, index) => (
-                <div key={index} className="flex items-center gap-2">
-                  <span className="text-dark-textSecondary">/</span>
-                  <button
-                    onClick={() => navigateToFolder(crumb.prefix, 'right')}
-                    onDragOver={(e) => handleDragOver(e, crumb.prefix)}
-                    onDragLeave={handleDragLeave}
-                    onDrop={(e) => handleDrop(e, crumb.prefix)}
-                    className={`px-2 py-1 rounded transition-colors ${
-                      dropTarget === crumb.prefix
-                        ? 'bg-blue-500/20 ring-2 ring-blue-500 text-blue-400'
-                        : 'text-blue-500 hover:text-blue-400'
-                    }`}
-                  >
-                    {crumb.name}
-                  </button>
-                </div>
-              ))}
+          <div className="card flex-1 min-w-0 overflow-hidden flex flex-col">
+            {/* Right Pane Header: breadcrumbs + label */}
+            <div className="flex items-center justify-between gap-3 px-3 py-2 border-b border-dark-border bg-dark-inset/50">
+              <div className="flex items-center gap-1 text-sm min-w-0 flex-wrap">
+                <button
+                  onClick={() => navigateToFolder('', 'right')}
+                  onDragOver={(e) => handleDragOver(e, '')}
+                  onDragLeave={handleDragLeave}
+                  onDrop={(e) => handleDrop(e, '')}
+                  className={`flex items-center gap-1.5 px-1.5 py-0.5 rounded-md transition-colors ${
+                    dropTarget === ''
+                      ? 'bg-accent-soft ring-1 ring-blue-500/50 text-blue-400'
+                      : rightBreadcrumbs.length === 0
+                        ? 'text-dark-text font-medium'
+                        : 'text-dark-textSecondary hover:text-dark-text'
+                  }`}
+                >
+                  <Home className="w-3.5 h-3.5" />
+                  <span className="truncate">{bucketName}</span>
+                </button>
+                {rightBreadcrumbs.map((crumb, index) => (
+                  <div key={index} className="flex items-center gap-1">
+                    <ChevronRight className="w-3.5 h-3.5 text-dark-textMuted shrink-0" />
+                    <button
+                      onClick={() => navigateToFolder(crumb.prefix, 'right')}
+                      onDragOver={(e) => handleDragOver(e, crumb.prefix)}
+                      onDragLeave={handleDragLeave}
+                      onDrop={(e) => handleDrop(e, crumb.prefix)}
+                      className={`px-1.5 py-0.5 rounded-md transition-colors truncate ${
+                        dropTarget === crumb.prefix
+                          ? 'bg-accent-soft ring-1 ring-blue-500/50 text-blue-400'
+                          : index === rightBreadcrumbs.length - 1
+                            ? 'text-dark-text font-medium'
+                            : 'text-dark-textSecondary hover:text-dark-text'
+                      }`}
+                    >
+                      {crumb.name}
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <span className="badge-gray shrink-0">Right</span>
             </div>
             {/* Right Table */}
             <div
-              className={`bg-dark-surface border rounded-lg overflow-hidden transition-colors min-h-[300px] flex flex-col ${
+              className={`overflow-hidden transition-colors min-h-[300px] flex-1 flex flex-col ${
                 dropTarget === `pane:right:${rightPrefix}`
-                  ? 'border-blue-500 bg-blue-500/10'
-                  : 'border-dark-border'
+                  ? 'bg-accent-soft ring-1 ring-inset ring-blue-500/50'
+                  : ''
               }`}
               onContextMenu={(e) => handleContextMenu(e, 'pane', 'right')}
               onDragOver={(e) => {
@@ -1272,21 +1702,21 @@ export default function BucketDetails() {
                 }
               }}
             >
-              <table className="w-full">
-                <thead className="bg-dark-bg border-b border-dark-border">
+              <table className="table">
+                <thead>
                   <tr>
-                    <th className="text-left px-4 py-3 text-sm font-semibold text-dark-text">Name</th>
-                    <th className="text-left px-4 py-3 text-sm font-semibold text-dark-text">Size</th>
-                    <th className="text-right px-4 py-3 text-sm font-semibold text-dark-text">Actions</th>
+                    <th>Name</th>
+                    <th className="!text-right">Size</th>
+                    <th className="!text-right">Actions</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-dark-border">
+                <tbody>
                   {rightBrowserItems.map((item, index) => (
                     item.isFolder ? (
                       <tr
                         key={`right-folder-${index}`}
-                        className={`hover:bg-dark-surfaceHover transition-colors cursor-pointer ${
-                          dropTarget === item.prefix ? 'bg-blue-500/20 ring-2 ring-blue-500 ring-inset' : ''
+                        className={`cursor-pointer ${
+                          dropTarget === item.prefix ? 'bg-accent-soft ring-1 ring-blue-500/50 ring-inset' : ''
                         } ${draggedItem?.isFolder && (draggedItem as FolderItem).prefix === item.prefix ? 'opacity-50' : ''}`}
                         draggable
                         onContextMenu={(e) => handleContextMenu(e, 'folder', 'right', item)}
@@ -1296,29 +1726,29 @@ export default function BucketDetails() {
                         onDragLeave={handleDragLeave}
                         onDrop={(e) => { e.stopPropagation(); handleDrop(e, item.prefix) }}
                       >
-                        <td className="px-4 py-3" onClick={() => navigateToFolder(item.prefix, 'right')}>
-                          <div className="flex items-center gap-2">
-                            <Folder className={`w-4 h-4 ${dropTarget === item.prefix ? 'text-blue-500' : 'text-yellow-500'}`} />
+                        <td onClick={() => navigateToFolder(item.prefix, 'right')}>
+                          <div className="flex items-center gap-2.5">
+                            <Folder className={`w-4 h-4 shrink-0 ${dropTarget === item.prefix ? 'text-blue-300' : 'text-blue-400'}`} />
                             <span className="text-dark-text font-medium truncate">{item.name}/</span>
                           </div>
                         </td>
-                        <td className="px-4 py-3 text-dark-textSecondary">—</td>
-                        <td className="px-4 py-3"></td>
+                        <td className="!text-right tabular-nums text-xs !text-dark-textMuted">—</td>
+                        <td></td>
                       </tr>
                     ) : (
                       <tr
                         key={`right-${item.id}`}
-                        className={`hover:bg-dark-surfaceHover transition-colors ${
+                        className={
                           draggedItem && !draggedItem.isFolder && draggedItem.id === item.id ? 'opacity-50' : ''
-                        }`}
+                        }
                         draggable={!isSearchMode}
                         onContextMenu={(e) => handleContextMenu(e, 'file', 'right', item)}
                         onDragStart={(e) => !isSearchMode && handleDragStart(e, item)}
                         onDragEnd={handleDragEnd}
                       >
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-2">
-                            <FileIcon className="w-4 h-4 text-blue-500" />
+                        <td>
+                          <div className="flex items-center gap-2.5">
+                            <FileIcon className="w-4 h-4 shrink-0 text-dark-textMuted" />
                             <div className="min-w-0">
                               <span className="text-dark-text truncate block">{item.key.split('/').pop()}</span>
                               {isSearchMode && (
@@ -1336,12 +1766,14 @@ export default function BucketDetails() {
                             </div>
                           </div>
                         </td>
-                        <td className="px-4 py-3 text-dark-textSecondary text-sm">{formatFileSize(item.size)}</td>
-                        <td className="px-4 py-3">
+                        <td className="!text-right tabular-nums !text-dark-textSecondary text-xs whitespace-nowrap">{formatFileSize(item.size)}</td>
+                        <td>
                           <div className="flex items-center justify-end gap-1">
-                            <button onClick={() => handleRenameClick(item)} className="p-1.5 hover:bg-yellow-600 hover:text-white text-yellow-500 rounded" title="Rename"><Pencil className="w-3.5 h-3.5" /></button>
-                            <button onClick={() => handleDownload(item)} className="p-1.5 hover:bg-blue-600 hover:text-white text-blue-500 rounded" title="Download"><Download className="w-3.5 h-3.5" /></button>
-                            <button onClick={() => handleDelete(item)} className="p-1.5 hover:bg-red-600 hover:text-white text-red-500 rounded" title="Delete"><Trash2 className="w-3.5 h-3.5" /></button>
+                            <button onClick={() => handleRenameClick(item)} className="btn-icon" title="Rename"><Pencil className="w-4 h-4" /></button>
+                            <button onClick={() => handleDownload(item)} className="btn-icon" title="Download"><Download className="w-4 h-4" /></button>
+                            <button onClick={() => handleShareClick(item)} className="btn-icon" title="Get shareable link"><Link2 className="w-4 h-4" /></button>
+                            <button onClick={() => handleVersionHistoryClick(item)} className="btn-icon" title="Version history"><History className="w-4 h-4" /></button>
+                            <button onClick={() => handleDelete(item)} className="btn-icon hover:!text-red-400 hover:!bg-red-500/10" title="Delete"><Trash2 className="w-4 h-4" /></button>
                           </div>
                         </td>
                       </tr>
@@ -1356,33 +1788,37 @@ export default function BucketDetails() {
         // Single pane view
         <>
           {/* Breadcrumbs - droppable for moving files up */}
-          <div className="flex items-center gap-2 text-sm mb-4">
+          <div className="flex items-center gap-1 text-sm mb-4 flex-wrap">
             <button
               onClick={() => setCurrentPrefix('')}
               onDragOver={(e) => handleDragOver(e, '')}
               onDragLeave={handleDragLeave}
               onDrop={(e) => handleDrop(e, '')}
-              className={`flex items-center gap-1 px-2 py-1 rounded transition-colors ${
+              className={`flex items-center gap-1.5 px-1.5 py-0.5 rounded-md transition-colors ${
                 dropTarget === ''
-                  ? 'bg-blue-500/20 ring-2 ring-blue-500 text-blue-400'
-                  : 'text-blue-500 hover:text-blue-400'
+                  ? 'bg-accent-soft ring-1 ring-blue-500/50 text-blue-400'
+                  : leftBreadcrumbs.length === 0
+                    ? 'text-dark-text font-medium'
+                    : 'text-dark-textSecondary hover:text-dark-text'
               }`}
             >
-              <Home className="w-4 h-4" />
+              <Home className="w-3.5 h-3.5" />
               <span>{bucketName}</span>
             </button>
             {leftBreadcrumbs.map((crumb, index) => (
-              <div key={index} className="flex items-center gap-2">
-                <span className="text-dark-textSecondary">/</span>
+              <div key={index} className="flex items-center gap-1">
+                <ChevronRight className="w-3.5 h-3.5 text-dark-textMuted shrink-0" />
                 <button
                   onClick={() => navigateToFolder(crumb.prefix)}
                   onDragOver={(e) => handleDragOver(e, crumb.prefix)}
                   onDragLeave={handleDragLeave}
                   onDrop={(e) => handleDrop(e, crumb.prefix)}
-                  className={`px-2 py-1 rounded transition-colors ${
+                  className={`px-1.5 py-0.5 rounded-md transition-colors ${
                     dropTarget === crumb.prefix
-                      ? 'bg-blue-500/20 ring-2 ring-blue-500 text-blue-400'
-                      : 'text-blue-500 hover:text-blue-400'
+                      ? 'bg-accent-soft ring-1 ring-blue-500/50 text-blue-400'
+                      : index === leftBreadcrumbs.length - 1
+                        ? 'text-dark-text font-medium'
+                        : 'text-dark-textSecondary hover:text-dark-text'
                   }`}
                 >
                   {crumb.name}
@@ -1393,32 +1829,32 @@ export default function BucketDetails() {
 
           {/* Objects List */}
           {browserItems.length === 0 ? (
-            <div className="bg-dark-surface border border-dark-border rounded-lg p-12 text-center">
+            <div className="card empty-state">
               {isSearchMode ? (
                 <>
-                  <Search className="w-16 h-16 text-dark-textSecondary mx-auto mb-4 opacity-50" />
-                  <h2 className="text-xl font-semibold text-dark-text mb-2">No results found</h2>
-                  <p className="text-dark-textSecondary mb-6">Try adjusting your search or filters</p>
-                  <button
-                    onClick={clearFilters}
-                    className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-lg transition-colors"
-                  >
+                  <Search className="empty-state-icon" />
+                  <h3 className="text-base font-semibold text-dark-text mb-1">No results found</h3>
+                  <p className="text-sm text-dark-textSecondary mb-5 max-w-sm">Try adjusting your search or filters.</p>
+                  <button onClick={clearFilters} className="btn-secondary">
                     Clear Search & Filters
                   </button>
                 </>
               ) : (
                 <>
-                  <FileIcon className="w-16 h-16 text-dark-textSecondary mx-auto mb-4 opacity-50" />
-                  <h2 className="text-xl font-semibold text-dark-text mb-2">No items yet</h2>
-                  <p className="text-dark-textSecondary mb-6">Upload files or create folders to get started</p>
-                  <div className="flex gap-3 justify-center">
+                  <FolderOpen className="empty-state-icon" />
+                  <h3 className="text-base font-semibold text-dark-text mb-1">This folder is empty</h3>
+                  <p className="text-sm text-dark-textSecondary mb-5 max-w-sm">
+                    Upload files or create a folder to get started — you can also drag files here to move them.
+                  </p>
+                  <div className="flex gap-2 justify-center">
                     <button
                       onClick={() => {
                         setCreateFolderFromContextMenu(false)
                         setShowCreateFolderModal(true)
                       }}
-                      className="bg-dark-surface border border-dark-border hover:bg-dark-surfaceHover text-dark-text px-6 py-3 rounded-lg transition-colors"
+                      className="btn-secondary"
                     >
+                      <FolderPlus className="w-4 h-4" />
                       Create Folder
                     </button>
                     <button
@@ -1426,8 +1862,9 @@ export default function BucketDetails() {
                         setUploadTargetPane('single')
                         handleUploadClick()
                       }}
-                      className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-lg transition-colors"
+                      className="btn-primary"
                     >
+                      <Upload className="w-4 h-4" />
                       Upload Files
                     </button>
                   </div>
@@ -1436,10 +1873,10 @@ export default function BucketDetails() {
             </div>
           ) : (
             <div
-              className={`bg-dark-surface border rounded-lg overflow-hidden transition-colors min-h-[400px] flex flex-col ${
+              className={`card overflow-hidden transition-colors min-h-[400px] flex flex-col ${
                 dropTarget === `pane:single:${currentPrefix}`
-                  ? 'border-blue-500 bg-blue-500/10'
-                  : 'border-dark-border'
+                  ? '!border-blue-500/50 bg-accent-soft ring-1 ring-inset ring-blue-500/50'
+                  : ''
               }`}
               onContextMenu={(e) => handleContextMenu(e, 'pane', 'single')}
               onDragOver={(e) => {
@@ -1461,23 +1898,23 @@ export default function BucketDetails() {
                 }
               }}
             >
-              <table className="w-full">
-                <thead className="bg-dark-bg border-b border-dark-border">
+              <table className="table">
+                <thead>
                   <tr>
-                    <th className="text-left px-6 py-4 text-sm font-semibold text-dark-text">Name</th>
-                    <th className="text-left px-6 py-4 text-sm font-semibold text-dark-text">Size</th>
-                    <th className="text-left px-6 py-4 text-sm font-semibold text-dark-text">Type</th>
-                    <th className="text-left px-6 py-4 text-sm font-semibold text-dark-text">Last Modified</th>
-                    <th className="text-right px-6 py-4 text-sm font-semibold text-dark-text">Actions</th>
+                    <th>Name</th>
+                    <th className="!text-right">Size</th>
+                    <th>Type</th>
+                    <th className="!text-right">Last Modified</th>
+                    <th className="!text-right">Actions</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-dark-border">
+                <tbody>
                   {browserItems.map((item, index) => (
                     item.isFolder ? (
                       <tr
                         key={`folder-${index}`}
-                        className={`hover:bg-dark-surfaceHover transition-colors cursor-pointer ${
-                          dropTarget === item.prefix ? 'bg-blue-500/20 ring-2 ring-blue-500 ring-inset' : ''
+                        className={`cursor-pointer ${
+                          dropTarget === item.prefix ? 'bg-accent-soft ring-1 ring-blue-500/50 ring-inset' : ''
                         } ${draggedItem?.isFolder && (draggedItem as FolderItem).prefix === item.prefix ? 'opacity-50' : ''}`}
                         draggable
                         onContextMenu={(e) => handleContextMenu(e, 'folder', 'single', item)}
@@ -1487,32 +1924,32 @@ export default function BucketDetails() {
                         onDragLeave={handleDragLeave}
                         onDrop={(e) => { e.stopPropagation(); handleDrop(e, item.prefix) }}
                       >
-                        <td className="px-6 py-4" onClick={() => navigateToFolder(item.prefix)}>
-                          <div className="flex items-center gap-3">
-                            <Folder className={`w-5 h-5 ${dropTarget === item.prefix ? 'text-blue-500' : 'text-yellow-500'}`} />
+                        <td onClick={() => navigateToFolder(item.prefix)}>
+                          <div className="flex items-center gap-2.5">
+                            <Folder className={`w-4 h-4 shrink-0 ${dropTarget === item.prefix ? 'text-blue-300' : 'text-blue-400'}`} />
                             <span className="text-dark-text font-medium">{item.name}/</span>
                           </div>
                         </td>
-                        <td className="px-6 py-4 text-dark-textSecondary">—</td>
-                        <td className="px-6 py-4 text-dark-textSecondary">Folder</td>
-                        <td className="px-6 py-4 text-dark-textSecondary">—</td>
-                        <td className="px-6 py-4"></td>
+                        <td className="!text-right tabular-nums text-xs !text-dark-textMuted">—</td>
+                        <td className="!text-dark-textSecondary text-xs">Folder</td>
+                        <td className="!text-right tabular-nums text-xs !text-dark-textMuted">—</td>
+                        <td></td>
                       </tr>
                     ) : (
                       <tr
                         key={item.id}
-                        className={`hover:bg-dark-surfaceHover transition-colors ${
+                        className={
                           draggedItem && !draggedItem.isFolder && draggedItem.id === item.id ? 'opacity-50' : ''
-                        }`}
+                        }
                         draggable={!isSearchMode}
                         onContextMenu={(e) => handleContextMenu(e, 'file', 'single', item)}
                         onDragStart={(e) => !isSearchMode && handleDragStart(e, item)}
                         onDragEnd={handleDragEnd}
                       >
-                        <td className="px-6 py-4">
-                          <div className="flex items-center gap-3">
-                            <FileIcon className="w-5 h-5 text-blue-500" />
-                            <div>
+                        <td>
+                          <div className="flex items-center gap-2.5">
+                            <FileIcon className="w-4 h-4 shrink-0 text-dark-textMuted" />
+                            <div className="min-w-0">
                               <span className="text-dark-text">{item.key.split('/').pop()}</span>
                               {isSearchMode && (
                                 <button
@@ -1529,30 +1966,44 @@ export default function BucketDetails() {
                             </div>
                           </div>
                         </td>
-                        <td className="px-6 py-4 text-dark-textSecondary">{formatFileSize(item.size)}</td>
-                        <td className="px-6 py-4 text-dark-textSecondary">{item.content_type}</td>
-                        <td className="px-6 py-4 text-dark-textSecondary">
+                        <td className="!text-right tabular-nums !text-dark-textSecondary text-xs whitespace-nowrap">{formatFileSize(item.size)}</td>
+                        <td className="!text-dark-textSecondary text-xs truncate max-w-[160px]">{item.content_type}</td>
+                        <td className="!text-right tabular-nums !text-dark-textSecondary text-xs whitespace-nowrap">
                           {new Date(item.updated_at).toLocaleString()}
                         </td>
-                        <td className="px-6 py-4">
-                          <div className="flex items-center justify-end gap-2">
+                        <td>
+                          <div className="flex items-center justify-end gap-1">
                             <button
                               onClick={() => handleRenameClick(item)}
-                              className="p-2 hover:bg-yellow-600 hover:text-white text-yellow-500 rounded transition-colors"
+                              className="btn-icon"
                               title="Rename"
                             >
                               <Pencil className="w-4 h-4" />
                             </button>
                             <button
                               onClick={() => handleDownload(item)}
-                              className="p-2 hover:bg-blue-600 hover:text-white text-blue-500 rounded transition-colors"
+                              className="btn-icon"
                               title="Download"
                             >
                               <Download className="w-4 h-4" />
                             </button>
                             <button
+                              onClick={() => handleShareClick(item)}
+                              className="btn-icon"
+                              title="Get shareable link"
+                            >
+                              <Link2 className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={() => handleVersionHistoryClick(item)}
+                              className="btn-icon"
+                              title="Version history"
+                            >
+                              <History className="w-4 h-4" />
+                            </button>
+                            <button
                               onClick={() => handleDelete(item)}
-                              className="p-2 hover:bg-red-600 hover:text-white text-red-500 rounded transition-colors"
+                              className="btn-icon hover:!text-red-400 hover:!bg-red-500/10"
                               title="Delete"
                             >
                               <Trash2 className="w-4 h-4" />
@@ -1571,21 +2022,23 @@ export default function BucketDetails() {
 
       {/* Create Folder Modal */}
       {showCreateFolderModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-          <div className="bg-dark-surface border border-dark-border rounded-lg p-6 w-full max-w-md">
-            <h2 className="text-2xl font-bold text-dark-text mb-6">Create Folder</h2>
+        <div className="modal-overlay">
+          <div className="modal-panel">
+            <div className="flex items-center justify-between mb-5">
+              <h2 className="modal-title">Create Folder</h2>
+            </div>
             <form onSubmit={handleCreateFolder} className="space-y-4">
               {splitView && !createFolderFromContextMenu && (
                 <div>
-                  <label className="block text-sm font-medium text-dark-text mb-2">Create In</label>
+                  <label className="label">Create In</label>
                   <div className="flex gap-2">
                     <button
                       type="button"
                       onClick={() => setCreateFolderPane('left')}
-                      className={`flex-1 px-4 py-2 rounded-lg transition-colors ${
+                      className={`flex-1 ${
                         createFolderPane === 'left'
-                          ? 'bg-blue-600 text-white'
-                          : 'bg-dark-bg border border-dark-border text-dark-text hover:bg-dark-surfaceHover'
+                          ? 'btn-secondary !bg-accent-soft !text-blue-400 !border-blue-500/40'
+                          : 'btn-secondary'
                       }`}
                     >
                       Left Pane
@@ -1593,16 +2046,16 @@ export default function BucketDetails() {
                     <button
                       type="button"
                       onClick={() => setCreateFolderPane('right')}
-                      className={`flex-1 px-4 py-2 rounded-lg transition-colors ${
+                      className={`flex-1 ${
                         createFolderPane === 'right'
-                          ? 'bg-blue-600 text-white'
-                          : 'bg-dark-bg border border-dark-border text-dark-text hover:bg-dark-surfaceHover'
+                          ? 'btn-secondary !bg-accent-soft !text-blue-400 !border-blue-500/40'
+                          : 'btn-secondary'
                       }`}
                     >
                       Right Pane
                     </button>
                   </div>
-                  <p className="text-xs text-dark-textSecondary mt-1">
+                  <p className="help-text font-mono">
                     {createFolderPane === 'left' ? currentPrefix || '/' : rightPrefix || '/'}
                   </p>
                 </div>
@@ -1614,37 +2067,34 @@ export default function BucketDetails() {
                 </p>
               )}
               <div>
-                <label className="block text-sm font-medium text-dark-text mb-2">Folder Name</label>
+                <label className="label">Folder Name</label>
                 <input
                   type="text"
                   value={newFolderName}
                   onChange={(e) => setNewFolderName(e.target.value)}
-                  className="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="input"
                   placeholder="my-folder"
                   required
                   pattern="[a-zA-Z0-9_\-]+"
                   title="Only letters, numbers, hyphens, and underscores"
                 />
-                <p className="text-xs text-dark-textSecondary mt-1">
+                <p className="help-text">
                   Only letters, numbers, hyphens, and underscores
                 </p>
               </div>
 
-              <div className="flex gap-3 pt-4">
+              <div className="flex justify-end gap-2 mt-6">
                 <button
                   type="button"
                   onClick={() => {
                     setShowCreateFolderModal(false)
                     setNewFolderName('')
                   }}
-                  className="flex-1 px-4 py-2 border border-dark-border text-dark-text rounded-lg hover:bg-dark-surfaceHover transition-colors"
+                  className="btn-ghost"
                 >
                   Cancel
                 </button>
-                <button
-                  type="submit"
-                  className="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
-                >
+                <button type="submit" className="btn-primary">
                   Create
                 </button>
               </div>
@@ -1655,27 +2105,29 @@ export default function BucketDetails() {
 
       {/* Rename Modal */}
       {showRenameModal && renameTarget && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-          <div className="bg-dark-surface border border-dark-border rounded-lg p-6 w-full max-w-md">
-            <h2 className="text-2xl font-bold text-dark-text mb-6">Rename File</h2>
+        <div className="modal-overlay">
+          <div className="modal-panel">
+            <div className="flex items-center justify-between mb-5">
+              <h2 className="modal-title">Rename File</h2>
+            </div>
             <form onSubmit={handleRename} className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-dark-text mb-2">New Name</label>
+                <label className="label">New Name</label>
                 <input
                   type="text"
                   value={newFileName}
                   onChange={(e) => setNewFileName(e.target.value)}
-                  className="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="input"
                   placeholder="new-filename.txt"
                   required
                   autoFocus
                 />
-                <p className="text-xs text-dark-textSecondary mt-1">
+                <p className="help-text">
                   Enter the new name for the file (without path)
                 </p>
               </div>
 
-              <div className="flex gap-3 pt-4">
+              <div className="flex justify-end gap-2 mt-6">
                 <button
                   type="button"
                   onClick={() => {
@@ -1683,14 +2135,11 @@ export default function BucketDetails() {
                     setRenameTarget(null)
                     setNewFileName('')
                   }}
-                  className="flex-1 px-4 py-2 border border-dark-border text-dark-text rounded-lg hover:bg-dark-surfaceHover transition-colors"
+                  className="btn-ghost"
                 >
                   Cancel
                 </button>
-                <button
-                  type="submit"
-                  className="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
-                >
+                <button type="submit" className="btn-primary">
                   Rename
                 </button>
               </div>
@@ -1702,7 +2151,7 @@ export default function BucketDetails() {
       {/* Context Menu */}
       {contextMenu.show && (
         <div
-          className="fixed bg-dark-surface border border-dark-border rounded-lg shadow-xl py-1 z-50 min-w-[180px]"
+          className="fixed bg-dark-surface border border-dark-border rounded-lg shadow-elevated py-1.5 z-50 min-w-[180px] animate-scale-in"
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onClick={(e) => e.stopPropagation()}
         >
@@ -1719,9 +2168,9 @@ export default function BucketDetails() {
                   setShowCreateFolderModal(true)
                   setContextMenu(prev => ({ ...prev, show: false }))
                 }}
-                className="w-full px-4 py-2 text-left text-dark-text hover:bg-dark-surfaceHover flex items-center gap-3"
+                className="w-full px-3 py-2 text-left text-sm text-dark-text hover:bg-dark-surfaceHover flex items-center gap-2.5 transition-colors"
               >
-                <FolderPlus className="w-4 h-4 text-yellow-500" />
+                <FolderPlus className="w-4 h-4 text-dark-textMuted" />
                 New Folder
               </button>
               <button
@@ -1730,9 +2179,9 @@ export default function BucketDetails() {
                   handleUploadClick()
                   setContextMenu(prev => ({ ...prev, show: false }))
                 }}
-                className="w-full px-4 py-2 text-left text-dark-text hover:bg-dark-surfaceHover flex items-center gap-3"
+                className="w-full px-3 py-2 text-left text-sm text-dark-text hover:bg-dark-surfaceHover flex items-center gap-2.5 transition-colors"
               >
-                <Upload className="w-4 h-4 text-blue-500" />
+                <Upload className="w-4 h-4 text-dark-textMuted" />
                 Upload Files
               </button>
               <div className="border-t border-dark-border my-1" />
@@ -1741,9 +2190,9 @@ export default function BucketDetails() {
                   loadObjects()
                   setContextMenu(prev => ({ ...prev, show: false }))
                 }}
-                className="w-full px-4 py-2 text-left text-dark-text hover:bg-dark-surfaceHover flex items-center gap-3"
+                className="w-full px-3 py-2 text-left text-sm text-dark-text hover:bg-dark-surfaceHover flex items-center gap-2.5 transition-colors"
               >
-                <RefreshCw className="w-4 h-4 text-dark-textSecondary" />
+                <RefreshCw className="w-4 h-4 text-dark-textMuted" />
                 Refresh
               </button>
             </>
@@ -1761,9 +2210,9 @@ export default function BucketDetails() {
                   }
                   setContextMenu(prev => ({ ...prev, show: false }))
                 }}
-                className="w-full px-4 py-2 text-left text-dark-text hover:bg-dark-surfaceHover flex items-center gap-3"
+                className="w-full px-3 py-2 text-left text-sm text-dark-text hover:bg-dark-surfaceHover flex items-center gap-2.5 transition-colors"
               >
-                <FolderOpen className="w-4 h-4 text-yellow-500" />
+                <FolderOpen className="w-4 h-4 text-blue-400" />
                 Open
               </button>
               <button
@@ -1771,9 +2220,9 @@ export default function BucketDetails() {
                   const folder = contextMenu.item as FolderItem
                   handleCopyPath(folder.prefix)
                 }}
-                className="w-full px-4 py-2 text-left text-dark-text hover:bg-dark-surfaceHover flex items-center gap-3"
+                className="w-full px-3 py-2 text-left text-sm text-dark-text hover:bg-dark-surfaceHover flex items-center gap-2.5 transition-colors"
               >
-                <Copy className="w-4 h-4 text-dark-textSecondary" />
+                <Copy className="w-4 h-4 text-dark-textMuted" />
                 Copy Path
               </button>
               <div className="border-t border-dark-border my-1" />
@@ -1789,10 +2238,10 @@ export default function BucketDetails() {
                   const objectsToDelete = objects.filter(obj => obj.key.startsWith(folder.prefix))
                   Promise.all(objectsToDelete.map(obj => bucketApi.deleteObject(bucketName, obj.key)))
                     .then(() => loadObjects())
-                    .catch((err) => setError(err.response?.data?.message || 'Failed to delete folder'))
+                    .catch((err) => setError(getErrorMessage(err, 'Failed to delete folder')))
                   setContextMenu(prev => ({ ...prev, show: false }))
                 }}
-                className="w-full px-4 py-2 text-left text-red-500 hover:bg-red-500/10 flex items-center gap-3"
+                className="w-full px-3 py-2 text-left text-sm text-red-400 hover:bg-red-500/10 flex items-center gap-2.5 transition-colors"
               >
                 <Trash2 className="w-4 h-4" />
                 Delete Folder
@@ -1804,9 +2253,9 @@ export default function BucketDetails() {
             <>
               <button
                 onClick={() => handleOpenInNewTab(contextMenu.item as FileItem)}
-                className="w-full px-4 py-2 text-left text-dark-text hover:bg-dark-surfaceHover flex items-center gap-3"
+                className="w-full px-3 py-2 text-left text-sm text-dark-text hover:bg-dark-surfaceHover flex items-center gap-2.5 transition-colors"
               >
-                <ExternalLink className="w-4 h-4 text-blue-500" />
+                <ExternalLink className="w-4 h-4 text-dark-textMuted" />
                 Open in New Tab
               </button>
               <button
@@ -1814,9 +2263,9 @@ export default function BucketDetails() {
                   handleDownload(contextMenu.item as FileItem)
                   setContextMenu(prev => ({ ...prev, show: false }))
                 }}
-                className="w-full px-4 py-2 text-left text-dark-text hover:bg-dark-surfaceHover flex items-center gap-3"
+                className="w-full px-3 py-2 text-left text-sm text-dark-text hover:bg-dark-surfaceHover flex items-center gap-2.5 transition-colors"
               >
-                <Download className="w-4 h-4 text-blue-500" />
+                <Download className="w-4 h-4 text-dark-textMuted" />
                 Download
               </button>
               <div className="border-t border-dark-border my-1" />
@@ -1825,24 +2274,38 @@ export default function BucketDetails() {
                   handleRenameClick(contextMenu.item as FileItem)
                   setContextMenu(prev => ({ ...prev, show: false }))
                 }}
-                className="w-full px-4 py-2 text-left text-dark-text hover:bg-dark-surfaceHover flex items-center gap-3"
+                className="w-full px-3 py-2 text-left text-sm text-dark-text hover:bg-dark-surfaceHover flex items-center gap-2.5 transition-colors"
               >
-                <Pencil className="w-4 h-4 text-yellow-500" />
+                <Pencil className="w-4 h-4 text-dark-textMuted" />
                 Rename
               </button>
               <button
                 onClick={() => handleCopyPath((contextMenu.item as FileItem).key)}
-                className="w-full px-4 py-2 text-left text-dark-text hover:bg-dark-surfaceHover flex items-center gap-3"
+                className="w-full px-3 py-2 text-left text-sm text-dark-text hover:bg-dark-surfaceHover flex items-center gap-2.5 transition-colors"
               >
-                <Copy className="w-4 h-4 text-dark-textSecondary" />
+                <Copy className="w-4 h-4 text-dark-textMuted" />
                 Copy Path
+              </button>
+              <button
+                onClick={() => handleShareClick(contextMenu.item as FileItem)}
+                className="w-full px-3 py-2 text-left text-sm text-dark-text hover:bg-dark-surfaceHover flex items-center gap-2.5 transition-colors"
+              >
+                <Link2 className="w-4 h-4 text-dark-textMuted" />
+                Get link
+              </button>
+              <button
+                onClick={() => handleVersionHistoryClick(contextMenu.item as FileItem)}
+                className="w-full px-3 py-2 text-left text-sm text-dark-text hover:bg-dark-surfaceHover flex items-center gap-2.5 transition-colors"
+              >
+                <History className="w-4 h-4 text-dark-textMuted" />
+                Version history
               </button>
               <div className="border-t border-dark-border my-1" />
               <button
                 onClick={() => handleShowFileInfo(contextMenu.item as FileItem)}
-                className="w-full px-4 py-2 text-left text-dark-text hover:bg-dark-surfaceHover flex items-center gap-3"
+                className="w-full px-3 py-2 text-left text-sm text-dark-text hover:bg-dark-surfaceHover flex items-center gap-2.5 transition-colors"
               >
-                <Info className="w-4 h-4 text-dark-textSecondary" />
+                <Info className="w-4 h-4 text-dark-textMuted" />
                 File Info
               </button>
               <div className="border-t border-dark-border my-1" />
@@ -1851,7 +2314,7 @@ export default function BucketDetails() {
                   handleDelete(contextMenu.item as FileItem)
                   setContextMenu(prev => ({ ...prev, show: false }))
                 }}
-                className="w-full px-4 py-2 text-left text-red-500 hover:bg-red-500/10 flex items-center gap-3"
+                className="w-full px-3 py-2 text-left text-sm text-red-400 hover:bg-red-500/10 flex items-center gap-2.5 transition-colors"
               >
                 <Trash2 className="w-4 h-4" />
                 Delete
@@ -1861,57 +2324,155 @@ export default function BucketDetails() {
         </div>
       )}
 
+      {/* Share Modal */}
+      {shareTarget !== null && (
+        <div className="modal-overlay">
+          <div className="modal-panel">
+            <div className="flex items-center justify-between mb-5">
+              <h2 className="modal-title">Share object</h2>
+            </div>
+            <div className="space-y-4">
+              <p className="text-dark-text break-all font-mono text-sm bg-dark-inset border border-dark-border rounded-lg p-3">{shareTarget}</p>
+
+              {shareNeedsKey && (
+                <div className="alert-warning">
+                  <span>
+                    You need an active access key to generate shareable links.{' '}
+                    <Link to="/profile" className="underline hover:text-yellow-300">
+                      Create one in your profile
+                    </Link>
+                    .
+                  </span>
+                </div>
+              )}
+
+              {shareError && <div className="alert-error">{shareError}</div>}
+
+              {shareResult ? (
+                <>
+                  <div>
+                    <label className="label">Shareable link</label>
+                    <div className="flex items-start gap-2">
+                      <p className="flex-1 min-w-0 bg-dark-inset border border-dark-border rounded-lg p-3 font-mono text-xs break-all text-dark-text">
+                        {shareResult.url}
+                      </p>
+                      <button
+                        onClick={handleCopyShareUrl}
+                        className={`btn-icon shrink-0 ${shareCopied ? '!text-green-400' : ''}`}
+                        title={shareCopied ? 'Copied' : 'Copy link'}
+                      >
+                        {shareCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                      </button>
+                    </div>
+                    <p className="help-text tabular-nums">
+                      Expires {new Date(shareResult.expires_at).toLocaleString()}
+                    </p>
+                  </div>
+                  {shareResult.capped_by_key && (
+                    <div className="alert-warning">Capped by your access key's expiry</div>
+                  )}
+                  <div className="flex justify-end gap-2 mt-6">
+                    <button
+                      onClick={() => {
+                        setShareResult(null)
+                        setShareCopied(false)
+                      }}
+                      className="btn-ghost"
+                    >
+                      Generate another
+                    </button>
+                    <button onClick={closeShareModal} className="btn-primary">
+                      Close
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <form onSubmit={handleGenerateLink} className="space-y-4">
+                  <div>
+                    <label className="label">Link expires in</label>
+                    <select
+                      value={shareExpiry}
+                      onChange={(e) => setShareExpiry(Number(e.target.value))}
+                      className="input"
+                    >
+                      <option value={900}>15 minutes</option>
+                      <option value={3600}>1 hour</option>
+                      <option value={86400}>24 hours</option>
+                      <option value={604800}>7 days</option>
+                    </select>
+                    <p className="help-text">
+                      Anyone with the link can download this object until it expires.
+                    </p>
+                  </div>
+                  <div className="flex justify-end gap-2 mt-6">
+                    <button type="button" onClick={closeShareModal} className="btn-ghost">
+                      Cancel
+                    </button>
+                    <button type="submit" disabled={shareLoading} className="btn-primary">
+                      {shareLoading && <span className="spinner !w-4 !h-4" />}
+                      {shareLoading ? 'Generating...' : 'Generate link'}
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* File Info Modal */}
       {showFileInfo && fileInfoTarget && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-          <div className="bg-dark-surface border border-dark-border rounded-lg p-6 w-full max-w-md">
-            <div className="flex items-center gap-3 mb-6">
-              <FileIcon className="w-8 h-8 text-blue-500" />
-              <h2 className="text-2xl font-bold text-dark-text">File Information</h2>
+        <div className="modal-overlay">
+          <div className="modal-panel">
+            <div className="flex items-center justify-between mb-5">
+              <div className="flex items-center gap-2.5">
+                <FileIcon className="w-5 h-5 text-dark-textMuted" />
+                <h2 className="modal-title">File Information</h2>
+              </div>
             </div>
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-dark-textSecondary mb-1">Name</label>
-                <p className="text-dark-text break-all">{fileInfoTarget.key.split('/').pop()}</p>
+                <p className="text-xs font-medium text-dark-textSecondary mb-1">Name</p>
+                <p className="text-sm text-dark-text break-all">{fileInfoTarget.key.split('/').pop()}</p>
               </div>
               <div>
-                <label className="block text-sm font-medium text-dark-textSecondary mb-1">Full Path</label>
-                <p className="text-dark-text break-all font-mono text-sm bg-dark-bg px-3 py-2 rounded">{fileInfoTarget.key}</p>
+                <p className="text-xs font-medium text-dark-textSecondary mb-1">Full Path</p>
+                <p className="text-dark-text break-all font-mono text-sm bg-dark-inset border border-dark-border rounded-lg p-3">{fileInfoTarget.key}</p>
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-dark-textSecondary mb-1">Size</label>
-                  <p className="text-dark-text">{formatFileSize(fileInfoTarget.size)}</p>
+                  <p className="text-xs font-medium text-dark-textSecondary mb-1">Size</p>
+                  <p className="text-sm text-dark-text tabular-nums">{formatFileSize(fileInfoTarget.size)}</p>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-dark-textSecondary mb-1">Type</label>
-                  <p className="text-dark-text">{fileInfoTarget.content_type}</p>
+                  <p className="text-xs font-medium text-dark-textSecondary mb-1">Type</p>
+                  <p className="text-sm text-dark-text break-all">{fileInfoTarget.content_type}</p>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-dark-textSecondary mb-1">Created</label>
-                  <p className="text-dark-text text-sm">{new Date(fileInfoTarget.created_at).toLocaleString()}</p>
+                  <p className="text-xs font-medium text-dark-textSecondary mb-1">Created</p>
+                  <p className="text-sm text-dark-text tabular-nums">{new Date(fileInfoTarget.created_at).toLocaleString()}</p>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-dark-textSecondary mb-1">Modified</label>
-                  <p className="text-dark-text text-sm">{new Date(fileInfoTarget.updated_at).toLocaleString()}</p>
+                  <p className="text-xs font-medium text-dark-textSecondary mb-1">Modified</p>
+                  <p className="text-sm text-dark-text tabular-nums">{new Date(fileInfoTarget.updated_at).toLocaleString()}</p>
                 </div>
               </div>
               {fileInfoTarget.etag && (
                 <div>
-                  <label className="block text-sm font-medium text-dark-textSecondary mb-1">ETag</label>
-                  <p className="text-dark-text font-mono text-sm bg-dark-bg px-3 py-2 rounded break-all">{fileInfoTarget.etag}</p>
+                  <p className="text-xs font-medium text-dark-textSecondary mb-1">ETag</p>
+                  <p className="text-dark-text font-mono text-sm bg-dark-inset border border-dark-border rounded-lg p-3 break-all">{fileInfoTarget.etag}</p>
                 </div>
               )}
             </div>
-            <div className="flex gap-3 pt-6">
+            <div className="flex justify-end gap-2 mt-6">
               <button
                 onClick={() => {
                   handleCopyPath(fileInfoTarget.key)
                   setShowFileInfo(false)
                 }}
-                className="flex-1 px-4 py-2 border border-dark-border text-dark-text rounded-lg hover:bg-dark-surfaceHover transition-colors flex items-center justify-center gap-2"
+                className="btn-secondary"
               >
                 <Copy className="w-4 h-4" />
                 Copy Path
@@ -1921,11 +2482,310 @@ export default function BucketDetails() {
                   setShowFileInfo(false)
                   setFileInfoTarget(null)
                 }}
-                className="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
+                className="btn-primary"
               >
                 Close
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Version History Modal */}
+      {versionsTarget !== null && (
+        <div className="modal-overlay">
+          <div className="modal-panel !max-w-2xl">
+            <div className="flex items-center justify-between mb-5">
+              <h2 className="modal-title">Version history</h2>
+              <button onClick={closeVersionsModal} className="btn-icon" title="Close">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="space-y-4">
+              <p className="text-dark-text break-all font-mono text-sm bg-dark-inset border border-dark-border rounded-lg p-3">{versionsTarget}</p>
+
+              {!versionsLoading && versionsBucketState !== 'enabled' && (
+                <div className="alert-info">
+                  Versioning is {versionsBucketState === 'suspended' ? 'suspended' : 'not enabled'} on this bucket — new versions only accrue while versioning is on.
+                </div>
+              )}
+
+              {versionsError && <div className="alert-error">{versionsError}</div>}
+
+              {versionsLoading ? (
+                <div className="flex items-center justify-center py-8">
+                  <div className="spinner" />
+                </div>
+              ) : versions.length === 0 ? (
+                <p className="text-sm text-dark-textSecondary text-center py-6">No previous versions</p>
+              ) : (
+                <div className="border border-dark-border rounded-lg overflow-hidden divide-y divide-dark-border/60">
+                  {versions.map((version) => (
+                    <div key={version.version_id} className="flex items-center gap-3 px-3 py-2.5">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="kbd-mono" title={version.version_id}>
+                            {version.version_id.slice(0, 8)}…
+                          </span>
+                          {version.is_latest && <span className="badge-blue">Current</span>}
+                          {version.is_delete_marker && <span className="badge-red">Delete marker</span>}
+                        </div>
+                        <p className="text-xs text-dark-textSecondary tabular-nums mt-1">
+                          {formatFileSize(version.size)} · {new Date(version.last_modified).toLocaleString()}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        {!version.is_latest && !version.is_delete_marker && (
+                          <button
+                            onClick={() => handleRestoreVersion(version.version_id)}
+                            className="btn-secondary btn-sm"
+                          >
+                            Restore
+                          </button>
+                        )}
+                        <button
+                          onClick={() => handleDeleteVersion(version.version_id)}
+                          className="btn-icon hover:!text-red-400 hover:!bg-red-500/10"
+                          title="Delete permanently"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 mt-6">
+                <button onClick={closeVersionsModal} className="btn-primary">
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bucket Settings Modal */}
+      {showBucketSettings && (
+        <div className="modal-overlay">
+          <div className="modal-panel !max-w-lg">
+            <div className="flex items-center justify-between mb-5">
+              <h2 className="modal-title">Bucket settings</h2>
+              <button onClick={closeBucketSettings} className="btn-icon" title="Close">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {settingsError && <div className="alert-error mb-4">{settingsError}</div>}
+            {settingsSuccess && <div className="alert-success mb-4">{settingsSuccess}</div>}
+
+            {settingsLoading ? (
+              <div className="flex items-center justify-center py-8">
+                <div className="spinner" />
+              </div>
+            ) : (
+              <div className="space-y-6">
+                {/* Versioning */}
+                <div>
+                  <h3 className="text-base font-semibold text-dark-text mb-2">Versioning</h3>
+                  <div className="flex items-center gap-3 mb-3">
+                    <span className="text-sm text-dark-textSecondary">Current state:</span>
+                    {bucketInfo?.versioning === 'enabled' ? (
+                      <span className="badge-green">Enabled</span>
+                    ) : bucketInfo?.versioning === 'suspended' ? (
+                      <span className="badge-yellow">Suspended</span>
+                    ) : (
+                      <span className="badge-gray">Disabled</span>
+                    )}
+                  </div>
+                  <div className="flex gap-2">
+                    {bucketInfo?.versioning !== 'enabled' && (
+                      <button onClick={() => handleSetVersioning('enabled')} className="btn-primary btn-sm">
+                        Enable versioning
+                      </button>
+                    )}
+                    {bucketInfo?.versioning === 'enabled' && (
+                      <button onClick={() => handleSetVersioning('suspended')} className="btn-secondary btn-sm">
+                        Suspend
+                      </button>
+                    )}
+                  </div>
+                  <p className="help-text">
+                    While enabled, overwritten and deleted objects keep previous versions you can restore.
+                  </p>
+                </div>
+
+                {/* Lifecycle */}
+                <div className="pt-6 border-t border-dark-border">
+                  <h3 className="text-base font-semibold text-dark-text mb-2">Lifecycle</h3>
+                  <form onSubmit={handleSaveLifecycle} className="space-y-4">
+                    <div>
+                      <label className="label">Expire objects after (days)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={lifecycleExpireDays}
+                        onChange={(e) => setLifecycleExpireDays(e.target.value)}
+                        placeholder="e.g. 30"
+                        className="input"
+                      />
+                    </div>
+                    <div>
+                      <label className="label">Prefix (optional)</label>
+                      <input
+                        type="text"
+                        value={lifecyclePrefix}
+                        onChange={(e) => setLifecyclePrefix(e.target.value)}
+                        placeholder="e.g. logs/"
+                        className="input font-mono"
+                      />
+                      <p className="help-text">Only objects whose keys start with this prefix are expired.</p>
+                    </div>
+                    <div>
+                      <label className="label">Expire noncurrent versions after (days)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={lifecycleNoncurrentDays}
+                        onChange={(e) => setLifecycleNoncurrentDays(e.target.value)}
+                        placeholder="e.g. 7"
+                        className="input"
+                      />
+                    </div>
+                    <p className="help-text">Set both day values to 0 (or leave empty) to clear the lifecycle rules.</p>
+                    <div className="flex justify-end gap-2">
+                      <button type="submit" disabled={lifecycleSaving} className="btn-primary">
+                        {lifecycleSaving && <span className="spinner !w-4 !h-4" />}
+                        {lifecycleSaving ? 'Saving...' : 'Save'}
+                      </button>
+                    </div>
+                  </form>
+                </div>
+
+                {/* Quota */}
+                <div className="pt-6 border-t border-dark-border">
+                  <h3 className="text-base font-semibold text-dark-text mb-2">Quota</h3>
+                  <div>
+                    <label className="label">Storage quota (MB)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={quotaMb}
+                      onChange={(e) => setQuotaMb(e.target.value)}
+                      placeholder="e.g. 1024"
+                      className="input"
+                    />
+                    <p className="help-text">
+                      Maximum total size of objects in this bucket. Leave empty (or 0) for unlimited.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Retention (WORM) */}
+                <div className="pt-6 border-t border-dark-border">
+                  <h3 className="text-base font-semibold text-dark-text mb-2">Retention (WORM)</h3>
+                  <div className="alert-info mb-3">
+                    While a retention period is set, no object version can be permanently deleted
+                    until it ages out, and versioning cannot be suspended.
+                  </div>
+                  <div>
+                    <label className="label">Retention period (days)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={retentionDays}
+                      onChange={(e) => setRetentionDays(e.target.value)}
+                      placeholder="e.g. 30"
+                      disabled={bucketInfo?.versioning !== 'enabled'}
+                      className="input"
+                    />
+                    {bucketInfo?.versioning !== 'enabled' ? (
+                      <p className="help-text">Enable versioning above to configure retention.</p>
+                    ) : (
+                      <p className="help-text">Set to 0 (or leave empty) to remove the retention period.</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Notifications & replication */}
+                <div className="pt-6 border-t border-dark-border">
+                  <h3 className="text-base font-semibold text-dark-text mb-2">Notifications &amp; replication</h3>
+                  <div className="space-y-4">
+                    <div>
+                      <label className="label">Webhook URL</label>
+                      <input
+                        type="text"
+                        value={webhookUrl}
+                        onChange={(e) => setWebhookUrl(e.target.value)}
+                        placeholder="https://example.com/webhook"
+                        className="input font-mono"
+                      />
+                      <p className="help-text">
+                        POSTed on object events. Leave empty to disable notifications.
+                      </p>
+                    </div>
+                    <div>
+                      <label className="label">Webhook secret</label>
+                      <input
+                        type="password"
+                        value={webhookSecret}
+                        onChange={(e) => setWebhookSecret(e.target.value)}
+                        placeholder="(unchanged)"
+                        className="input"
+                      />
+                      <p className="help-text">Used to sign webhook payloads. Only sent if you type a new one.</p>
+                    </div>
+                    <div>
+                      <label className="label">Events</label>
+                      <div className="flex items-center gap-6">
+                        <label className="flex items-center gap-2 text-sm text-dark-text">
+                          <input
+                            type="checkbox"
+                            checked={webhookCreated}
+                            onChange={(e) => setWebhookCreated(e.target.checked)}
+                            className="w-4 h-4 text-blue-600 bg-dark-inset border-dark-border rounded focus:ring-blue-500"
+                          />
+                          Created
+                        </label>
+                        <label className="flex items-center gap-2 text-sm text-dark-text">
+                          <input
+                            type="checkbox"
+                            checked={webhookRemoved}
+                            onChange={(e) => setWebhookRemoved(e.target.checked)}
+                            className="w-4 h-4 text-blue-600 bg-dark-inset border-dark-border rounded focus:ring-blue-500"
+                          />
+                          Removed
+                        </label>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="label">Replicate to bucket</label>
+                      <input
+                        type="text"
+                        value={replicateTo}
+                        onChange={(e) => setReplicateTo(e.target.value)}
+                        placeholder="e.g. backups"
+                        className="input font-mono"
+                      />
+                      <p className="help-text">
+                        Mirror this bucket's objects into another bkt bucket (one-way, periodic).
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex justify-end mt-5">
+                    <button
+                      onClick={handleSaveGeneralSettings}
+                      disabled={generalSaving}
+                      className="btn-primary"
+                    >
+                      {generalSaving && <span className="spinner !w-4 !h-4" />}
+                      {generalSaving ? 'Saving...' : 'Save settings'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

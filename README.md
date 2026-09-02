@@ -27,7 +27,7 @@ docker run -d --name bkt \
 Then:
 
 - Get the first-boot admin password: `docker logs bkt | grep -A2 "admin credentials"` — or set your own with `-e ADMIN_PASSWORD=...`.
-- Create an access key in the UI (Settings) and point S3 tools at `https://localhost:9000`.
+- Create an access key in the UI (Profile) and point S3 tools at `https://localhost:9000`.
 
 All state (database, objects, certs, secrets) lives in the `bkt-data` volume, so the container itself is disposable. For multi-node / external-Postgres deployments, use the Helm chart in [`charts/bkt`](charts/bkt) or [docker-compose.prod.yml](docker-compose.prod.yml).
 
@@ -56,42 +56,67 @@ The same codebase ships three ways. Full details in **[docs/deployment/deploymen
 |---|---|---|---|
 | **Omnibus** (`docker pull`) | `docker run … ghcr.io/seahop/bkt` | 1 (backend+UI+DB) | single-node self-hosting |
 | **Clone + compose** | `git clone …` → `docker compose up` | 3 (db, backend, frontend) | developing on the code (hot-reload) |
-| **compose.prod / Helm** | pulls `bkt-backend` + Postgres | 2 (backend, external DB) | scale-out / HA |
+| **compose.prod** | pulls `bkt-backend` + Postgres | 2 (backend, external DB) | scale-out / HA |
+| **Kubernetes (Helm)** | `helm install bkt charts/bkt` | backend + in-chart Postgres | Kubernetes — see [charts/bkt/README.md](charts/bkt/README.md) |
+
+The Helm chart uses the `bkt-backend` image (not the omnibus image, which bundles its own Postgres) and supports TLS via self-signed certs, an existing secret, or cert-manager, an optional dedicated S3-API ingress, and a Prometheus ServiceMonitor.
 
 All three run the same Go binary with the embedded UI — they are different *packagings* of one codebase (built from the same root `Dockerfile`).
 
 ## Features
 
+Full usage details for the data-management features live in the **[Feature guide](docs/guides/features.md)**.
+
 ### Storage
 - **Multi-backend support** - Store objects on local disk or any S3-compatible service
 - **Per-bucket backend selection** - Choose storage location when creating each bucket
+- **Object versioning** - Version history with restore and delete markers ([guide](docs/guides/features.md#object-versioning))
+- **Lifecycle expiry** - Expire current objects and purge noncurrent versions after N days ([guide](docs/guides/features.md#lifecycle-expiry))
+- **Per-bucket quotas** - Cap a bucket's total size; over-quota writes are rejected ([guide](docs/guides/features.md#storage-quotas))
+- **WORM retention** - Deletion protection for versioned buckets ([guide](docs/guides/features.md#retention-worm))
+- **Replication** - One-way mirroring into another bkt bucket, including one backed by a different S3 provider ([guide](docs/guides/features.md#replication-bucket-mirroring))
+- **SSE-S3 pass-through** - Request AES256 server-side encryption on the external S3 backend ([guide](docs/guides/features.md#server-side-encryption))
 - **Virtual folder hierarchy** - Organize objects with folder-like paths
 - **Large file support** - Async uploads with progress tracking for large files
 
 ### Security
-- **JWT authentication** - Secure token-based auth with refresh tokens
+- **JWT authentication** - Secure token-based auth with refresh-token rotation and reuse detection
+- **SSO** - Google OIDC plus generic OIDC for any standard IdP (validated with Keycloak) - see [SSO Setup](docs/guides/sso-setup.md)
 - **Policy-based access control** - IAM-style policies for fine-grained permissions
-- **Access keys** - S3-compatible credentials for API and filesystem access
+- **Groups** - Attach policies to groups of users ([guide](docs/guides/features.md#groups))
+- **Access keys** - Named S3-compatible credentials with optional expiry and read-only flag
+- **Temporary credentials** - Short-lived S3 key pairs via bkt-STS ([guide](docs/guides/features.md#temporary-credentials-bkt-sts))
+- **Audit log** - Filterable admin audit trail of logins, key, policy, and bucket operations
 - **TLS everywhere** - HTTPS for all services with auto-generated certificates
 
 ### Web Interface
 - **Dual-pane file browser** - Split view for easier file organization
 - **Drag-and-drop** - Move files between folders and panes
+- **Presigned share links** - Time-limited download URLs from the Share action ([guide](docs/guides/features.md#presigned-share-links))
+- **Version history** - Browse, restore, or permanently delete object versions
+- **Bucket settings** - Versioning, lifecycle, quota, retention, webhooks, and replication per bucket
 - **Search and filters** - Find files by name, extension, size, date, or folder depth
 - **Context menus** - Right-click for quick actions
 - **Dark mode** - Modern dark theme throughout
 
 ### S3 Compatibility
 - **S3 REST API** - Works with AWS SDKs and S3 tools
+- **User metadata & object tagging** - `x-amz-meta-*` headers and the `?tagging` subresource ([guide](docs/guides/features.md#user-metadata-and-tags))
+- **Versioning & lifecycle** - Standard AWS API shapes (`?versioning`, `?versions`, `?lifecycle`, `?versionId=`)
+- **Multipart uploads** - Including ListMultipartUploads and UploadPartCopy
 - **Filesystem mounting** - Mount buckets as local drives with s3fs-fuse
-- **AWS Signature V4** - Standard S3 authentication
+- **AWS Signature V4** - Standard S3 authentication, including client-side presigned URLs
+
+### Integrations & Observability
+- **Webhook event notifications** - Signed JSON POSTs on object created/removed events ([guide](docs/guides/features.md#event-notifications-webhooks))
+- **Prometheus metrics** - `/metrics` endpoint, optionally bearer-token gated
 
 ## Tech Stack
 
 - **Backend**: Go with Gin framework
 - **Frontend**: React with TypeScript and Tailwind CSS
 - **Database**: PostgreSQL
-- **Deployment**: Docker and Docker Compose
+- **Deployment**: Docker, Docker Compose, and Kubernetes (Helm)
 
 ## Quick Start
 
@@ -150,13 +175,13 @@ rm -rf data/
 Mount buckets as local filesystems using s3fs-fuse:
 
 ```bash
-# Create credentials file (get keys from web UI Settings page)
+# Create credentials file (get keys from the web UI Profile page)
 echo "YOUR_ACCESS_KEY:YOUR_SECRET_KEY" > ~/.bkt
 chmod 600 ~/.bkt
 
 # Mount a bucket
 s3fs my-bucket ~/mnt/my-bucket \
-  -o url=https://localhost:9443 \
+  -o url=https://localhost:9000 \
   -o use_path_request_style \
   -o passwd_file=~/.bkt \
   -o no_check_certificate
@@ -258,10 +283,13 @@ Use `-k` to accept self-signed certificates in development.
 ## Documentation
 
 - [Getting Started](docs/guides/getting-started.md)
+- [Feature Guide](docs/guides/features.md) - versioning, lifecycle, quotas, retention, share links, webhooks, groups, temporary credentials, replication, encryption
 - [Full API Reference](docs/api/API.md)
 - [S3fs Mounting Guide](docs/guides/MOUNTING.md)
+- [Kubernetes (Helm) Deployment](charts/bkt/README.md)
 - [Security Overview](docs/security/security-overview.md)
 - [Production Checklist](docs/deployment/production-checklist.md)
+- [Backup & Restore](docs/deployment/backup-restore.md)
 - [Documentation Index](docs/DOCUMENTATION_INDEX.md)
 
 ## License

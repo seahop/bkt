@@ -37,6 +37,15 @@ docker logs bkt | grep -A2 "admin credentials"
 | `ALLOW_REGISTRATION` | `false` | Allow users to self-register |
 | `AUTH_RATE_LIMIT` | `5` (omnibus: `60`) | Max login attempts per minute per IP |
 
+## Proxies, rate limits, audit & metrics
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `TRUSTED_PROXIES` | _(empty)_ | Comma-separated CIDRs/IPs of reverse proxies whose `X-Forwarded-For` is trusted for rate limiting. Empty = trust none (the socket address is used). Behind a proxy, set it to the proxy's address — otherwise all clients share the proxy's rate-limit bucket |
+| `S3_RATE_LIMIT` | `0` | Per-IP requests per minute on the S3 API listener; `0` disables (the console/auth limiter is separate) |
+| `AUDIT_RETENTION_DAYS` | `90` | Days to keep audit log rows; older rows are pruned periodically. `<= 0` disables pruning |
+| `METRICS_TOKEN` | _(empty)_ | When set, `GET /metrics` requires `Authorization: Bearer <token>`. Leave unset only if the metrics endpoint is network-isolated (it exposes bucket/object/user counts) |
+
 ## Secrets
 
 | Variable | Default | Purpose |
@@ -52,10 +61,11 @@ creates them in `.env`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `TLS_ENABLED` | `true` | `false` serves plain HTTP (use behind a TLS-terminating proxy) |
+| `TLS_ENABLED` | `true` (omnibus; bare binary: `false`) | `false` serves plain HTTP (use behind a TLS-terminating proxy — and set `TRUSTED_PROXIES`). Production (`GO_ENV=production`) refuses to start without TLS |
 | `TLS_CERT_FILE` / `TLS_KEY_FILE` | _auto self-signed_ | Mount your own cert/key to override the generated pair |
 | `CONSOLE_PORT` | `9443` | Web UI + REST API listener |
 | `S3_API_PORT` | `9000` | S3-compatible API listener |
+| `S3_PUBLIC_ENDPOINT` | _(empty)_ | Browser-facing base URL of the S3 listener (e.g. `https://s3.example.com`), embedded in console-generated presigned URLs. Empty = derived from the console request host + the S3 API port — right whenever console and S3 share a hostname |
 | `CORS_ALLOWED_ORIGINS` | localhost dev origins | Comma-separated browser origins allowed to call the API |
 
 ## Storage backend
@@ -72,6 +82,8 @@ creates them in `.env`.
 | `S3_USE_SSL` | `true` | Use HTTPS to the S3 endpoint |
 | `S3_FORCE_PATH_STYLE` | `false` | `true` for MinIO and other non-AWS S3 |
 | `S3_BUCKETS` | — | Comma-separated buckets to auto-provision (link/create) at startup |
+| `S3_SSE` | `false` | Request SSE-S3 (AES256) server-side encryption on every object written through the **external S3 backend**. Local-backend bytes are NOT encrypted by bkt — use disk-level encryption (LUKS/dm-crypt) |
+| `CONTENT_TYPE_ENFORCEMENT` | `false` | Opt-in magic-byte content-type detection; rejects "unsafe" types. Off by default because S3's contract treats Content-Type as client-declared metadata |
 
 > You don't have to set the `S3_*` variables at all — you can add S3 configurations
 > and create S3-backed buckets from the **admin UI at runtime** instead.
@@ -83,8 +95,9 @@ creates them in `.env`.
 | `GOOGLE_OIDC_ENABLED` | `false` | Enable Google OIDC login |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | — | Google OAuth credentials |
 | `GOOGLE_REDIRECT_URL` | `https://localhost:9443/api/auth/google/callback` | OAuth callback |
-| `VAULT_OIDC_ENABLED` | `false` | Enable Vault OIDC login |
-| `VAULT_OIDC_CLIENT_ID` / `VAULT_OIDC_PROVIDER_URL` / `VAULT_OIDC_REDIRECT_URL` | — | Vault OIDC settings |
+| `VAULT_OIDC_ENABLED` | `false` | Enable generic OIDC login (any standard OIDC IdP — Vault, Keycloak, …; endpoints come from the provider's discovery document) |
+| `VAULT_OIDC_CLIENT_ID` / `VAULT_OIDC_PROVIDER_URL` / `VAULT_OIDC_REDIRECT_URL` | — | OIDC client ID, provider/issuer URL, and backend callback URL |
+| `VAULT_OIDC_SCOPES` | `openid profile` | Space-separated OIDC scopes to request |
 | `FRONTEND_URL` | `https://localhost` | Base URL SSO flows redirect back to |
 
 ## Notes for the omnibus

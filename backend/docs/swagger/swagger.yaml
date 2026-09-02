@@ -29,11 +29,24 @@ definitions:
     - new_name
     - source_key
     type: object
+  api.presignRequest:
+    properties:
+      expires_in:
+        description: seconds; default 900, capped at 604800
+        type: integer
+      key:
+        type: string
+    required:
+    - key
+    type: object
   models.AccessKey:
     properties:
       access_key:
         type: string
       created_at:
+        type: string
+      expires_at:
+        description: nil = never expires
         type: string
       id:
         type: string
@@ -41,6 +54,16 @@ definitions:
         type: boolean
       last_used_at:
         type: string
+      name:
+        description: Human label to tell keys apart
+        type: string
+      read_only:
+        description: Deny mutating S3 operations
+        type: boolean
+      temporary:
+        description: 'bkt-STS short-lived credential: excluded from the key limit,
+          hard-deleted after expiry'
+        type: boolean
       user:
         allOf:
         - $ref: '#/definitions/models.User'
@@ -65,6 +88,11 @@ definitions:
         type: string
       is_public:
         type: boolean
+      lifecycle:
+        description: |-
+          Lifecycle holds the bucket's lifecycle configuration as JSON (see
+          LifecycleConfig); nil = no lifecycle rules.
+        type: string
       name:
         type: string
       objects:
@@ -77,8 +105,26 @@ definitions:
         description: Relationships
       owner_id:
         type: string
+      quota_bytes:
+        description: |-
+          QuotaBytes caps the total size of CURRENT objects in the bucket
+          (version storage is not counted). 0 = unlimited.
+        type: integer
       region:
         type: string
+      replicate_to:
+        description: |-
+          ReplicateTo mirrors this bucket's current objects into another bkt
+          bucket (periodic sync; the target is fully managed by replication).
+        type: string
+      retention_days:
+        description: |-
+          RetentionDays (WORM-lite): while set, no version of any object can be
+          permanently removed until it is older than this many days. Requires
+          versioning to be enabled. Plain deletes still create markers (data is
+          preserved); version-addressed deletes, lifecycle purges, and bucket
+          deletion are refused for retained data. 0 = off.
+        type: integer
       s3_config:
         $ref: '#/definitions/models.S3Configuration'
       s3_config_id:
@@ -88,6 +134,19 @@ definitions:
         description: '"local" or "s3"'
         type: string
       updated_at:
+        type: string
+      versioning:
+        description: |-
+          Versioning state: "" (never enabled), "enabled", or "suspended".
+          Suspended keeps existing versions browsable but stops creating new ones
+          (a documented simplification of AWS's null-version semantics).
+        type: string
+      webhook_events:
+        type: string
+      webhook_url:
+        description: |-
+          Webhook event notifications: POSTed as JSON to WebhookURL for the event
+          types in WebhookEvents (csv of "created","removed"). Empty URL = off.
         type: string
     type: object
   models.CreateBucketRequest:
@@ -157,6 +216,27 @@ definitions:
       message:
         type: string
     type: object
+  models.Group:
+    properties:
+      created_at:
+        type: string
+      description:
+        type: string
+      id:
+        type: string
+      name:
+        type: string
+      policies:
+        items:
+          $ref: '#/definitions/models.Policy'
+        type: array
+      updated_at:
+        type: string
+      users:
+        items:
+          $ref: '#/definitions/models.User'
+        type: array
+    type: object
   models.LoginRequest:
     properties:
       password:
@@ -187,14 +267,22 @@ definitions:
         description: Object name/path
         type: string
       metadata:
-        description: JSON metadata (nullable)
+        description: x-amz-meta-* user metadata (JSON map, nullable)
         type: string
       sha256:
         description: SHA256 hash of content
         type: string
       size:
         type: integer
+      tags:
+        description: S3 object tags (JSON map, nullable)
+        type: string
       updated_at:
+        type: string
+      version_id:
+        description: |-
+          VersionID of the CURRENT version ("" = written while unversioned, the
+          S3 "null" version). Non-current versions live in object_versions.
         type: string
     type: object
   models.Policy:
@@ -469,6 +557,62 @@ paths:
       summary: Get access key statistics
       tags:
       - access-keys
+  /api/audit:
+    get:
+      consumes:
+      - application/json
+      description: Admin-only. Returns audit log entries, filterable by user, action,
+        resource type, status, and time range.
+      parameters:
+      - description: Filter by user ID
+        in: query
+        name: user_id
+        type: string
+      - description: Filter by action
+        in: query
+        name: action
+        type: string
+      - description: Filter by resource type
+        in: query
+        name: resource_type
+        type: string
+      - description: Filter by status (success/failure/denied)
+        in: query
+        name: status
+        type: string
+      - description: Start time (RFC3339)
+        in: query
+        name: start
+        type: string
+      - description: End time (RFC3339)
+        in: query
+        name: end
+        type: string
+      - description: Max results (default 100, max 500)
+        in: query
+        name: limit
+        type: integer
+      - description: Offset for pagination
+        in: query
+        name: offset
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: List audit logs
+      tags:
+      - audit
   /api/auth/login:
     post:
       consumes:
@@ -787,6 +931,90 @@ paths:
       summary: Move a folder
       tags:
       - buckets
+  /api/buckets/{name}/lifecycle:
+    put:
+      consumes:
+      - application/json
+      description: 'Configures age-based expiry for a bucket (single rule): current
+        objects after expire_days, noncurrent versions after noncurrent_expire_days.
+        Both zero clears the configuration. Bucket owner or admin only.'
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+      security:
+      - BearerAuth: []
+      summary: Set bucket lifecycle
+      tags:
+      - buckets
+  /api/buckets/{name}/object-versions:
+    delete:
+      description: Permanently removes one version or delete marker. Removing the
+        current version or a latest delete marker promotes the next-newest surviving
+        version.
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Object key
+        in: query
+        name: key
+        required: true
+        type: string
+      - description: Version ID
+        in: query
+        name: version_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+      security:
+      - BearerAuth: []
+      summary: Permanently delete an object version
+      tags:
+      - buckets
+    get:
+      description: Lists the current version, archived versions, and delete markers
+        for one object key, newest first.
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Object key
+        in: query
+        name: key
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: object
+      security:
+      - BearerAuth: []
+      summary: List an object's versions
+      tags:
+      - buckets
   /api/buckets/{name}/objects:
     get:
       consumes:
@@ -1044,6 +1272,53 @@ paths:
       summary: Move an object
       tags:
       - buckets
+  /api/buckets/{name}/objects/presign:
+    post:
+      consumes:
+      - application/json
+      description: Generates a time-limited presigned GET URL for an object, signed
+        with one of the caller's active access keys. Requires GetObject permission
+        and at least one active access key.
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Object key and expiry
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.presignRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: url and expires_at
+          schema:
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Generate a presigned download URL
+      tags:
+      - buckets
   /api/buckets/{name}/objects/rename:
     post:
       consumes:
@@ -1093,6 +1368,30 @@ paths:
       security:
       - BearerAuth: []
       summary: Rename an object
+      tags:
+      - buckets
+  /api/buckets/{name}/objects/restore:
+    post:
+      consumes:
+      - application/json
+      description: Copies an archived version forward as the new current version.
+        The previous current version is archived. History is preserved.
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+      security:
+      - BearerAuth: []
+      summary: Restore an object version
       tags:
       - buckets
   /api/buckets/{name}/policy:
@@ -1172,6 +1471,160 @@ paths:
       summary: Set bucket policy
       tags:
       - buckets
+  /api/buckets/{name}/settings:
+    put:
+      consumes:
+      - application/json
+      description: Updates quota, WORM retention, webhook notification, and replication
+        settings. Only fields present in the body are changed. Bucket owner or admin
+        only.
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+      security:
+      - BearerAuth: []
+      summary: Update bucket settings
+      tags:
+      - buckets
+  /api/buckets/{name}/versioning:
+    put:
+      consumes:
+      - application/json
+      description: Enables or suspends versioning on a bucket. Bucket owner or admin
+        only.
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+      security:
+      - BearerAuth: []
+      summary: Set bucket versioning
+      tags:
+      - buckets
+  /api/groups:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.Group'
+            type: array
+      security:
+      - BearerAuth: []
+      summary: List groups
+      tags:
+      - groups
+    post:
+      consumes:
+      - application/json
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.Group'
+      security:
+      - BearerAuth: []
+      summary: Create a group
+      tags:
+      - groups
+  /api/groups/{id}:
+    delete:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+      security:
+      - BearerAuth: []
+      summary: Delete a group
+      tags:
+      - groups
+  /api/groups/{id}/members:
+    post:
+      consumes:
+      - application/json
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+      security:
+      - BearerAuth: []
+      summary: Add a user to a group
+      tags:
+      - groups
+  /api/groups/{id}/members/{user_id}:
+    delete:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+      security:
+      - BearerAuth: []
+      summary: Remove a user from a group
+      tags:
+      - groups
+  /api/groups/{id}/policies:
+    post:
+      consumes:
+      - application/json
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+      security:
+      - BearerAuth: []
+      summary: Attach a policy to a group
+      tags:
+      - groups
+  /api/groups/{id}/policies/{policy_id}:
+    delete:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+      security:
+      - BearerAuth: []
+      summary: Detach a policy from a group
+      tags:
+      - groups
   /api/policies:
     get:
       consumes:
@@ -1643,6 +2096,25 @@ paths:
       summary: Update an S3 configuration
       tags:
       - s3-configs
+  /api/sts/credentials:
+    post:
+      consumes:
+      - application/json
+      description: Mints a short-lived S3 access key pair for the caller (default
+        1h, max 12h). Temporary keys don't count against the per-user key limit and
+        are removed automatically after expiry. The secret is shown only once.
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Issue temporary S3 credentials
+      tags:
+      - sts
   /api/users:
     get:
       consumes:

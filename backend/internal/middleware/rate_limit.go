@@ -8,6 +8,11 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// maxRateLimiterClients bounds the client map so a flood of distinct keys
+// (e.g. spoofed source addresses) cannot exhaust memory. When the cap is hit we
+// evict stale entries inline before admitting a new one.
+const maxRateLimiterClients = 50000
+
 // RateLimiter implements a simple token bucket rate limiter
 type RateLimiter struct {
 	mu       sync.RWMutex
@@ -18,7 +23,7 @@ type RateLimiter struct {
 }
 
 type bucket struct {
-	tokens     int
+	tokens     float64
 	lastRefill time.Time
 }
 
@@ -49,30 +54,58 @@ func (rl *RateLimiter) Allow(ip string) bool {
 	// Get or create bucket for this IP
 	b, exists := rl.clients[ip]
 	if !exists {
+		if len(rl.clients) >= maxRateLimiterClients {
+			rl.evictForSpaceLocked(now)
+		}
 		b = &bucket{
-			tokens:     rl.rate - 1, // consume one token immediately
+			tokens:     float64(rl.rate) - 1, // consume one token immediately
 			lastRefill: now,
 		}
 		rl.clients[ip] = b
 		return true
 	}
 
-	// Calculate tokens to add based on time elapsed
+	// Proportional token-bucket refill: add rate tokens per full window, scaled
+	// by the fraction of a window that has elapsed (so a burst can't cross the
+	// window boundary and get a full double allowance).
 	elapsed := now.Sub(b.lastRefill)
-	tokensToAdd := int(elapsed / rl.window * time.Duration(rl.rate))
-
-	if tokensToAdd > 0 {
-		b.tokens = min(rl.rate, b.tokens+tokensToAdd)
+	if elapsed > 0 {
+		b.tokens += float64(rl.rate) * (elapsed.Seconds() / rl.window.Seconds())
+		if b.tokens > float64(rl.rate) {
+			b.tokens = float64(rl.rate)
+		}
 		b.lastRefill = now
 	}
 
-	// Check if we have tokens available
-	if b.tokens > 0 {
+	if b.tokens >= 1 {
 		b.tokens--
 		return true
 	}
 
 	return false
+}
+
+// evictForSpaceLocked frees at least one map slot so the cap is a real bound
+// even under a live flood of distinct client keys: it drops every stale entry
+// and, when none are stale, the least-recently-refilled entry. The caller must
+// hold rl.mu.
+func (rl *RateLimiter) evictForSpaceLocked(now time.Time) {
+	var oldestIP string
+	var oldestSeen time.Time
+	evicted := false
+	for ip, b := range rl.clients {
+		if now.Sub(b.lastRefill) > rl.cleanup {
+			delete(rl.clients, ip)
+			evicted = true
+			continue
+		}
+		if oldestIP == "" || b.lastRefill.Before(oldestSeen) {
+			oldestIP, oldestSeen = ip, b.lastRefill
+		}
+	}
+	if !evicted && oldestIP != "" {
+		delete(rl.clients, oldestIP)
+	}
 }
 
 // cleanupRoutine periodically removes stale entries

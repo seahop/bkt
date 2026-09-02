@@ -16,6 +16,7 @@ import (
 	"bkt/internal/config"
 	"bkt/internal/database"
 	"bkt/internal/models"
+	"bkt/internal/services"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -46,6 +47,41 @@ type VaultIDTokenClaims struct {
 	Name     string   `json:"name"`
 	Groups   []string `json:"groups"`
 	Policies []string `json:"policies"`
+	Nonce    string   `json:"nonce"`
+}
+
+// oidcHTTPClient carries a timeout so a hung provider can't pin a goroutine.
+var oidcHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
+// oidcDiscovery is the subset of an OIDC provider's discovery document we use.
+type oidcDiscovery struct {
+	Issuer                string `json:"issuer"`
+	JWKSURI               string `json:"jwks_uri"`
+	AuthorizationEndpoint string `json:"authorization_endpoint"`
+	TokenEndpoint         string `json:"token_endpoint"`
+}
+
+// discoverOIDC fetches the provider's discovery document to obtain the canonical
+// issuer and JWKS URI, so token verification uses provider-advertised values
+// rather than hand-built URLs.
+func (h *VaultOIDCHandler) discoverOIDC() (*oidcDiscovery, error) {
+	base := strings.TrimSuffix(h.config.VaultSSO.ProviderURL, "/")
+	resp, err := oidcHTTPClient.Get(base + "/.well-known/openid-configuration")
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch OIDC discovery: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("OIDC discovery returned status %s", resp.Status)
+	}
+	var d oidcDiscovery
+	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+		return nil, fmt.Errorf("failed to decode OIDC discovery: %w", err)
+	}
+	if d.JWKSURI == "" {
+		return nil, fmt.Errorf("OIDC discovery missing jwks_uri")
+	}
+	return &d, nil
 }
 
 // InitiateVaultLogin starts the OIDC authorization flow with PKCE
@@ -79,12 +115,30 @@ func (h *VaultOIDCHandler) InitiateVaultLogin(c *gin.Context) {
 		return
 	}
 
-	// Store state and code_verifier in cookies (HttpOnly, Secure)
+	// Generate nonce, bound to the resulting ID token to prevent replay/injection
+	nonce, err := generateRandomString(32)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to generate nonce",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	// Store state, code_verifier, and nonce in cookies (HttpOnly, Secure, SameSite=Lax)
+	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie("vault_oauth_state", state, 600, "/", "", true, true)
 	c.SetCookie("vault_pkce_verifier", codeVerifier, 600, "/", "", true, true)
+	c.SetCookie("vault_oidc_nonce", nonce, 600, "/", "", true, true)
 
-	// Build authorization URL with PKCE
-	authURL := h.buildAuthURL(state, codeChallenge)
+	// Build authorization URL with PKCE, preferring the provider-advertised
+	// authorization_endpoint from OIDC discovery — hand-building the path only
+	// works for Vault's URL layout and breaks standard IdPs (e.g. Keycloak).
+	authEndpoint := ""
+	if disc, derr := h.discoverOIDC(); derr == nil {
+		authEndpoint = disc.AuthorizationEndpoint
+	}
+	authURL := h.buildAuthURL(authEndpoint, state, codeChallenge, nonce)
 
 	c.Redirect(http.StatusTemporaryRedirect, authURL)
 }
@@ -118,9 +172,17 @@ func (h *VaultOIDCHandler) HandleVaultCallback(c *gin.Context) {
 		return
 	}
 
+	// Get nonce from cookie (bound to the ID token below)
+	nonce, err := c.Cookie("vault_oidc_nonce")
+	if err != nil || nonce == "" {
+		h.redirectWithError(c, "missing_nonce", "Nonce not found")
+		return
+	}
+
 	// Clear cookies
 	c.SetCookie("vault_oauth_state", "", -1, "/", "", true, true)
 	c.SetCookie("vault_pkce_verifier", "", -1, "/", "", true, true)
+	c.SetCookie("vault_oidc_nonce", "", -1, "/", "", true, true)
 
 	// Get authorization code
 	code := c.Query("code")
@@ -136,8 +198,8 @@ func (h *VaultOIDCHandler) HandleVaultCallback(c *gin.Context) {
 		return
 	}
 
-	// Parse ID token to get user info
-	claims, err := h.parseIDToken(tokenResp.IDToken)
+	// Verify and parse the ID token (signature, issuer, audience, nonce)
+	claims, err := h.parseIDToken(tokenResp.IDToken, nonce)
 	if err != nil {
 		h.redirectWithError(c, "invalid_token", err.Error())
 		return
@@ -162,16 +224,13 @@ func (h *VaultOIDCHandler) HandleVaultCallback(c *gin.Context) {
 		database.DB.Preload("Policies").First(user, user.ID)
 	}
 
-	// Generate our JWT tokens
-	accessTokenDuration, _ := time.ParseDuration(h.config.Auth.AccessTokenExpiry)
-	jwtToken, err := GenerateToken(user.ID, user.Username, user.IsAdmin, h.config.Auth.JWTSecret, accessTokenDuration)
-	if err != nil {
-		h.redirectWithError(c, "token_generation_failed", err.Error())
-		return
-	}
+	services.NewAuditService().LogSuccess(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, map[string]interface{}{"provider": "vault-oidc"})
 
+	// Generate our access+refresh pair (access carries the refresh JTI so
+	// logout can revoke the sibling refresh token).
+	accessTokenDuration, _ := time.ParseDuration(h.config.Auth.AccessTokenExpiry)
 	refreshTokenDuration, _ := time.ParseDuration(h.config.Auth.RefreshTokenExpiry)
-	refreshToken, err := GenerateToken(user.ID, user.Username, user.IsAdmin, h.config.Auth.JWTSecret, refreshTokenDuration)
+	jwtToken, refreshToken, err := GenerateTokenPair(user.ID, user.Username, user.IsAdmin, user.TokenVersion, h.config.Auth.JWTSecret, accessTokenDuration, refreshTokenDuration)
 	if err != nil {
 		h.redirectWithError(c, "token_generation_failed", err.Error())
 		return
@@ -185,13 +244,17 @@ func (h *VaultOIDCHandler) HandleVaultCallback(c *gin.Context) {
 	c.Redirect(http.StatusTemporaryRedirect, redirectURL)
 }
 
-// buildAuthURL constructs the Vault OIDC authorization URL with PKCE
-func (h *VaultOIDCHandler) buildAuthURL(state, codeChallenge string) string {
-	// Convert API URL to UI URL for browser-based auth
-	// e.g., https://vault.example.com/v1/identity/oidc/provider/default
-	//    -> https://vault.example.com/ui/vault/identity/oidc/provider/default/authorize
-	providerURL := h.config.VaultSSO.ProviderURL
-	authEndpoint := strings.Replace(providerURL, "/v1/", "/ui/vault/", 1) + "/authorize"
+// buildAuthURL constructs the OIDC authorization URL with PKCE. authEndpoint
+// comes from the provider's discovery document; when discovery didn't supply
+// one, fall back to Vault's UI-URL layout for backward compatibility.
+func (h *VaultOIDCHandler) buildAuthURL(authEndpoint, state, codeChallenge, nonce string) string {
+	if authEndpoint == "" {
+		// Vault fallback: convert API URL to UI URL for browser-based auth
+		// e.g., https://vault.example.com/v1/identity/oidc/provider/default
+		//    -> https://vault.example.com/ui/vault/identity/oidc/provider/default/authorize
+		providerURL := h.config.VaultSSO.ProviderURL
+		authEndpoint = strings.Replace(providerURL, "/v1/", "/ui/vault/", 1) + "/authorize"
+	}
 
 	params := url.Values{}
 	params.Set("client_id", h.config.VaultSSO.ClientID)
@@ -199,6 +262,7 @@ func (h *VaultOIDCHandler) buildAuthURL(state, codeChallenge string) string {
 	params.Set("response_type", "code")
 	params.Set("scope", h.config.VaultSSO.Scopes)
 	params.Set("state", state)
+	params.Set("nonce", nonce)
 	// PKCE parameters
 	params.Set("code_challenge", codeChallenge)
 	params.Set("code_challenge_method", "S256")
@@ -209,7 +273,15 @@ func (h *VaultOIDCHandler) buildAuthURL(state, codeChallenge string) string {
 // exchangeCodeForToken exchanges authorization code for tokens using PKCE
 func (h *VaultOIDCHandler) exchangeCodeForToken(code, codeVerifier string) (*VaultTokenResponse, error) {
 	// Use provider URL + /token
-	tokenEndpoint := strings.TrimSuffix(h.config.VaultSSO.ProviderURL, "/") + "/token"
+	// Prefer the provider-advertised token_endpoint; the ProviderURL+"/token"
+	// form is Vault's layout and breaks standard IdPs.
+	tokenEndpoint := ""
+	if disc, derr := h.discoverOIDC(); derr == nil {
+		tokenEndpoint = disc.TokenEndpoint
+	}
+	if tokenEndpoint == "" {
+		tokenEndpoint = strings.TrimSuffix(h.config.VaultSSO.ProviderURL, "/") + "/token"
+	}
 
 	data := url.Values{}
 	data.Set("grant_type", "authorization_code")
@@ -225,7 +297,7 @@ func (h *VaultOIDCHandler) exchangeCodeForToken(code, codeVerifier string) (*Vau
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oidcHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to exchange code: %w", err)
 	}
@@ -244,17 +316,38 @@ func (h *VaultOIDCHandler) exchangeCodeForToken(code, codeVerifier string) (*Vau
 	return &tokenResp, nil
 }
 
-// parseIDToken extracts claims from the ID token
-func (h *VaultOIDCHandler) parseIDToken(idToken string) (*VaultIDTokenClaims, error) {
-	// Parse without signature validation (we trust Vault issued this via PKCE flow)
-	token, _, err := new(jwt.Parser).ParseUnverified(idToken, &VaultIDTokenClaims{})
+// parseIDToken cryptographically verifies the ID token and validates its
+// issuer, audience, expiry, and nonce before returning claims. The token drives
+// privilege assignment (claims.Policies), so it must be verified against the
+// provider's JWKS — not merely parsed — even though it arrived over a direct
+// TLS token-exchange call.
+func (h *VaultOIDCHandler) parseIDToken(idToken, expectedNonce string) (*VaultIDTokenClaims, error) {
+	disc, err := h.discoverOIDC()
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse ID token: %w", err)
+		return nil, err
 	}
 
-	claims, ok := token.Claims.(*VaultIDTokenClaims)
-	if !ok {
-		return nil, fmt.Errorf("invalid claims type")
+	opts := []jwt.ParserOption{jwt.WithExpirationRequired()}
+	if disc.Issuer != "" {
+		opts = append(opts, jwt.WithIssuer(disc.Issuer))
+	}
+	if h.config.VaultSSO.ClientID != "" {
+		opts = append(opts, jwt.WithAudience(h.config.VaultSSO.ClientID))
+	}
+
+	claims := &VaultIDTokenClaims{}
+	if err := verifyJWTWithJWKS(idToken, disc.JWKSURI, claims, opts...); err != nil {
+		return nil, fmt.Errorf("ID token verification failed: %w", err)
+	}
+
+	// Nonce binds the ID token to this browser's auth request (replay/injection
+	// protection). Require it to match the value we generated at initiation.
+	if expectedNonce == "" || claims.Nonce != expectedNonce {
+		return nil, fmt.Errorf("ID token nonce mismatch")
+	}
+
+	if claims.Subject == "" {
+		return nil, fmt.Errorf("ID token missing subject claim")
 	}
 
 	return claims, nil

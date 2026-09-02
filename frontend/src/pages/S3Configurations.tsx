@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
-import { Database, Plus, Trash2, Edit2, AlertCircle, Check, X, Server } from 'lucide-react';
+import { Plus, Trash2, Edit2, AlertCircle, X, Server } from 'lucide-react';
 import { s3ConfigApi } from '../services/api';
 import type { S3Configuration } from '../types';
 import { useAuthStore } from '../store/authStore';
+import { getErrorMessage } from '../utils/errors';
 
 export default function S3Configurations() {
   const [configs, setConfigs] = useState<S3Configuration[]>([]);
@@ -24,7 +25,7 @@ export default function S3Configurations() {
       setError('');
     } catch (err: any) {
       console.error('Failed to fetch S3 configurations:', err);
-      setError(err.response?.data?.message || 'Failed to load S3 configurations');
+      setError(getErrorMessage(err, 'Failed to load S3 configurations'));
     } finally {
       setLoading(false);
     }
@@ -37,15 +38,15 @@ export default function S3Configurations() {
       await s3ConfigApi.deleteS3Config(id);
       await fetchConfigs();
     } catch (err: any) {
-      alert(err.response?.data?.message || 'Failed to delete S3 configuration');
+      alert(getErrorMessage(err, 'Failed to delete S3 configuration'));
     }
   };
 
   if (!user?.is_admin) {
     return (
-      <div className="p-8">
-        <div className="bg-red-500/10 border border-red-500 text-red-500 px-4 py-3 rounded-lg flex items-center gap-2">
-          <AlertCircle className="w-5 h-5" />
+      <div className="page">
+        <div className="alert-error">
+          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
           Only administrators can manage S3 configurations
         </div>
       </div>
@@ -53,45 +54,39 @@ export default function S3Configurations() {
   }
 
   return (
-    <div className="p-8">
-      <div className="mb-8 flex justify-between items-center">
+    <div className="page">
+      <div className="flex items-start justify-between gap-4 mb-8">
         <div>
-          <h1 className="text-3xl font-bold text-dark-text mb-2">S3 Configurations</h1>
-          <p className="text-dark-textSecondary">Manage S3-compatible storage backend configurations</p>
+          <h1 className="page-title">S3 Configurations</h1>
+          <p className="page-subtitle">Manage S3-compatible storage backend configurations</p>
         </div>
-        <button
-          onClick={() => setShowCreateModal(true)}
-          className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
-        >
-          <Plus className="w-5 h-5" />
+        <button onClick={() => setShowCreateModal(true)} className="btn-primary">
+          <Plus className="w-4 h-4" />
           Add Configuration
         </button>
       </div>
 
       {error && (
-        <div className="mb-6 bg-red-500/10 border border-red-500 text-red-500 px-4 py-3 rounded-lg flex items-center gap-2">
-          <AlertCircle className="w-5 h-5" />
+        <div className="alert-error mb-6">
+          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
           {error}
         </div>
       )}
 
       {loading ? (
-        <div className="bg-dark-surface border border-dark-border rounded-lg p-12 text-center">
-          <Database className="w-16 h-16 text-dark-textSecondary mx-auto mb-4 opacity-50 animate-pulse" />
-          <p className="text-dark-textSecondary">Loading configurations...</p>
+        <div className="flex flex-col items-center justify-center h-64 gap-3">
+          <div className="spinner" />
+          <p className="text-sm text-dark-textSecondary">Loading configurations…</p>
         </div>
       ) : configs.length === 0 ? (
-        <div className="bg-dark-surface border border-dark-border rounded-lg p-12 text-center">
-          <Database className="w-16 h-16 text-dark-textSecondary mx-auto mb-4 opacity-50" />
-          <h2 className="text-xl font-semibold text-dark-text mb-2">No S3 Configurations</h2>
-          <p className="text-dark-textSecondary mb-4">
-            Add S3 configurations to enable buckets to use different S3-compatible storage backends
+        <div className="card empty-state">
+          <Server className="empty-state-icon" />
+          <h3 className="text-base font-semibold text-dark-text mb-1">No S3 configurations</h3>
+          <p className="text-sm text-dark-textSecondary mb-5 max-w-sm">
+            Add S3 configurations to enable buckets to use different S3-compatible storage backends.
           </p>
-          <button
-            onClick={() => setShowCreateModal(true)}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
-          >
-            <Plus className="w-5 h-5" />
+          <button onClick={() => setShowCreateModal(true)} className="btn-secondary">
+            <Plus className="w-4 h-4" />
             Add First Configuration
           </button>
         </div>
@@ -100,75 +95,63 @@ export default function S3Configurations() {
           {configs.map((config) => (
             <div
               key={config.id}
-              className="bg-dark-surface border border-dark-border rounded-lg p-6 hover:border-blue-500/50 transition-colors"
+              className="card p-6 hover:border-dark-borderStrong transition-colors"
             >
-              <div className="flex items-start justify-between">
-                <div className="flex-1">
-                  <div className="flex items-center gap-3 mb-2">
-                    <Server className="w-5 h-5 text-blue-500" />
-                    <h3 className="text-lg font-semibold text-dark-text">{config.name}</h3>
-                    {config.is_default && (
-                      <span className="text-xs bg-green-500/10 text-green-500 px-2 py-1 rounded">
-                        Default
-                      </span>
-                    )}
+              <div className="flex items-start justify-between gap-4">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-3 mb-4">
+                    <span className="bg-blue-500/10 text-blue-500 p-2 rounded-lg">
+                      <Server className="w-4 h-4" />
+                    </span>
+                    <h3 className="text-base font-semibold text-dark-text truncate">{config.name}</h3>
+                    {config.is_default && <span className="badge-blue">Default</span>}
+                    {config.use_ssl && <span className="badge-gray">SSL</span>}
+                    {config.force_path_style && <span className="badge-gray">Path style</span>}
                   </div>
-                  <div className="grid grid-cols-2 gap-4 text-sm">
+                  <div className="grid grid-cols-2 gap-x-6 gap-y-3">
                     <div>
-                      <span className="text-dark-textSecondary">Endpoint: </span>
-                      <span className="text-dark-text">{config.endpoint}</span>
+                      <p className="text-xs text-dark-textMuted uppercase tracking-wider mb-0.5">Endpoint</p>
+                      <p className="font-mono text-sm text-dark-text truncate">{config.endpoint}</p>
                     </div>
                     <div>
-                      <span className="text-dark-textSecondary">Region: </span>
-                      <span className="text-dark-text">{config.region}</span>
+                      <p className="text-xs text-dark-textMuted uppercase tracking-wider mb-0.5">Region</p>
+                      <p className="font-mono text-sm text-dark-text">{config.region}</p>
                     </div>
                     <div>
-                      <span className="text-dark-textSecondary">Access Key: </span>
-                      <span className="text-dark-text font-mono text-xs">
+                      <p className="text-xs text-dark-textMuted uppercase tracking-wider mb-0.5">Access Key</p>
+                      <p className="font-mono text-sm text-dark-text">
                         {config.access_key_id.length > 8
                           ? `${config.access_key_id.slice(0, 4)}****${config.access_key_id.slice(-4)}`
                           : '****'}
-                      </span>
+                      </p>
                     </div>
                     <div>
-                      <span className="text-dark-textSecondary">Bucket Prefix: </span>
-                      <span className="text-dark-text">{config.bucket_prefix || 'None'}</span>
-                    </div>
-                    <div>
-                      <span className="text-dark-textSecondary">SSL: </span>
-                      {config.use_ssl ? (
-                        <Check className="w-4 h-4 inline text-green-500" />
+                      <p className="text-xs text-dark-textMuted uppercase tracking-wider mb-0.5">Bucket Prefix</p>
+                      {config.bucket_prefix ? (
+                        <p className="font-mono text-sm text-dark-text truncate">{config.bucket_prefix}</p>
                       ) : (
-                        <X className="w-4 h-4 inline text-red-500" />
-                      )}
-                    </div>
-                    <div>
-                      <span className="text-dark-textSecondary">Path Style: </span>
-                      {config.force_path_style ? (
-                        <Check className="w-4 h-4 inline text-green-500" />
-                      ) : (
-                        <X className="w-4 h-4 inline text-red-500" />
+                        <p className="text-sm text-dark-textMuted">None</p>
                       )}
                     </div>
                   </div>
-                  <div className="mt-4 text-xs text-dark-textSecondary">
+                  <p className="mt-4 text-xs text-dark-textMuted tabular-nums">
                     Created: {new Date(config.created_at).toLocaleString()}
-                  </div>
+                  </p>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1 shrink-0">
                   <button
                     onClick={() => setEditingConfig(config)}
-                    className="p-2 hover:bg-dark-bg rounded-lg transition-colors text-dark-textSecondary hover:text-blue-500"
+                    className="btn-icon"
                     title="Edit configuration"
                   >
-                    <Edit2 className="w-5 h-5" />
+                    <Edit2 className="w-4 h-4" />
                   </button>
                   <button
                     onClick={() => handleDeleteConfig(config.id)}
-                    className="p-2 hover:bg-dark-bg rounded-lg transition-colors text-dark-textSecondary hover:text-red-500"
+                    className="btn-icon hover:!text-red-400 hover:!bg-red-500/10"
                     title="Delete configuration"
                   >
-                    <Trash2 className="w-5 h-5" />
+                    <Trash2 className="w-4 h-4" />
                   </button>
                 </div>
               </div>
@@ -242,88 +225,83 @@ function S3ConfigModal({ config, onClose, onSuccess }: S3ConfigModalProps) {
       }
       onSuccess();
     } catch (err: any) {
-      setError(err.response?.data?.message || `Failed to ${config ? 'update' : 'create'} configuration`);
+      setError(getErrorMessage(err, `Failed to ${config ? 'update' : 'create'} configuration`));
     } finally {
       setSubmitting(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-      <div className="bg-dark-surface border border-dark-border rounded-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto">
-        <div className="p-6 border-b border-dark-border">
-          <h2 className="text-2xl font-bold text-dark-text">
+    <div className="modal-overlay">
+      <div className="modal-panel !max-w-2xl">
+        <div className="flex items-center justify-between mb-5">
+          <h2 className="modal-title">
             {config ? 'Edit S3 Configuration' : 'Add S3 Configuration'}
           </h2>
+          <button type="button" onClick={onClose} className="btn-icon">
+            <X className="w-4 h-4" />
+          </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+        <form onSubmit={handleSubmit} className="space-y-4">
           {error && (
-            <div className="bg-red-500/10 border border-red-500 text-red-500 px-4 py-3 rounded-lg flex items-center gap-2">
-              <AlertCircle className="w-5 h-5" />
+            <div className="alert-error">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
               {error}
             </div>
           )}
 
           <div>
-            <label className="block text-sm font-medium text-dark-text mb-2">
-              Configuration Name *
-            </label>
+            <label className="label">Configuration Name *</label>
             <input
               type="text"
               required
               value={formData.name}
               onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-              className="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="input"
               placeholder="e.g., AWS S3 Production, MinIO Development"
             />
           </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-dark-text mb-2">
-                Endpoint *
-              </label>
+              <label className="label">Endpoint *</label>
               <input
                 type="text"
                 required
                 value={formData.endpoint}
                 onChange={(e) => setFormData({ ...formData, endpoint: e.target.value })}
-                className="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="input font-mono"
                 placeholder="s3.amazonaws.com"
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-dark-text mb-2">
-                Region *
-              </label>
+              <label className="label">Region *</label>
               <input
                 type="text"
                 required
                 value={formData.region}
                 onChange={(e) => setFormData({ ...formData, region: e.target.value })}
-                className="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="input font-mono"
                 placeholder="us-east-1"
               />
             </div>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-dark-text mb-2">
-              Access Key ID *
-            </label>
+            <label className="label">Access Key ID *</label>
             <input
               type="text"
               required
               value={formData.access_key_id}
               onChange={(e) => setFormData({ ...formData, access_key_id: e.target.value })}
-              className="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+              className="input font-mono"
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-dark-text mb-2">
+            <label className="label">
               Secret Access Key {config && '(leave blank to keep current)'}
             </label>
             <input
@@ -331,19 +309,17 @@ function S3ConfigModal({ config, onClose, onSuccess }: S3ConfigModalProps) {
               required={!config}
               value={formData.secret_access_key}
               onChange={(e) => setFormData({ ...formData, secret_access_key: e.target.value })}
-              className="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+              className="input font-mono"
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-dark-text mb-2">
-              Bucket Prefix (optional)
-            </label>
+            <label className="label">Bucket Prefix (optional)</label>
             <input
               type="text"
               value={formData.bucket_prefix}
               onChange={(e) => setFormData({ ...formData, bucket_prefix: e.target.value })}
-              className="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-dark-text focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="input font-mono"
               placeholder="objectstore-"
             />
           </div>
@@ -354,7 +330,7 @@ function S3ConfigModal({ config, onClose, onSuccess }: S3ConfigModalProps) {
                 type="checkbox"
                 checked={formData.use_ssl}
                 onChange={(e) => setFormData({ ...formData, use_ssl: e.target.checked })}
-                className="w-4 h-4 rounded border-dark-border bg-dark-bg text-blue-600 focus:ring-2 focus:ring-blue-500"
+                className="w-4 h-4 rounded border-dark-border bg-dark-inset text-blue-600 focus:ring-2 focus:ring-blue-500"
               />
               <span className="text-sm text-dark-text">Use SSL/TLS</span>
             </label>
@@ -364,7 +340,7 @@ function S3ConfigModal({ config, onClose, onSuccess }: S3ConfigModalProps) {
                 type="checkbox"
                 checked={formData.force_path_style}
                 onChange={(e) => setFormData({ ...formData, force_path_style: e.target.checked })}
-                className="w-4 h-4 rounded border-dark-border bg-dark-bg text-blue-600 focus:ring-2 focus:ring-blue-500"
+                className="w-4 h-4 rounded border-dark-border bg-dark-inset text-blue-600 focus:ring-2 focus:ring-blue-500"
               />
               <span className="text-sm text-dark-text">Force Path Style</span>
             </label>
@@ -375,25 +351,18 @@ function S3ConfigModal({ config, onClose, onSuccess }: S3ConfigModalProps) {
               type="checkbox"
               checked={formData.is_default}
               onChange={(e) => setFormData({ ...formData, is_default: e.target.checked })}
-              className="w-4 h-4 rounded border-dark-border bg-dark-bg text-blue-600 focus:ring-2 focus:ring-blue-500"
+              className="w-4 h-4 rounded border-dark-border bg-dark-inset text-blue-600 focus:ring-2 focus:ring-blue-500"
             />
             <span className="text-sm text-dark-text">Set as default configuration</span>
           </label>
 
-          <div className="flex gap-3 pt-4">
-            <button
-              type="submit"
-              disabled={submitting}
-              className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-600/50 text-white rounded-lg transition-colors"
-            >
-              {submitting ? 'Saving...' : config ? 'Update Configuration' : 'Create Configuration'}
-            </button>
-            <button
-              type="button"
-              onClick={onClose}
-              className="flex-1 px-4 py-2 bg-dark-bg hover:bg-dark-border text-dark-text rounded-lg transition-colors"
-            >
+          <div className="flex justify-end gap-2 pt-4">
+            <button type="button" onClick={onClose} className="btn-ghost">
               Cancel
+            </button>
+            <button type="submit" disabled={submitting} className="btn-primary">
+              {submitting && <span className="spinner !w-4 !h-4" />}
+              {submitting ? 'Saving...' : config ? 'Update Configuration' : 'Create Configuration'}
             </button>
           </div>
         </form>

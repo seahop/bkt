@@ -4,20 +4,28 @@ This guide covers configuring SSO authentication with automatic policy assignmen
 
 ## Overview
 
-The system supports two SSO providers:
+The system supports two SSO integrations:
 
 | Provider | Protocol | Policy Support | Use Case |
 |----------|----------|----------------|----------|
-| **HashiCorp Vault** | JWT/OIDC | Full (via claims) | Enterprise environments with Vault |
+| **Generic OIDC** (Vault, Keycloak, any standard IdP) | OIDC + PKCE | Full (via `policies` claim) | Any OpenID Connect identity provider |
+| **HashiCorp Vault** (legacy) | JWT | Full (via claims) | Direct JWT login against Vault's JWT auth |
 | **Google OAuth** | OAuth 2.0 | Full (via Workspace groups) | Google Workspace environments |
 | **Google OAuth** | OAuth 2.0 | Manual only | Personal Gmail accounts |
+
+The browser-based OIDC flow is **generic**: the authorization, token, and JWKS
+endpoints are all taken from the provider's discovery document
+(`<provider>/.well-known/openid-configuration`), so **any standard OIDC IdP
+works** through the `VAULT_OIDC_*` variables (the `VAULT_` prefix is historical).
+It has been validated against HashiCorp Vault and **Keycloak 26**.
 
 ### Key Features
 
 - **Automatic User Provisioning**: Users are created on first SSO login
-- **Policy Sync from JWT Claims**: Vault JWT can include policy names that auto-assign on login
+- **Policy Sync from Token Claims**: the ID token can include a `policies` claim (JSON array of policy names) that auto-assigns on login
 - **SSO as Source of Truth**: Policies sync on every login (changes in SSO propagate immediately)
 - **Hybrid Support**: SSO users and local users can coexist
+- **Audited**: every SSO login is recorded in the audit log with provider metadata
 
 ---
 
@@ -65,6 +73,48 @@ Users can have multiple policies. When evaluating access:
 - Combined: read + write access
 
 ---
+
+## Generic OIDC Configuration (any IdP)
+
+Browser-based SSO with PKCE works with any standard OIDC provider. Configure it
+with the `VAULT_OIDC_*` variables — endpoints are discovered automatically from
+the provider URL:
+
+```bash
+VAULT_OIDC_ENABLED=true
+VAULT_OIDC_CLIENT_ID=<your client id>
+VAULT_OIDC_PROVIDER_URL=<issuer URL — must serve /.well-known/openid-configuration>
+VAULT_OIDC_REDIRECT_URL=https://<console-host>/api/auth/vault/callback
+VAULT_OIDC_SCOPES=openid profile
+FRONTEND_URL=https://<console-host>
+```
+
+For a Vault-specific walkthrough (provider, client, scopes, group-based policy
+sync), see the [Vault OIDC Setup Guide](../deployment/vault-oidc-setup.md).
+
+### Example: Keycloak
+
+Validated against Keycloak 26.
+
+1. In your realm, create a client:
+   - **Client type**: OpenID Connect, **public** client (no client secret —
+     bkt uses PKCE with the S256 challenge)
+   - **Valid redirect URI**: `https://<console-host>/api/auth/vault/callback`
+2. Configure bkt with the **realm URL** as the provider URL:
+
+```bash
+VAULT_OIDC_ENABLED=true
+VAULT_OIDC_CLIENT_ID=bkt
+VAULT_OIDC_PROVIDER_URL=https://kc.example.com/realms/myrealm
+VAULT_OIDC_REDIRECT_URL=https://bkt.example.com/api/auth/vault/callback
+VAULT_OIDC_SCOPES=openid profile
+FRONTEND_URL=https://bkt.example.com
+```
+
+3. **Optional — policy sync**: add a mapper (e.g. on a client scope or group
+   membership) that emits a `policies` claim as a **JSON array** of bkt policy
+   names in the ID token. On each login the user's policies are synced to that
+   list (names must match bkt policies exactly).
 
 ## Vault JWT Configuration
 
@@ -581,17 +631,19 @@ Result:
 
 ### JWT Validation
 
-The system validates Vault JWTs for:
+The system validates SSO tokens for:
+- **Cryptographic signature** — verified against the provider's JWKS (fetched
+  from the discovery document for OIDC, or from Vault's JWT auth mount for
+  legacy JWT login; key rotation is picked up automatically)
 - Expiration (`exp` claim)
 - Not-before time (`nbf` claim)
 - Audience (`aud` claim, if configured)
 
-> **Note**: Full cryptographic signature validation requires JWKS configuration (see Vault setup).
-
 ### Token Security
 
 - Access tokens expire in 15 minutes
-- Refresh tokens expire in 7 days
+- Refresh tokens expire in 7 days and are **rotated on every refresh**; reusing
+  a rotated refresh token revokes all of that user's sessions (reuse detection)
 - Tokens are signed with HS256
 
 ### SSO Provider Security

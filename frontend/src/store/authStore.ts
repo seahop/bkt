@@ -26,9 +26,10 @@ export const useAuthStore = create<AuthState>()(
 
       setAuth: (data: AuthResponse) => {
         localStorage.setItem('token', data.token)
-        if (data.refresh_token) {
-          localStorage.setItem('refresh_token', data.refresh_token)
-        }
+        // Note: we intentionally do NOT persist a refresh token. The refresh
+        // endpoint has no callers, so storing it only left an unused secret in
+        // localStorage. Any stray refresh_token (e.g. written by SSO callbacks)
+        // is still cleared on logout below.
         // Mark fresh authentication in sessionStorage (more reliable than zustand state for timing)
         sessionStorage.setItem('auth_timestamp', Date.now().toString())
         set({ user: data.user, token: data.token, isAuthenticated: true, lastAuthTime: Date.now() })

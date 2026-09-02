@@ -1,8 +1,11 @@
 package api
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+
 	"bkt/internal/config"
 	"bkt/internal/database"
 	"bkt/internal/models"
@@ -41,6 +44,35 @@ func (h *AccessKeyHandler) GenerateAccessKey(c *gin.Context) {
 			Error: "Unauthorized",
 		})
 		return
+	}
+
+	// Optional scoping: a human-readable name, an expiry, and a read-only flag.
+	var req struct {
+		Name         string `json:"name"`
+		ReadOnly     bool   `json:"read_only"`
+		ExpiresInDays int   `json:"expires_in_days"`
+	}
+	// The body is optional (no body → unscoped key), but a body that is present
+	// and malformed must be rejected — silently ignoring it would issue a
+	// full-access, never-expiring key to a caller who asked for a scoped one.
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Invalid request body",
+			Message: err.Error(),
+		})
+		return
+	}
+	if req.ExpiresInDays < 0 {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error: "expires_in_days must be positive",
+		})
+		return
+	}
+
+	var expiresAt *time.Time
+	if req.ExpiresInDays > 0 {
+		t := time.Now().AddDate(0, 0, req.ExpiresInDays)
+		expiresAt = &t
 	}
 
 	// Generate cryptographically secure access key and secret key BEFORE transaction
@@ -89,7 +121,7 @@ func (h *AccessKeyHandler) GenerateAccessKey(c *gin.Context) {
 		// Count active access keys with row lock to prevent concurrent modifications
 		var count int64
 		if err := tx.Model(&models.AccessKey{}).
-			Where("user_id = ? AND is_active = ?", userID, true).
+			Where("user_id = ? AND is_active = ? AND temporary = ?", userID, true, false).
 			Count(&count).Error; err != nil {
 			return err
 		}
@@ -105,7 +137,10 @@ func (h *AccessKeyHandler) GenerateAccessKey(c *gin.Context) {
 			AccessKey:          accessKey,
 			SecretKeyHash:      secretKeyHash,
 			SecretKeyEncrypted: secretKeyEncrypted,
+			Name:               req.Name,
 			IsActive:           true,
+			ReadOnly:           req.ReadOnly,
+			ExpiresAt:          expiresAt,
 		}
 
 		return tx.Create(&newAccessKey).Error
@@ -133,11 +168,14 @@ func (h *AccessKeyHandler) GenerateAccessKey(c *gin.Context) {
 	c.Header("Expires", "0")
 
 	c.JSON(http.StatusCreated, gin.H{
-		"message":     "Access key created successfully",
-		"access_key":  accessKey,
-		"secret_key":  secretKey, // ONLY TIME this is ever returned
-		"created_at":  newAccessKey.CreatedAt,
-		"warning":     "Save your secret key now. It will not be shown again!",
+		"message":    "Access key created successfully",
+		"access_key": accessKey,
+		"secret_key": secretKey, // ONLY TIME this is ever returned
+		"name":       newAccessKey.Name,
+		"read_only":  newAccessKey.ReadOnly,
+		"expires_at": newAccessKey.ExpiresAt,
+		"created_at": newAccessKey.CreatedAt,
+		"warning":    "Save your secret key now. It will not be shown again!",
 	})
 }
 
@@ -161,8 +199,11 @@ func (h *AccessKeyHandler) ListAccessKeys(c *gin.Context) {
 		return
 	}
 
+	// Only active keys: revoked keys are soft-deleted for the audit trail, but
+	// surfacing them forever in the user's own list just accumulates clutter
+	// (admins still see the full history via /api/users/:id/access-keys).
 	accessKeys := make([]models.AccessKey, 0)
-	if err := database.DB.Where("user_id = ?", userID).Order("created_at DESC").Find(&accessKeys).Error; err != nil {
+	if err := database.DB.Where("user_id = ? AND is_active = ? AND temporary = ?", userID, true, false).Order("created_at DESC").Find(&accessKeys).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to list access keys",
 			Message: err.Error(),

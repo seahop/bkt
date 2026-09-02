@@ -18,6 +18,11 @@ go.work
 # Node
 node_modules/
 dist/
+# ... except the embedded-UI placeholder, which must be committed so the
+# backend's //go:embed compiles on a fresh clone (real builds overwrite it).
+!backend/internal/web/dist/
+backend/internal/web/dist/*
+!backend/internal/web/dist/index.html
 .pnpm-store/
 *.log
 npm-debug.log*

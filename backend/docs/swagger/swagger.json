@@ -192,6 +192,91 @@
                 }
             }
         },
+        "/api/audit": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Admin-only. Returns audit log entries, filterable by user, action, resource type, status, and time range.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "audit"
+                ],
+                "summary": "List audit logs",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Filter by user ID",
+                        "name": "user_id",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by action",
+                        "name": "action",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by resource type",
+                        "name": "resource_type",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by status (success/failure/denied)",
+                        "name": "status",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Start time (RFC3339)",
+                        "name": "start",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "End time (RFC3339)",
+                        "name": "end",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Max results (default 100, max 500)",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Offset for pagination",
+                        "name": "offset",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/auth/login": {
             "post": {
                 "description": "Authenticates a user with username and password and returns JWT access and refresh tokens.",
@@ -674,6 +759,130 @@
                 }
             }
         },
+        "/api/buckets/{name}/lifecycle": {
+            "put": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Configures age-based expiry for a bucket (single rule): current objects after expire_days, noncurrent versions after noncurrent_expire_days. Both zero clears the configuration. Bucket owner or admin only.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "buckets"
+                ],
+                "summary": "Set bucket lifecycle",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Bucket name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.SuccessResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/buckets/{name}/object-versions": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Lists the current version, archived versions, and delete markers for one object key, newest first.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "buckets"
+                ],
+                "summary": "List an object's versions",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Bucket name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Object key",
+                        "name": "key",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Permanently removes one version or delete marker. Removing the current version or a latest delete marker promotes the next-newest surviving version.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "buckets"
+                ],
+                "summary": "Permanently delete an object version",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Bucket name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Object key",
+                        "name": "key",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Version ID",
+                        "name": "version_id",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.SuccessResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/buckets/{name}/objects": {
             "get": {
                 "security": [
@@ -896,6 +1105,76 @@
                 }
             }
         },
+        "/api/buckets/{name}/objects/presign": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Generates a time-limited presigned GET URL for an object, signed with one of the caller's active access keys. Requires GetObject permission and at least one active access key.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "buckets"
+                ],
+                "summary": "Generate a presigned download URL",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Bucket name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Object key and expiry",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.presignRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "url and expires_at",
+                        "schema": {
+                            "type": "object"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/buckets/{name}/objects/rename": {
             "post": {
                 "security": [
@@ -967,6 +1246,43 @@
                         "description": "Internal Server Error",
                         "schema": {
                             "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/buckets/{name}/objects/restore": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Copies an archived version forward as the new current version. The previous current version is archived. History is preserved.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "buckets"
+                ],
+                "summary": "Restore an object version",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Bucket name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.SuccessResponse"
                         }
                     }
                 }
@@ -1245,6 +1561,258 @@
                         "description": "Internal Server Error",
                         "schema": {
                             "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/buckets/{name}/settings": {
+            "put": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Updates quota, WORM retention, webhook notification, and replication settings. Only fields present in the body are changed. Bucket owner or admin only.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "buckets"
+                ],
+                "summary": "Update bucket settings",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Bucket name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.SuccessResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/buckets/{name}/versioning": {
+            "put": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Enables or suspends versioning on a bucket. Bucket owner or admin only.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "buckets"
+                ],
+                "summary": "Set bucket versioning",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Bucket name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.SuccessResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/groups": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "groups"
+                ],
+                "summary": "List groups",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/models.Group"
+                            }
+                        }
+                    }
+                }
+            },
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "groups"
+                ],
+                "summary": "Create a group",
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/models.Group"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/groups/{id}": {
+            "delete": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "groups"
+                ],
+                "summary": "Delete a group",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.SuccessResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/groups/{id}/members": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "groups"
+                ],
+                "summary": "Add a user to a group",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.SuccessResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/groups/{id}/members/{user_id}": {
+            "delete": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "groups"
+                ],
+                "summary": "Remove a user from a group",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.SuccessResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/groups/{id}/policies": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "groups"
+                ],
+                "summary": "Attach a policy to a group",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.SuccessResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/groups/{id}/policies/{policy_id}": {
+            "delete": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "groups"
+                ],
+                "summary": "Detach a policy from a group",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.SuccessResponse"
                         }
                     }
                 }
@@ -1966,6 +2534,34 @@
                 }
             }
         },
+        "/api/sts/credentials": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Mints a short-lived S3 access key pair for the caller (default 1h, max 12h). Temporary keys don't count against the per-user key limit and are removed automatically after expiry. The secret is shown only once.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "sts"
+                ],
+                "summary": "Issue temporary S3 credentials",
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "type": "object"
+                        }
+                    }
+                }
+            }
+        },
         "/api/users": {
             "get": {
                 "security": [
@@ -2485,6 +3081,21 @@
                 }
             }
         },
+        "api.presignRequest": {
+            "type": "object",
+            "required": [
+                "key"
+            ],
+            "properties": {
+                "expires_in": {
+                    "description": "seconds; default 900, capped at 604800",
+                    "type": "integer"
+                },
+                "key": {
+                    "type": "string"
+                }
+            }
+        },
         "models.AccessKey": {
             "type": "object",
             "properties": {
@@ -2492,6 +3103,10 @@
                     "type": "string"
                 },
                 "created_at": {
+                    "type": "string"
+                },
+                "expires_at": {
+                    "description": "nil = never expires",
                     "type": "string"
                 },
                 "id": {
@@ -2502,6 +3117,18 @@
                 },
                 "last_used_at": {
                     "type": "string"
+                },
+                "name": {
+                    "description": "Human label to tell keys apart",
+                    "type": "string"
+                },
+                "read_only": {
+                    "description": "Deny mutating S3 operations",
+                    "type": "boolean"
+                },
+                "temporary": {
+                    "description": "bkt-STS short-lived credential: excluded from the key limit, hard-deleted after expiry",
+                    "type": "boolean"
                 },
                 "user": {
                     "description": "Relationships",
@@ -2542,6 +3169,10 @@
                 "is_public": {
                     "type": "boolean"
                 },
+                "lifecycle": {
+                    "description": "Lifecycle holds the bucket's lifecycle configuration as JSON (see\nLifecycleConfig); nil = no lifecycle rules.",
+                    "type": "string"
+                },
                 "name": {
                     "type": "string"
                 },
@@ -2562,8 +3193,20 @@
                 "owner_id": {
                     "type": "string"
                 },
+                "quota_bytes": {
+                    "description": "QuotaBytes caps the total size of CURRENT objects in the bucket\n(version storage is not counted). 0 = unlimited.",
+                    "type": "integer"
+                },
                 "region": {
                     "type": "string"
+                },
+                "replicate_to": {
+                    "description": "ReplicateTo mirrors this bucket's current objects into another bkt\nbucket (periodic sync; the target is fully managed by replication).",
+                    "type": "string"
+                },
+                "retention_days": {
+                    "description": "RetentionDays (WORM-lite): while set, no version of any object can be\npermanently removed until it is older than this many days. Requires\nversioning to be enabled. Plain deletes still create markers (data is\npreserved); version-addressed deletes, lifecycle purges, and bucket\ndeletion are refused for retained data. 0 = off.",
+                    "type": "integer"
                 },
                 "s3_config": {
                     "$ref": "#/definitions/models.S3Configuration"
@@ -2577,6 +3220,17 @@
                     "type": "string"
                 },
                 "updated_at": {
+                    "type": "string"
+                },
+                "versioning": {
+                    "description": "Versioning state: \"\" (never enabled), \"enabled\", or \"suspended\".\nSuspended keeps existing versions browsable but stops creating new ones\n(a documented simplification of AWS's null-version semantics).",
+                    "type": "string"
+                },
+                "webhook_events": {
+                    "type": "string"
+                },
+                "webhook_url": {
+                    "description": "Webhook event notifications: POSTed as JSON to WebhookURL for the event\ntypes in WebhookEvents (csv of \"created\",\"removed\"). Empty URL = off.",
                     "type": "string"
                 }
             }
@@ -2678,6 +3332,38 @@
                 }
             }
         },
+        "models.Group": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "description": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "policies": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/models.Policy"
+                    }
+                },
+                "updated_at": {
+                    "type": "string"
+                },
+                "users": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/models.User"
+                    }
+                }
+            }
+        },
         "models.LoginRequest": {
             "type": "object",
             "required": [
@@ -2724,7 +3410,7 @@
                     "type": "string"
                 },
                 "metadata": {
-                    "description": "JSON metadata (nullable)",
+                    "description": "x-amz-meta-* user metadata (JSON map, nullable)",
                     "type": "string"
                 },
                 "sha256": {
@@ -2734,7 +3420,15 @@
                 "size": {
                     "type": "integer"
                 },
+                "tags": {
+                    "description": "S3 object tags (JSON map, nullable)",
+                    "type": "string"
+                },
                 "updated_at": {
+                    "type": "string"
+                },
+                "version_id": {
+                    "description": "VersionID of the CURRENT version (\"\" = written while unversioned, the\nS3 \"null\" version). Non-current versions live in object_versions.",
                     "type": "string"
                 }
             }

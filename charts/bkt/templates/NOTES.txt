@@ -39,4 +39,17 @@ S3 Compatibility:
   aws configure --profile bkt
   aws s3 ls --endpoint-url https://<s3-host>:9000 --profile bkt
 
+{{- if and (eq (.Values.backend.env.STORAGE_BACKEND | default "local") "local") }}
+
+Storage note: STORAGE_BACKEND=local keeps object bytes on the backend PVC —
+keep replicaCount at 1 (or use an RWX storage class). For stateless scale-out,
+switch to STORAGE_BACKEND=s3.
+{{- end }}
+{{- if and .Values.ingress.enabled (not .Values.ingress.s3.enabled) }}
+
+S3 API note: only the console is behind the ingress. Enable ingress.s3 (own
+hostname) or expose the s3 service port via LoadBalancer for aws-cli/SDK
+access, and set backend.env.S3_PUBLIC_ENDPOINT so presigned URLs work.
+{{- end }}
+
 Documentation: https://bkt.tips

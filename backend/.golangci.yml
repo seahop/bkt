@@ -1,0 +1,23 @@
+# golangci-lint configuration (v2 schema).
+#
+# Conservative on purpose: the "standard" linter set (errcheck, govet,
+# ineffassign, staticcheck, unused) plus gosec for security findings.
+# Test files relax a couple of noisy checks so the lint job stays useful
+# rather than red on every run.
+version: "2"
+
+linters:
+  # standard = errcheck, govet, ineffassign, staticcheck, unused
+  default: standard
+  enable:
+    - gosec
+  exclusions:
+    generated: lax
+    rules:
+      # Generated Swagger docs and embedded assets aren't ours to lint.
+      - path: (docs/|internal/web/dist/)
+      # Tests routinely ignore errors and use weak randomness/hardcoded creds.
+      - path: _test\.go
+        linters:
+          - gosec
+          - errcheck

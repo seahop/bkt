@@ -3,7 +3,8 @@
 @tailwind utilities;
 
 :root {
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
   line-height: 1.5;
   font-weight: 400;
 
@@ -24,6 +25,10 @@ body {
   min-height: 100vh;
 }
 
+::selection {
+  background: rgba(59, 130, 246, 0.35);
+}
+
 /* Custom scrollbar for dark theme */
 ::-webkit-scrollbar {
   width: 10px;
@@ -31,14 +36,166 @@ body {
 }
 
 ::-webkit-scrollbar-track {
-  background: #1a1a1a;
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #333333;
+  background: #2a303b;
   border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #404040;
+  background: #3a4250;
+  background-clip: content-box;
+}
+
+@layer base {
+  /* Consistent keyboard-focus treatment everywhere. */
+  *:focus-visible {
+    @apply outline-none ring-2 ring-blue-500/60 ring-offset-1 ring-offset-dark-bg;
+  }
+}
+
+@layer components {
+  /* ── Buttons ──────────────────────────────────────────────────────────── */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2
+      text-sm font-medium transition-colors duration-150
+      disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none
+      select-none whitespace-nowrap;
+  }
+  .btn-primary {
+    @apply btn bg-blue-600 text-white hover:bg-blue-500 active:bg-blue-700;
+  }
+  .btn-secondary {
+    @apply btn bg-dark-surfaceHover text-dark-text border border-dark-border
+      hover:bg-dark-surfaceActive hover:border-dark-borderStrong;
+  }
+  .btn-ghost {
+    @apply btn text-dark-textSecondary hover:text-dark-text hover:bg-dark-surfaceHover;
+  }
+  .btn-danger {
+    @apply btn bg-red-600/90 text-white hover:bg-red-500 active:bg-red-700;
+  }
+  .btn-danger-ghost {
+    @apply btn text-red-400 hover:text-red-300 hover:bg-red-500/10;
+  }
+  .btn-sm {
+    @apply px-3 py-1.5 text-xs rounded-md;
+  }
+  /* Square icon-only action button (row actions, toolbars). */
+  .btn-icon {
+    @apply inline-flex items-center justify-center w-8 h-8 rounded-md
+      text-dark-textSecondary hover:text-dark-text hover:bg-dark-surfaceHover
+      transition-colors duration-150 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  /* ── Form controls ────────────────────────────────────────────────────── */
+  .input {
+    @apply w-full px-3.5 py-2.5 bg-dark-inset border border-dark-border rounded-lg
+      text-sm text-dark-text placeholder-dark-textMuted
+      transition-colors duration-150
+      hover:border-dark-borderStrong
+      focus:outline-none focus:ring-2 focus:ring-blue-500/60 focus:border-blue-500/50;
+  }
+  .label {
+    @apply block text-sm font-medium text-dark-text mb-1.5;
+  }
+  .help-text {
+    @apply text-xs text-dark-textSecondary mt-1.5;
+  }
+
+  /* ── Cards & page scaffolding ─────────────────────────────────────────── */
+  .card {
+    @apply bg-dark-surface border border-dark-border rounded-xl shadow-card;
+  }
+  .page {
+    @apply p-8 max-w-7xl mx-auto w-full;
+  }
+  .page-title {
+    @apply text-2xl font-semibold text-dark-text tracking-tight;
+  }
+  .page-subtitle {
+    @apply text-sm text-dark-textSecondary mt-1;
+  }
+
+  /* ── Alerts ───────────────────────────────────────────────────────────── */
+  .alert {
+    @apply px-4 py-3 rounded-lg text-sm border flex items-start gap-2.5;
+  }
+  .alert-error {
+    @apply alert bg-red-500/10 border-red-500/40 text-red-400;
+  }
+  .alert-success {
+    @apply alert bg-green-500/10 border-green-500/40 text-green-400;
+  }
+  .alert-info {
+    @apply alert bg-blue-500/10 border-blue-500/40 text-blue-400;
+  }
+  .alert-warning {
+    @apply alert bg-yellow-500/10 border-yellow-500/40 text-yellow-400;
+  }
+
+  /* ── Badges ───────────────────────────────────────────────────────────── */
+  .badge {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium;
+  }
+  .badge-blue   { @apply badge bg-blue-500/10 text-blue-400; }
+  .badge-green  { @apply badge bg-green-500/10 text-green-400; }
+  .badge-red    { @apply badge bg-red-500/10 text-red-400; }
+  .badge-yellow { @apply badge bg-yellow-500/10 text-yellow-400; }
+  .badge-purple { @apply badge bg-purple-500/10 text-purple-400; }
+  .badge-gray   { @apply badge bg-white/5 text-dark-textSecondary; }
+
+  /* ── Modals ───────────────────────────────────────────────────────────── */
+  .modal-overlay {
+    @apply fixed inset-0 bg-black/60 backdrop-blur-[2px] flex items-center
+      justify-center z-50 p-4 animate-fade-in;
+  }
+  .modal-panel {
+    @apply card shadow-elevated w-full max-w-md p-6 animate-scale-in
+      max-h-[85vh] overflow-y-auto;
+  }
+  .modal-title {
+    @apply text-lg font-semibold text-dark-text;
+  }
+
+  /* ── Tables ───────────────────────────────────────────────────────────── */
+  .table-wrap {
+    @apply card overflow-hidden;
+  }
+  .table {
+    @apply w-full text-sm;
+  }
+  .table thead th {
+    @apply text-left text-xs font-medium uppercase tracking-wider
+      text-dark-textSecondary px-4 py-3 border-b border-dark-border
+      bg-dark-inset/50;
+  }
+  .table tbody td {
+    @apply px-4 py-3 border-b border-dark-border/60 text-dark-text;
+  }
+  .table tbody tr:last-child td {
+    @apply border-b-0;
+  }
+  .table tbody tr {
+    @apply transition-colors duration-100 hover:bg-dark-surfaceHover/60;
+  }
+
+  /* ── States ───────────────────────────────────────────────────────────── */
+  .empty-state {
+    @apply flex flex-col items-center justify-center text-center py-14 px-6;
+  }
+  .empty-state-icon {
+    @apply w-12 h-12 text-dark-textMuted mb-4;
+  }
+  .spinner {
+    @apply inline-block w-5 h-5 border-2 border-dark-border border-t-blue-500
+      rounded-full animate-spin;
+  }
+  .kbd-mono {
+    @apply font-mono text-xs bg-dark-inset border border-dark-border rounded px-1.5 py-0.5;
+  }
 }

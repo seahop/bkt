@@ -15,7 +15,10 @@ type User struct {
 	Password  string    `gorm:"" json:"-"` // Nullable for SSO users, never serialize
 	IsAdmin   bool      `gorm:"default:false" json:"is_admin"`
 	IsLocked  bool      `gorm:"default:false" json:"is_locked"` // Account lock status
-	CreatedAt time.Time `json:"created_at"`
+	// TokenVersion is bumped to invalidate all outstanding JWTs for this user
+	// (lock, delete, password change, admin demotion, "sign out everywhere").
+	TokenVersion int       `gorm:"default:0;not null" json:"-"`
+	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 
 	// SSO fields
@@ -44,7 +47,11 @@ type AccessKey struct {
 	AccessKey          string    `gorm:"uniqueIndex;not null" json:"access_key"`
 	SecretKeyHash      string    `gorm:"not null" json:"-"` // Never serialize secret (bcrypt hash for API auth)
 	SecretKeyEncrypted string    `gorm:"not null" json:"-"` // Never serialize secret (AES-encrypted for S3 auth)
+	Name               string    `gorm:"" json:"name,omitempty"`                // Human label to tell keys apart
+	Temporary          bool      `gorm:"default:false;index" json:"temporary,omitempty"` // bkt-STS short-lived credential: excluded from the key limit, hard-deleted after expiry
 	IsActive           bool      `gorm:"default:true" json:"is_active"`
+	ReadOnly           bool      `gorm:"default:false" json:"read_only"`        // Deny mutating S3 operations
+	ExpiresAt          *time.Time `gorm:"index" json:"expires_at,omitempty"`    // nil = never expires
 	LastUsedAt         *time.Time `json:"last_used_at,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`
 
@@ -94,8 +101,32 @@ type Bucket struct {
 	Region         string     `gorm:"default:'us-east-1'" json:"region"`
 	StorageBackend string     `gorm:"default:'local'" json:"storage_backend"` // "local" or "s3"
 	S3ConfigID     *uuid.UUID `gorm:"type:uuid" json:"s3_config_id,omitempty"` // Optional: specific S3 config to use
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	// Versioning state: "" (never enabled), "enabled", or "suspended".
+	// Suspended keeps existing versions browsable but stops creating new ones
+	// (a documented simplification of AWS's null-version semantics).
+	Versioning string `gorm:"default:''" json:"versioning"`
+	// Lifecycle holds the bucket's lifecycle configuration as JSON (see
+	// LifecycleConfig); nil = no lifecycle rules.
+	Lifecycle *string `gorm:"type:jsonb" json:"lifecycle,omitempty"`
+	// QuotaBytes caps the total size of CURRENT objects in the bucket
+	// (version storage is not counted). 0 = unlimited.
+	QuotaBytes int64 `gorm:"default:0" json:"quota_bytes"`
+	// RetentionDays (WORM-lite): while set, no version of any object can be
+	// permanently removed until it is older than this many days. Requires
+	// versioning to be enabled. Plain deletes still create markers (data is
+	// preserved); version-addressed deletes, lifecycle purges, and bucket
+	// deletion are refused for retained data. 0 = off.
+	RetentionDays int `gorm:"default:0" json:"retention_days"`
+	// Webhook event notifications: POSTed as JSON to WebhookURL for the event
+	// types in WebhookEvents (csv of "created","removed"). Empty URL = off.
+	WebhookURL    string `gorm:"default:''" json:"webhook_url,omitempty"`
+	WebhookSecret string `gorm:"default:''" json:"-"`
+	WebhookEvents string `gorm:"default:''" json:"webhook_events,omitempty"`
+	// ReplicateTo mirrors this bucket's current objects into another bkt
+	// bucket (periodic sync; the target is fully managed by replication).
+	ReplicateTo string `gorm:"default:''" json:"replicate_to,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 
 	// Relationships
 	Owner    User              `gorm:"foreignKey:OwnerID" json:"owner,omitempty"`
@@ -120,7 +151,11 @@ type Object struct {
 	ETag        string    `json:"etag"`
 	SHA256      string    `json:"sha256,omitempty"` // SHA256 hash of content
 	StoragePath string    `gorm:"not null" json:"-"` // Internal file system path
-	Metadata    *string   `gorm:"type:jsonb" json:"metadata,omitempty"` // JSON metadata (nullable)
+	Metadata    *string   `gorm:"type:jsonb" json:"metadata,omitempty"` // x-amz-meta-* user metadata (JSON map, nullable)
+	Tags        *string   `gorm:"type:jsonb" json:"tags,omitempty"`     // S3 object tags (JSON map, nullable)
+	// VersionID of the CURRENT version ("" = written while unversioned, the
+	// S3 "null" version). Non-current versions live in object_versions.
+	VersionID string `gorm:"default:''" json:"version_id,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 
@@ -247,8 +282,9 @@ type AuditLog struct {
 	Metadata    string    `gorm:"type:jsonb" json:"metadata,omitempty"`     // Additional context (JSON)
 	CreatedAt   time.Time `gorm:"index" json:"created_at"`
 
-	// Relationships
-	User User `gorm:"foreignKey:UserID" json:"user,omitempty"`
+	// NOTE: deliberately no User relation/foreign key — the audit trail must
+	// outlive the users it records (an FK would block user deletion, and
+	// Username above is already denormalized for display).
 }
 
 // BeforeCreate hook to generate UUID
@@ -260,10 +296,19 @@ func (a *AuditLog) BeforeCreate(tx *gorm.DB) error {
 }
 
 // RevokedToken stores JTIs of logged-out tokens until they naturally expire
+// RevokedTokenReason* distinguish WHY a token was revoked, so refresh-token
+// reuse detection can tell an attack indicator (replay of a rotated token)
+// from a benign stale retry (replay of a logout-revoked token).
+const (
+	RevokedReasonLogout  = "logout"
+	RevokedReasonRotated = "rotated"
+)
+
 type RevokedToken struct {
 	ID        uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
 	JTI       string    `gorm:"uniqueIndex;not null" json:"jti"`
 	UserID    uuid.UUID `gorm:"type:uuid;index;not null" json:"user_id"`
+	Reason    string    `gorm:"default:''" json:"reason"`
 	ExpiresAt time.Time `gorm:"index;not null" json:"expires_at"`
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -300,9 +345,12 @@ func (i *IdempotencyKey) BeforeCreate(tx *gorm.DB) error {
 }
 
 type AccessKeyResponse struct {
-	AccessKey string    `json:"access_key"`
-	SecretKey string    `json:"secret_key"` // Only shown once during creation
-	CreatedAt time.Time `json:"created_at"`
+	AccessKey string     `json:"access_key"`
+	SecretKey string     `json:"secret_key"` // Only shown once during creation
+	Name      string     `json:"name,omitempty"`
+	ReadOnly  bool       `json:"read_only"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
 }
 
 type ErrorResponse struct {

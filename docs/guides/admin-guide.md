@@ -5,20 +5,22 @@ This guide covers administrative tasks for managing bkt.
 ## Table of Contents
 
 - [User Management](#user-management)
+- [Group Management](#group-management)
 - [Policy Management](#policy-management)
 - [Access Key Management](#access-key-management)
+- [Bucket Settings](#bucket-settings)
+- [Audit Log](#audit-log)
 - [System Monitoring](#system-monitoring)
 - [Security](#security)
 - [Backup and Recovery](#backup-and-recovery)
 - [Troubleshooting](#troubleshooting)
 
 ## User Management
-## User Management
 
 ### Default Admin Account
 
 The `setup.py` script creates a default admin account:
-- **Username**: `testadmin`
+- **Username**: `admin` (from `ADMIN_USERNAME`)
 - **Password**: Generated randomly (displayed during setup - check `.env` file)
 - **Email**: `admin@example.com`
 
@@ -93,7 +95,7 @@ curl -k -X DELETE https://localhost:9443/api/users/{user_id} \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-**Important:** This permanently deletes the user and all their access keys. Their buckets and objects are NOT deleted - consider reassigning or deleting them first.
+**Important:** This permanently deletes the user, hard-deletes all their access keys, and removes their policy attachments and group memberships. Their buckets and objects are NOT deleted - consider reassigning or deleting them first. The user's audit history (including key issuance/revocation) is kept in the audit log.
 
 ### Viewing User Details
 
@@ -106,6 +108,64 @@ curl -k -X GET https://localhost:9443/api/users/{user_id} \
 curl -k -X GET https://localhost:9443/api/users/me \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
+
+## Group Management
+
+Groups let you attach policies once and grant them to many users. A user's
+**effective policies are the union of their directly attached policies and the
+policies of every group they belong to** — removing a user from a group removes
+those group-derived permissions on the next evaluation, without touching their
+direct attachments.
+
+All group endpoints are admin-only. Groups are also manageable in the web UI
+under the admin panel's **Groups** section (membership + policy attach).
+
+```bash
+# List groups
+curl -k -X GET https://localhost:9443/api/groups \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+
+# Create a group
+curl -k -X POST https://localhost:9443/api/groups \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "engineering"}'
+
+# Delete a group
+curl -k -X DELETE https://localhost:9443/api/groups/{group_id} \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+### Membership
+
+```bash
+# Add a user to a group
+curl -k -X POST https://localhost:9443/api/groups/{group_id}/members \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id": "{user_uuid}"}'
+
+# Remove a user from a group
+curl -k -X DELETE https://localhost:9443/api/groups/{group_id}/members/{user_id} \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+### Attaching Policies to Groups
+
+```bash
+# Attach a policy to a group
+curl -k -X POST https://localhost:9443/api/groups/{group_id}/policies \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"policy_id": "{policy_uuid}"}'
+
+# Detach a policy from a group
+curl -k -X DELETE https://localhost:9443/api/groups/{group_id}/policies/{policy_id} \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+**Tip:** Prefer group-attached policies for team access and reserve direct
+user attachments for exceptions — it keeps access reviews simple.
 
 ## Policy Management
 
@@ -261,15 +321,21 @@ curl -k -X DELETE https://localhost:9443/api/policies/{policy_id} \
 
 ### Viewing User Access Keys
 
-As an admin, you can view any user's access keys:
+As an admin, you can view any user's access keys via the API (including
+revoked ones — revocation is a soft delete, so the history stays visible):
 
 ```bash
-# This requires direct database access
-docker exec bkt-db psql -U objectstore -d objectstore \
-  -c "SELECT id, user_id, access_key, is_active, created_at, last_used_at FROM access_keys WHERE user_id = '{user_uuid}';"
+curl -k -X GET https://localhost:9443/api/users/{user_id}/access-keys \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-**Note:** Secret key hashes are never displayed for security.
+**Note:** Secret keys are shown only once at creation; only bcrypt hashes are
+stored and they are never displayed.
+
+Keys can carry a **name**, an optional **expiry**, and a **read-only flag**
+(a read-only key is denied all mutating S3 operations). Temporary bkt-STS
+credentials (`POST /api/sts/credentials`) are excluded from the per-user key
+limit and from the user's own key list, and are auto-deleted after expiry.
 
 ### Revoking User Access Keys
 
@@ -282,7 +348,8 @@ curl -k -X DELETE https://localhost:9443/api/access-keys/{key_id} \
 
 ### Access Key Limits
 
-- **Per User Limit:** 5 active keys maximum
+- **Per User Limit:** 5 active regular keys maximum (temporary bkt-STS
+  credentials don't count against it)
 - **Purpose:** Prevents resource exhaustion and key sprawl
 - **Enforcement:** Automatic at creation time
 
@@ -313,6 +380,67 @@ WHERE ak.is_active = true
   AND (ak.last_used_at IS NULL OR ak.last_used_at < NOW() - INTERVAL '90 days');
 ```
 
+
+## Bucket Settings
+
+Each bucket carries a settings bundle — quota, retention, webhooks, and
+replication — editable by the bucket owner or an admin, either from the bucket
+settings modal in the web UI or via a partial update:
+
+```bash
+curl -k -X PUT https://localhost:9443/api/buckets/{bucket_name}/settings \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "quota_bytes": 10737418240,
+    "retention_days": 30,
+    "webhook_url": "https://hooks.example.com/bkt",
+    "webhook_secret": "shared-secret",
+    "webhook_events": "created,removed",
+    "replicate_to": "backup-bucket"
+  }'
+```
+
+Only the fields you send are changed. In brief:
+
+- **`quota_bytes`** — writes past the quota are refused (`QuotaExceeded` 403);
+  `0` = unlimited. The quota counts current objects only, not version storage.
+- **`retention_days`** (WORM-lite) — requires versioning; while data is inside
+  the window, version deletes / lifecycle purges / versioning suspension /
+  bucket deletion are all refused. `0` = off.
+- **`webhook_url` / `webhook_secret` / `webhook_events`** — JSON POST on
+  `object:created` / `object:removed`, optionally HMAC-signed
+  (`X-Bkt-Signature`). Delivery is queued with retries and never blocks uploads.
+- **`replicate_to`** — one-way periodic mirror into another bkt bucket on the
+  same instance (point the target bucket at a different S3 configuration for
+  cross-provider DR).
+
+See [Features](features.md) for the full semantics of each setting.
+
+## Audit Log
+
+bkt keeps a database-backed audit log of security-relevant actions: logins
+(local **and SSO**, with provider metadata), failed logins, user/group/policy
+management, access key issuance and revocation, bkt-STS credential issuance,
+and bucket settings/versioning/lifecycle changes.
+
+Admins can query it, filtered and paginated:
+
+```bash
+curl -k -G https://localhost:9443/api/audit \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --data-urlencode "action=DeleteUser" \
+  --data-urlencode "status=success" \
+  --data-urlencode "start=2026-08-01T00:00:00Z" \
+  --data-urlencode "limit=50"
+```
+
+**Query parameters:** `user_id`, `action`, `resource_type`, `status`,
+`start`, `end`, `limit`, `offset`.
+
+Retention is controlled by `AUDIT_RETENTION_DAYS` (default 90; `<= 0` disables
+pruning) — see [Configuration](../deployment/configuration.md). Deleting a user
+does **not** delete their audit history.
 
 ## System Monitoring
 
@@ -609,22 +737,22 @@ docker compose restart backend
 
 ### Security Auditing
 
-#### Failed Login Attempts
-```sql
--- Requires audit logging (see Audit Logging section)
-SELECT * FROM audit_log
-WHERE action = 'login_failed'
-ORDER BY created_at DESC
-LIMIT 50;
+Use the built-in [audit log](#audit-log) instead of raw SQL:
+
+```bash
+# Failed login attempts
+curl -k -G https://localhost:9443/api/audit \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --data-urlencode "status=failure" \
+  --data-urlencode "limit=50"
+
+# Policy changes
+curl -k -G https://localhost:9443/api/audit \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --data-urlencode "resource_type=Policy"
 ```
 
-#### Policy Changes
-```sql
--- Requires audit logging
-SELECT * FROM audit_log
-WHERE action IN ('policy_created', 'policy_updated', 'policy_deleted')
-ORDER BY created_at DESC;
-```
+SSO logins are audited too, including which provider was used.
 
 ## Backup and Recovery
 
@@ -775,14 +903,10 @@ postgres:
 
 #### Backend
 
-Adjust environment variables:
-
-```yaml
-backend:
-  environment:
-    STORAGE_MAX_FILE_SIZE: 5368709120  # 5GB
-    STORAGE_MAX_CONCURRENT_UPLOADS: 10
-```
+Rate limits and other tunables are environment-driven — see
+[Configuration](../deployment/configuration.md) for the full list
+(`AUTH_RATE_LIMIT`, `S3_RATE_LIMIT`, `TRUSTED_PROXIES`, `AUDIT_RETENTION_DAYS`,
+…). The per-object size limit (5GB) is built into the binary.
 
 ## Related Documentation
 

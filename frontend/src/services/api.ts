@@ -1,5 +1,31 @@
 import axios from 'axios'
-import type { AuthResponse, User, Bucket, AccessKey, AccessKeyResponse, Policy, Object as StorageObject, S3Configuration } from '../types'
+import type { AuthResponse, User, Bucket, AccessKey, AccessKeyResponse, Object as StorageObject, S3Configuration, Group } from '../types'
+
+// Shape returned by the objects endpoint when the backend paginates results.
+// Older/simple backends may just return a bare StorageObject[] instead.
+export interface ListObjectsResponse {
+  objects: StorageObject[]
+  is_truncated?: boolean
+  next_continuation_token?: string
+}
+
+// A single version of an object, as returned by the versions endpoint.
+export interface ObjectVersion {
+  version_id: string
+  is_latest: boolean
+  is_delete_marker: boolean
+  size: number
+  content_type: string
+  etag: string
+  last_modified: string
+}
+
+export interface ListObjectVersionsResponse {
+  bucket: string
+  key: string
+  versioning: string
+  versions: ObjectVersion[]
+}
 
 // Use relative URL to leverage Vite's proxy configuration
 // The proxy will forward /api/* requests to the backend
@@ -131,8 +157,18 @@ export const bucketApi = {
     await api.delete(`/buckets/${name}`)
   },
 
-  listObjects: async (bucketName: string): Promise<StorageObject[]> => {
-    const { data } = await api.get<StorageObject[]>(`/buckets/${bucketName}/objects`)
+  listObjects: async (
+    bucketName: string,
+    options?: { prefix?: string; maxKeys?: number; continuationToken?: string }
+  ): Promise<StorageObject[] | ListObjectsResponse> => {
+    const params: Record<string, string | number> = {}
+    if (options?.prefix) params.prefix = options.prefix
+    if (options?.maxKeys != null) params['max-keys'] = options.maxKeys
+    if (options?.continuationToken) params['continuation-token'] = options.continuationToken
+    const { data } = await api.get<StorageObject[] | ListObjectsResponse>(
+      `/buckets/${bucketName}/objects`,
+      { params }
+    )
     return data
   },
 
@@ -199,6 +235,14 @@ export const bucketApi = {
     return data
   },
 
+  presignObject: async (bucketName: string, key: string, expiresIn: number): Promise<{ url: string; expires_at: string; capped_by_key: boolean; signing_key_name?: string }> => {
+    const { data } = await api.post<{ url: string; expires_at: string; capped_by_key: boolean; signing_key_name?: string }>(`/buckets/${bucketName}/objects/presign`, {
+      key,
+      expires_in: expiresIn,
+    })
+    return data
+  },
+
   moveObject: async (bucketName: string, sourceKey: string, destinationKey: string): Promise<StorageObject> => {
     const { data } = await api.post<StorageObject>(`/buckets/${bucketName}/objects/move`, {
       source_key: sourceKey,
@@ -222,6 +266,56 @@ export const bucketApi = {
     })
     return data
   },
+
+  listObjectVersions: async (bucketName: string, key: string): Promise<ListObjectVersionsResponse> => {
+    const { data } = await api.get<ListObjectVersionsResponse>(`/buckets/${bucketName}/object-versions`, {
+      params: { key },
+    })
+    return data
+  },
+
+  restoreObjectVersion: async (bucketName: string, key: string, versionId: string): Promise<{ message: string }> => {
+    const { data } = await api.post<{ message: string }>(`/buckets/${bucketName}/objects/restore`, {
+      key,
+      version_id: versionId,
+    })
+    return data
+  },
+
+  deleteObjectVersion: async (bucketName: string, key: string, versionId: string): Promise<{ message: string }> => {
+    const { data } = await api.delete<{ message: string }>(`/buckets/${bucketName}/object-versions`, {
+      params: { key, version_id: versionId },
+    })
+    return data
+  },
+
+  setBucketVersioning: async (bucketName: string, versioning: 'enabled' | 'suspended'): Promise<{ message: string }> => {
+    const { data } = await api.put<{ message: string }>(`/buckets/${bucketName}/versioning`, { versioning })
+    return data
+  },
+
+  setBucketLifecycle: async (
+    bucketName: string,
+    cfg: { expire_days: number; prefix?: string; noncurrent_expire_days?: number }
+  ): Promise<{ message: string }> => {
+    const { data } = await api.put<{ message: string }>(`/buckets/${bucketName}/lifecycle`, cfg)
+    return data
+  },
+
+  setBucketSettings: async (
+    bucketName: string,
+    settings: {
+      quota_bytes?: number
+      retention_days?: number
+      webhook_url?: string
+      webhook_secret?: string
+      webhook_events?: string
+      replicate_to?: string
+    }
+  ): Promise<{ message: string }> => {
+    const { data } = await api.put<{ message: string }>(`/buckets/${bucketName}/settings`, settings)
+    return data
+  },
 }
 
 // Access Key API
@@ -241,38 +335,50 @@ export const accessKeyApi = {
   },
 }
 
-// Policy API
-export const policyApi = {
-  listPolicies: async (): Promise<Policy[]> => {
-    const { data } = await api.get<Policy[]>('/policies')
+// Group API (admin)
+export const groupApi = {
+  listGroups: async (): Promise<Group[]> => {
+    const { data } = await api.get<Group[]>('/groups')
     return data
   },
 
-  createPolicy: async (name: string, document: string): Promise<Policy> => {
-    const { data } = await api.post<Policy>('/policies', { name, document })
+  createGroup: async (name: string, description?: string): Promise<Group> => {
+    const { data } = await api.post<Group>('/groups', { name, description })
     return data
   },
 
-  getPolicy: async (id: string): Promise<Policy> => {
-    const { data } = await api.get<Policy>(`/policies/${id}`)
+  deleteGroup: async (id: string): Promise<void> => {
+    await api.delete(`/groups/${id}`)
+  },
+
+  addMember: async (groupId: string, userId: string): Promise<void> => {
+    await api.post(`/groups/${groupId}/members`, { user_id: userId })
+  },
+
+  removeMember: async (groupId: string, userId: string): Promise<void> => {
+    await api.delete(`/groups/${groupId}/members/${userId}`)
+  },
+
+  attachPolicy: async (groupId: string, policyId: string): Promise<void> => {
+    await api.post(`/groups/${groupId}/policies`, { policy_id: policyId })
+  },
+
+  detachPolicy: async (groupId: string, policyId: string): Promise<void> => {
+    await api.delete(`/groups/${groupId}/policies/${policyId}`)
+  },
+}
+
+// STS (temporary credentials) API
+export const stsApi = {
+  issueTemporaryCredentials: async (
+    durationSeconds?: number,
+    readOnly?: boolean
+  ): Promise<{ access_key: string; secret_key: string; expires_at: string; read_only: boolean }> => {
+    const { data } = await api.post<{ access_key: string; secret_key: string; expires_at: string; read_only: boolean }>(
+      '/sts/credentials',
+      { duration_seconds: durationSeconds, read_only: readOnly }
+    )
     return data
-  },
-
-  updatePolicy: async (id: string, name: string, document: string): Promise<Policy> => {
-    const { data } = await api.put<Policy>(`/policies/${id}`, { name, document })
-    return data
-  },
-
-  deletePolicy: async (id: string): Promise<void> => {
-    await api.delete(`/policies/${id}`)
-  },
-
-  attachPolicyToUser: async (userId: string, policyId: string): Promise<void> => {
-    await api.post(`/policies/users/${userId}/attach`, { policy_id: policyId })
-  },
-
-  detachPolicyFromUser: async (userId: string, policyId: string): Promise<void> => {
-    await api.delete(`/policies/users/${userId}/detach/${policyId}`)
   },
 }
 

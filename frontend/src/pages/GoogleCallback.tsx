@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Database } from 'lucide-react';
+import { Database, AlertCircle } from 'lucide-react';
 import { useAuthStore } from '../store/authStore';
 import { userApi } from '../services/api';
 
@@ -40,9 +40,10 @@ export default function GoogleCallback() {
       window.history.replaceState(null, '', window.location.pathname);
 
       try {
-        // Temporarily store token so we can make authenticated API call
+        // Temporarily store token so we can make authenticated API call.
+        // The refresh token is intentionally NOT persisted (see authStore) —
+        // nothing reads it back, so storing it would only widen exposure.
         localStorage.setItem('token', token);
-        localStorage.setItem('refresh_token', refreshToken);
 
         // Fetch user info
         const user = await userApi.getCurrentUser();
@@ -73,62 +74,43 @@ export default function GoogleCallback() {
   return (
     <div className="min-h-screen bg-dark-bg flex items-center justify-center p-4">
       <div className="w-full max-w-md">
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center gap-2 mb-4">
-            <Database className="w-12 h-12 text-blue-500" />
-            <h1 className="text-3xl font-bold text-dark-text">bkt</h1>
-          </div>
+        <div className="flex flex-col items-center text-center mb-8">
+          <span className="flex items-center justify-center w-12 h-12 rounded-xl bg-blue-600/15 mb-4">
+            <Database className="w-6 h-6 text-blue-500" />
+          </span>
+          <h1 className="text-2xl font-semibold text-dark-text tracking-tight">bkt</h1>
         </div>
 
-        <div className="bg-dark-surface rounded-lg p-8 border border-dark-border text-center">
+        <div className="card p-8">
           {processing ? (
-            <>
-              <div className="mb-4">
-                <svg
-                  className="animate-spin h-12 w-12 mx-auto text-blue-500"
-                  xmlns="http://www.w3.org/2000/svg"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                >
-                  <circle
-                    className="opacity-25"
-                    cx="12"
-                    cy="12"
-                    r="10"
-                    stroke="currentColor"
-                    strokeWidth="4"
-                  ></circle>
-                  <path
-                    className="opacity-75"
-                    fill="currentColor"
-                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                  ></path>
-                </svg>
+            <div className="flex flex-col items-center text-center gap-3">
+              <div className="spinner !w-8 !h-8" />
+              <div>
+                <p className="text-base font-semibold text-dark-text">Completing sign in...</p>
+                <p className="text-sm text-dark-textSecondary mt-1">
+                  Please wait while we authenticate you with Google
+                </p>
               </div>
-              <p className="text-dark-text text-lg font-medium mb-2">Completing sign in...</p>
-              <p className="text-dark-textSecondary text-sm">Please wait while we authenticate you with Google</p>
-            </>
+            </div>
           ) : (
-            <>
-              <div className="mb-4">
-                <svg
-                  className="h-12 w-12 mx-auto text-red-500"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-                  />
-                </svg>
+            <div className="space-y-5">
+              <div className="alert-error">
+                <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+                <div>
+                  <p className="font-medium">Authentication failed</p>
+                  <p className="mt-0.5">{error}</p>
+                </div>
               </div>
-              <p className="text-dark-text text-lg font-medium mb-2">Authentication failed</p>
-              <p className="text-dark-textSecondary text-sm mb-4">{error}</p>
-              <p className="text-dark-textSecondary text-xs">Redirecting to login...</p>
-            </>
+              <button
+                onClick={() => navigate('/login')}
+                className="btn-secondary w-full"
+              >
+                Back to sign in
+              </button>
+              <p className="text-center text-xs text-dark-textMuted">
+                Redirecting to login...
+              </p>
+            </div>
           )}
         </div>
       </div>

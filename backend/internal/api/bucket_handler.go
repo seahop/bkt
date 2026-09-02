@@ -16,6 +16,7 @@ import (
 	"bkt/internal/storage"
 	"bkt/internal/validation"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -230,6 +231,7 @@ func (h *BucketHandler) getStorageBackend(bucket *models.Bucket) (storage.Storag
 		bucketPrefix,
 		useSSL,
 		forcePathStyle,
+		h.config.Storage.S3SSE,
 	)
 	if err != nil {
 		// Log configuration error - don't silently fallback as this can hide issues
@@ -636,6 +638,23 @@ func (h *BucketHandler) DeleteBucket(c *gin.Context) {
 	}
 
 	// Get all objects in the bucket
+	// WORM: a bucket with retention still covering any object or version
+	// cannot be deleted (deleting the bucket would destroy retained data).
+	if bucket.RetentionDays > 0 {
+		cutoff := time.Now().AddDate(0, 0, -bucket.RetentionDays)
+		var retained int64
+		database.DB.Model(&models.Object{}).Where("bucket_id = ? AND updated_at > ?", bucket.ID, cutoff).Count(&retained)
+		var retainedVers int64
+		database.DB.Model(&models.ObjectVersion{}).Where("bucket_id = ? AND is_delete_marker = false AND content_modified_at > ?", bucket.ID, cutoff).Count(&retainedVers)
+		if retained+retainedVers > 0 {
+			c.JSON(http.StatusConflict, models.ErrorResponse{
+				Error:   "Bucket under retention",
+				Message: fmt.Sprintf("%d object(s)/version(s) are still within the %d-day retention period", retained+retainedVers, bucket.RetentionDays),
+			})
+			return
+		}
+	}
+
 	var objects []models.Object
 	if err := database.DB.Where("bucket_id = ?", bucket.ID).Find(&objects).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
@@ -663,7 +682,10 @@ func (h *BucketHandler) DeleteBucket(c *gin.Context) {
 	err = database.DB.Transaction(func(tx *gorm.DB) error {
 		// Delete all objects from database
 		if len(objects) > 0 {
-			if err := tx.Where("bucket_id = ?", bucket.ID).Delete(&models.Object{}).Error; err != nil {
+			if err := tx.Where("bucket_id = ?", bucket.ID).Delete(&models.ObjectVersion{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("bucket_id = ?", bucket.ID).Delete(&models.Object{}).Error; err != nil {
 				return fmt.Errorf("failed to delete objects: %w", err)
 			}
 		}
@@ -893,6 +915,9 @@ func (h *BucketHandler) ListObjects(c *gin.Context) {
 			maxKeys = parsed
 		}
 	}
+	// Keyset pagination: the continuation token is the last key of the previous
+	// page; the next page is everything strictly after it in key order.
+	continuationToken := c.Query("continuation-token")
 
 	// Get objects from database
 	query := database.DB.Where("bucket_id = ?", bucket.ID)
@@ -901,14 +926,27 @@ func (h *BucketHandler) ListObjects(c *gin.Context) {
 		escapedPrefix := validation.EscapeLikeWildcards(prefix)
 		query = query.Where("key LIKE ?", escapedPrefix+"%")
 	}
+	if continuationToken != "" {
+		query = query.Where("key > ?", continuationToken)
+	}
 
+	// Fetch one extra row to learn whether more pages exist.
 	var objects []models.Object
-	if err := query.Limit(maxKeys).Order("key ASC").Find(&objects).Error; err != nil {
+	if err := query.Limit(maxKeys + 1).Order("key ASC").Find(&objects).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to list objects",
 			Message: err.Error(),
 		})
 		return
+	}
+	dbTruncated := len(objects) > maxKeys
+	if dbTruncated {
+		objects = objects[:maxKeys]
+	}
+	// Continuation basis if reconciliation below prunes the whole page.
+	lastExaminedKey := ""
+	if len(objects) > 0 {
+		lastExaminedKey = objects[len(objects)-1].Key
 	}
 
 	// Sync with actual storage backend (S3 or local)
@@ -996,19 +1034,39 @@ func (h *BucketHandler) ListObjects(c *gin.Context) {
 						}
 					}(newObjects)
 
-					// Add to response immediately (don't wait for DB)
-					objects = append(objects, newObjects...)
+					// Add to response immediately (don't wait for DB), but only
+					// keys inside this page's range — keys at or before the
+					// continuation token belong to earlier pages and would
+					// duplicate entries the client already has.
+					for _, obj := range newObjects {
+						if continuationToken == "" || obj.Key > continuationToken {
+							objects = append(objects, obj)
+						}
+					}
 				}
 
-				// Find objects in database but not in S3 (need to remove)
+				// Find objects in database but not in S3 (candidates for removal).
+				// CRITICAL: only treat "absent from the S3 listing" as "deleted
+				// from S3" when the listing is known COMPLETE. The backend caps
+				// its listing at 10,000 objects; if we hit that cap the listing
+				// is truncated and an absent key may simply be beyond the window,
+				// not deleted. Deleting on a truncated (or, before the s3.go fix,
+				// error-masked-as-empty) listing would wipe valid metadata.
+				listingComplete := len(s3Objects) < storage.MaxListObjects
+
 				validObjects := make([]models.Object, 0, len(objects))
 				staleIDs := make([]uuid.UUID, 0)
 				for _, obj := range objects {
 					if _, exists := s3KeysMap[obj.Key]; exists {
 						validObjects = append(validObjects, obj)
-					} else if obj.ID != uuid.Nil {
-						// Only mark for deletion if it has a DB ID (not a newly added object)
+					} else if listingComplete && obj.ID != uuid.Nil {
+						// Only prune when the listing is complete and this is a
+						// persisted row (not one we just appended above).
 						staleIDs = append(staleIDs, obj.ID)
+					} else {
+						// Listing incomplete: keep the row rather than risk
+						// deleting valid metadata.
+						validObjects = append(validObjects, obj)
 					}
 				}
 
@@ -1031,10 +1089,32 @@ func (h *BucketHandler) ListObjects(c *gin.Context) {
 		}
 	}
 
+	// Re-establish page invariants after the reconcile above may have added
+	// (S3 sync) or removed (stale prune) entries: sorted by key, at most
+	// maxKeys rows, with a token pointing just past the last row we cover.
+	sort.Slice(objects, func(i, j int) bool { return objects[i].Key < objects[j].Key })
+	isTruncated := dbTruncated
+	if len(objects) > maxKeys {
+		objects = objects[:maxKeys]
+		isTruncated = true
+	}
+	nextToken := ""
+	if isTruncated {
+		if len(objects) > 0 {
+			nextToken = objects[len(objects)-1].Key
+		} else {
+			// The whole page was pruned as stale but more DB rows exist beyond
+			// it — continue from the last key this page examined.
+			nextToken = lastExaminedKey
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"bucket":  bucketName,
-		"objects": objects,
-		"count":   len(objects),
+		"bucket":                  bucketName,
+		"objects":                 objects,
+		"count":                   len(objects),
+		"is_truncated":            isTruncated,
+		"next_continuation_token": nextToken,
 	})
 }
 
@@ -1204,8 +1284,21 @@ func (h *BucketHandler) UploadObject(c *gin.Context) {
 	}
 	resultChan := make(chan uploadResult, 1)
 
+	if qerr := checkBucketQuota(&bucket, fileHeader.Size); qerr != nil {
+		c.JSON(http.StatusForbidden, models.ErrorResponse{Error: "Quota exceeded", Message: qerr.Error()})
+		return
+	}
+
 	go func() {
-		err := storageBackend.PutObject(bucketName, objectKey, combinedReader, fileHeader.Size, contentType)
+		archivedVID, verr := prepareVersionedWrite(storageBackend, &bucket, objectKey)
+		if verr != nil {
+			resultChan <- uploadResult{err: verr}
+			return
+		}
+		err := storageBackend.PutObject(bucketName, objectKey, combinedReader, fileHeader.Size, contentType, nil)
+		if err != nil {
+			rollbackVersionedWrite(storageBackend, &bucket, objectKey, archivedVID)
+		}
 		resultChan <- uploadResult{err: err}
 	}()
 
@@ -1239,6 +1332,10 @@ func (h *BucketHandler) UploadObject(c *gin.Context) {
 
 	// Use UPSERT to create or update object metadata in single query (performance optimization)
 	now := time.Now()
+	newVersionID := ""
+	if bucket.Versioning == models.VersioningEnabled {
+		newVersionID = uuid.New().String()
+	}
 	object := models.Object{
 		BucketID:    bucket.ID,
 		Key:         objectKey,
@@ -1254,8 +1351,8 @@ func (h *BucketHandler) UploadObject(c *gin.Context) {
 	// PostgreSQL UPSERT: INSERT with ON CONFLICT UPDATE
 	// This reduces 2 queries (SELECT + INSERT/UPDATE) to 1 query
 	err = database.DB.Exec(`
-		INSERT INTO objects (id, bucket_id, key, size, content_type, e_tag, storage_path, sha256, created_at, updated_at)
-		VALUES (gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO objects (id, bucket_id, key, size, content_type, e_tag, storage_path, sha256, version_id, created_at, updated_at)
+		VALUES (gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (bucket_id, key)
 		DO UPDATE SET
 			size = EXCLUDED.size,
@@ -1263,9 +1360,10 @@ func (h *BucketHandler) UploadObject(c *gin.Context) {
 			e_tag = EXCLUDED.e_tag,
 			storage_path = EXCLUDED.storage_path,
 			sha256 = EXCLUDED.sha256,
+			version_id = EXCLUDED.version_id,
 			updated_at = EXCLUDED.updated_at
 	`, object.BucketID, object.Key, object.Size, object.ContentType, object.ETag,
-		object.StoragePath, object.SHA256, object.CreatedAt, object.UpdatedAt).Error
+		object.StoragePath, object.SHA256, newVersionID, object.CreatedAt, object.UpdatedAt).Error
 
 	if err != nil {
 		// Clean up file if database operation fails
@@ -1282,6 +1380,8 @@ func (h *BucketHandler) UploadObject(c *gin.Context) {
 		// Object was created but couldn't retrieve - log but don't fail the upload
 		// The file is successfully stored, just return success without full details
 	}
+
+	notifyObjectEvent(&bucket, services.EventObjectCreated, objectKey, objectInfo.Size, objectInfo.ETag, newVersionID)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":      "Object uploaded successfully",
@@ -1472,6 +1572,22 @@ func (h *BucketHandler) DeleteObject(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to initialize storage backend",
 			Message: err.Error(),
+		})
+		return
+	}
+
+	// Versioned delete: archive bytes + record a delete marker.
+	if _, handled, derr := versionedDeleteCurrent(storageBackend, &bucket, &object); handled {
+		if derr != nil {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+				Error:   "Failed to delete object",
+				Message: derr.Error(),
+			})
+			return
+		}
+		notifyObjectEvent(&bucket, services.EventObjectRemoved, objectKey, 0, "", "")
+		c.JSON(http.StatusOK, models.SuccessResponse{
+			Message: "Object deleted successfully",
 		})
 		return
 	}

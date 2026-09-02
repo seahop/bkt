@@ -8,6 +8,7 @@ import (
 	"bkt/internal/config"
 	"bkt/internal/database"
 	"bkt/internal/models"
+	"bkt/internal/services"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -134,23 +135,16 @@ func (h *VaultJWTHandler) LoginWithVaultJWT(c *gin.Context) {
 		return
 	}
 
-	// Generate JWT token for our system
+	services.NewAuditService().LogSuccess(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, map[string]interface{}{"provider": "vault-jwt"})
+
+	// Generate our access+refresh pair (access carries the refresh JTI so
+	// logout can revoke the sibling refresh token).
 	accessTokenDuration, _ := time.ParseDuration(h.config.Auth.AccessTokenExpiry)
-	jwtToken, err := GenerateToken(user.ID, user.Username, user.IsAdmin, h.config.Auth.JWTSecret, accessTokenDuration)
+	refreshTokenDuration, _ := time.ParseDuration(h.config.Auth.RefreshTokenExpiry)
+	jwtToken, refreshToken, err := GenerateTokenPair(user.ID, user.Username, user.IsAdmin, user.TokenVersion, h.config.Auth.JWTSecret, accessTokenDuration, refreshTokenDuration)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to generate token",
-			Message: err.Error(),
-		})
-		return
-	}
-
-	// Generate refresh token
-	refreshTokenDuration, _ := time.ParseDuration(h.config.Auth.RefreshTokenExpiry)
-	refreshToken, err := GenerateToken(user.ID, user.Username, user.IsAdmin, h.config.Auth.JWTSecret, refreshTokenDuration)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Failed to generate refresh token",
 			Message: err.Error(),
 		})
 		return
@@ -172,52 +166,30 @@ func (h *VaultJWTHandler) LoginWithVaultJWT(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
-// validateVaultJWT validates a JWT token from Vault
+// validateVaultJWT cryptographically verifies a Vault-issued JWT. The token's
+// signature is checked against Vault's JWKS before ANY claim is trusted — an
+// unverified token's claims (subject, email, policies) are entirely
+// attacker-controlled, so signature verification is what makes SSO login safe.
 func (h *VaultJWTHandler) validateVaultJWT(tokenString string) (*VaultJWTClaims, error) {
-	// Parse token without validation first to get the claims
-	token, _, err := new(jwt.Parser).ParseUnverified(tokenString, &VaultJWTClaims{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse token: %w", err)
+	if h.config.VaultSSO.Address == "" || h.config.VaultSSO.JWTPath == "" {
+		return nil, fmt.Errorf("vault SSO is not fully configured (address/JWT path missing); refusing to trust token")
 	}
 
-	claims, ok := token.Claims.(*VaultJWTClaims)
-	if !ok {
-		return nil, fmt.Errorf("invalid claims type")
+	jwksURL := fmt.Sprintf("%s/v1/%s/.well-known/jwks.json", h.config.VaultSSO.Address, h.config.VaultSSO.JWTPath)
+
+	opts := []jwt.ParserOption{jwt.WithExpirationRequired()}
+	if h.config.VaultSSO.Audience != "" {
+		opts = append(opts, jwt.WithAudience(h.config.VaultSSO.Audience))
 	}
 
-	// Validate basic claims
+	claims := &VaultJWTClaims{}
+	if err := verifyJWTWithJWKS(tokenString, jwksURL, claims, opts...); err != nil {
+		return nil, fmt.Errorf("token verification failed: %w", err)
+	}
+
 	if claims.Subject == "" {
 		return nil, fmt.Errorf("token missing subject claim")
 	}
-
-	// Validate audience if configured
-	if h.config.VaultSSO.Audience != "" {
-		audienceValid := false
-		for _, aud := range claims.Audience {
-			if aud == h.config.VaultSSO.Audience {
-				audienceValid = true
-				break
-			}
-		}
-		if !audienceValid {
-			return nil, fmt.Errorf("token audience mismatch")
-		}
-	}
-
-	// Validate expiration
-	if claims.ExpiresAt != nil && claims.ExpiresAt.Before(time.Now()) {
-		return nil, fmt.Errorf("token has expired")
-	}
-
-	// Validate not before
-	if claims.NotBefore != nil && claims.NotBefore.After(time.Now()) {
-		return nil, fmt.Errorf("token not yet valid")
-	}
-
-	// In production, you should validate the signature with Vault's public key
-	// This requires fetching the JWKS from Vault and verifying the signature
-	// For now, we're doing basic validation only
-	// TODO: Implement full JWT signature validation with Vault JWKS
 
 	return claims, nil
 }

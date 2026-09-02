@@ -1,13 +1,7 @@
 import api from './api';
+import type { Policy } from '../types';
 
-export interface Policy {
-  id: string;
-  name: string;
-  description: string;
-  document: string;
-  created_at: string;
-  updated_at: string;
-}
+export type { Policy };
 
 export interface CreatePolicyRequest {
   name: string;

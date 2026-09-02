@@ -13,19 +13,39 @@ var (
 	ErrExpiredToken = errors.New("token has expired")
 )
 
+// Token types. A refresh token must never be accepted as an access token on a
+// protected route — otherwise the long refresh lifetime defeats the short
+// access-token expiry.
+const (
+	TokenTypeAccess  = "access"
+	TokenTypeRefresh = "refresh"
+)
+
 type Claims struct {
 	UserID   uuid.UUID `json:"user_id"`
 	Username string    `json:"username"`
 	IsAdmin  bool      `json:"is_admin"`
+	// TokenType distinguishes access from refresh tokens.
+	TokenType string `json:"token_type"`
+	// TokenVersion is compared against the user's current TokenVersion on every
+	// request; bumping the user's version invalidates all previously-issued
+	// tokens (logout-everywhere, lock, password change, admin demotion).
+	TokenVersion int `json:"token_version"`
+	// PairJTI (access tokens only) is the JTI of the refresh token issued in
+	// the same pair, so logout can revoke the sibling refresh token even when
+	// the client never stored or sent it.
+	PairJTI string `json:"pair_jti,omitempty"`
 	jwt.RegisteredClaims
 }
 
-// GenerateToken creates a new JWT token for a user
-func GenerateToken(userID uuid.UUID, username string, isAdmin bool, secret string, duration time.Duration) (string, error) {
+// GenerateToken creates a new signed JWT of the given type for a user.
+func GenerateToken(userID uuid.UUID, username string, isAdmin bool, tokenVersion int, tokenType, secret string, duration time.Duration) (string, error) {
 	claims := Claims{
-		UserID:   userID,
-		Username: username,
-		IsAdmin:  isAdmin,
+		UserID:       userID,
+		Username:     username,
+		IsAdmin:      isAdmin,
+		TokenType:    tokenType,
+		TokenVersion: tokenVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ID:        uuid.New().String(),
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(duration)),
@@ -36,6 +56,52 @@ func GenerateToken(userID uuid.UUID, username string, isAdmin bool, secret strin
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString([]byte(secret))
+}
+
+// GenerateTokenPair issues an access+refresh token pair. The access token
+// carries the refresh token's JTI (pair_jti) so that logout — which only ever
+// sees the access token — can revoke the sibling refresh token too.
+func GenerateTokenPair(userID uuid.UUID, username string, isAdmin bool, tokenVersion int, secret string, accessDuration, refreshDuration time.Duration) (accessToken string, refreshToken string, err error) {
+	refreshJTI := uuid.New().String()
+	now := time.Now()
+
+	refreshClaims := Claims{
+		UserID:       userID,
+		Username:     username,
+		IsAdmin:      isAdmin,
+		TokenType:    TokenTypeRefresh,
+		TokenVersion: tokenVersion,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        refreshJTI,
+			ExpiresAt: jwt.NewNumericDate(now.Add(refreshDuration)),
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
+		},
+	}
+	refreshToken, err = jwt.NewWithClaims(jwt.SigningMethodHS256, refreshClaims).SignedString([]byte(secret))
+	if err != nil {
+		return "", "", err
+	}
+
+	accessClaims := Claims{
+		UserID:       userID,
+		Username:     username,
+		IsAdmin:      isAdmin,
+		TokenType:    TokenTypeAccess,
+		TokenVersion: tokenVersion,
+		PairJTI:      refreshJTI,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        uuid.New().String(),
+			ExpiresAt: jwt.NewNumericDate(now.Add(accessDuration)),
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
+		},
+	}
+	accessToken, err = jwt.NewWithClaims(jwt.SigningMethodHS256, accessClaims).SignedString([]byte(secret))
+	if err != nil {
+		return "", "", err
+	}
+	return accessToken, refreshToken, nil
 }
 
 // ParseTokenClaims parses a JWT and returns claims without enforcing expiry.
@@ -65,7 +131,7 @@ func ValidateToken(tokenString string, secret string) (*Claims, error) {
 			return nil, ErrInvalidToken
 		}
 		return []byte(secret), nil
-	})
+	}, jwt.WithValidMethods([]string{"HS256"}))
 
 	if err != nil {
 		return nil, err

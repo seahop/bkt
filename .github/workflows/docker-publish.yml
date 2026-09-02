@@ -6,9 +6,6 @@ on:
       - main
     tags:
       - 'v*.*.*'
-  pull_request:
-    branches:
-      - main
 
 env:
   REGISTRY: ghcr.io
@@ -16,13 +13,82 @@ env:
   OMNIBUS_IMAGE: ghcr.io/seahop/bkt
 
 jobs:
+  # ── Gates ──────────────────────────────────────────────────────────────────
+  # These run first; the image builds `needs:` them, so a failing test or a
+  # frontend type error blocks the publish. (Pull requests run the same checks
+  # plus lint/vuln via ci.yml; this workflow only fires on main + tags.)
+  backend-test:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: go vet
+        working-directory: backend
+        run: go vet ./...
+
+      - name: go test (race + cover)
+        working-directory: backend
+        run: go test ./... -race -cover
+
+  frontend-check:
+    name: Frontend Check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # No package-lock.json is committed, so `npm ci` and setup-node's built-in
+      # npm cache (both require a lockfile) can't be used. Cache npm's download
+      # cache manually and install with `npm install`.
+      - name: Cache npm downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('frontend/package.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Lint
+        # No ESLint flat config is committed (ESLint v9 requires one), so keep
+        # lint visible but non-blocking until a config lands under frontend/.
+        continue-on-error: true
+        run: npm run lint
+
+      - name: Type-check
+        run: npx tsc --noEmit
+
+      - name: Build
+        run: npm run build
+
   # UI-inclusive backend (no DB) — used by the Helm chart / docker-compose.prod
   build-backend:
     name: Build Backend Image
     runs-on: ubuntu-latest
+    needs: [backend-test, frontend-check]
     permissions:
       contents: read
       packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
 
     steps:
       - name: Checkout repository
@@ -61,6 +127,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/seahop/bkt
 
       - name: Build and push backend image
+        id: build
         uses: docker/build-push-action@v7
         with:
           # Root context so the frontend can be built and embedded.
@@ -82,6 +149,7 @@ jobs:
   build-omnibus:
     name: Build Omnibus Image
     runs-on: ubuntu-latest
+    needs: [backend-test, frontend-check]
     permissions:
       contents: read
       packages: write
@@ -138,6 +206,37 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=omnibus
           cache-to: type=gha,mode=max,scope=omnibus
+
+  # Vulnerability scan of the published backend image. Non-blocking for now
+  # (exit-code 0 / continue-on-error) so a new CVE doesn't wedge releases —
+  # findings stay visible in the job log. Flip exit-code to '1' to enforce.
+  image-scan:
+    name: Scan Backend Image (Trivy)
+    runs-on: ubuntu-latest
+    needs: build-backend
+    continue-on-error: true
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          # Scan by digest so the exact image just built/pushed is analysed,
+          # regardless of which tags (latest / semver / sha) were applied.
+          image-ref: ${{ env.BACKEND_IMAGE }}@${{ needs.build-backend.outputs.digest }}
+          format: table
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '0'
 
   # Summary job that requires both builds to pass — useful for branch protection rules
   images-published:

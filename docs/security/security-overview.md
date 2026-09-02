@@ -38,7 +38,12 @@ The system implements multiple layers of security:
 - Tokens are signed, not encrypted
 - Short-lived access tokens minimize risk
 - Refresh tokens enable long sessions without exposing credentials
-- Tokens are stateless (no server-side session storage)
+- **Refresh-token rotation with reuse detection**: every refresh issues a new
+  refresh token and retires the old one; replaying a rotated (already-used)
+  refresh token is treated as theft and revokes **all** of that user's sessions
+- Logout revokes both the access and refresh tokens
+- Access tokens are stateless; refresh tokens are tracked server-side to
+  enable rotation, reuse detection, and revocation
 
 **Best Practices:**
 - Never store tokens in localStorage (XSS risk)
@@ -84,8 +89,16 @@ func ValidateSecretKey(secretKey, hash string) bool {
 - Constant-time comparison prevents timing attacks
 - Secrets never stored in plaintext
 - Secrets shown only once during creation
-- Maximum 5 keys per user (prevents key sprawl)
+- Maximum 5 active regular keys per user (prevents key sprawl)
 - Soft delete for audit trail
+- **Per-key scoping**: keys can be named, given an optional **expiry**, and
+  flagged **read-only** (a read-only key is denied all mutating S3 operations)
+- **Temporary credentials (bkt-STS)**: users can mint short-lived key pairs
+  (default 1h, max 12h, optionally read-only) that auto-delete after expiry
+  and don't count against the 5-key limit. Note: this is a console API, not
+  the AWS STS API
+- Presigned URLs are signed with one of the user's active keys and are capped
+  by that key's expiry
 
 ### Password Security
 
@@ -285,6 +298,27 @@ c.Header("ETag", fmt.Sprintf("\"%s\"", md5Sum))
 - Path sanitization prevents traversal
 - Atomic file operations
 
+**Encryption at Rest:**
+- **External S3 backend**: set `S3_SSE=true` to request SSE-S3 (AES256)
+  server-side encryption on every object written through the S3 backend —
+  encryption is performed by the backing store
+- **Local backend**: bkt does **not** encrypt bytes on disk — use disk-level
+  encryption (LUKS/dm-crypt) on the storage volume
+- Stored S3 credentials (S3 configurations) are encrypted in the database with
+  `ENCRYPTION_KEY`
+
+**Retention (WORM-lite):**
+- A bucket's `retention_days` setting (requires versioning) protects data
+  inside the window: version-addressed deletes are refused, lifecycle purges
+  skip protected versions, versioning cannot be suspended, and the bucket
+  cannot be deleted. Plain deletes still create delete markers (data kept)
+
+**Webhook Integrity:**
+- Bucket webhooks (`object:created` / `object:removed`) can be HMAC-signed:
+  when a `webhook_secret` is set, each delivery carries an HMAC-SHA256 of the
+  raw body in `X-Bkt-Signature: sha256=<hex>` so receivers can authenticate
+  the sender
+
 ## Input Validation
 
 ### Request Validation
@@ -417,7 +451,9 @@ func CompareStringsConstantTime(a, b string) bool {
 - ✅ Statement count limits (20 per policy)
 - ✅ Access key limits (5 per user)
 - ✅ File size limits (5GB default)
-- ✅ Rate limiting (future enhancement)
+- ✅ Rate limiting — auth endpoints (`AUTH_RATE_LIMIT`, per-IP/min) and
+  optionally the S3 listener (`S3_RATE_LIMIT`); behind a proxy, set
+  `TRUSTED_PROXIES` so real client IPs are used
 - ✅ Connection pooling
 - ✅ Timeouts
 
@@ -468,6 +504,12 @@ router.Use(cors.New(cors.Config{
 - ✅ CORS restrictions
 - ✅ Authorization header required
 - ✅ SameSite cookie policy (future)
+
+### Information Disclosure — `/metrics`
+
+The Prometheus endpoint exposes bucket/object/user counts. Set
+`METRICS_TOKEN` so `GET /metrics` requires `Authorization: Bearer <token>`,
+or keep the endpoint network-isolated.
 
 ## Security Best Practices
 
@@ -540,17 +582,23 @@ router.Use(cors.New(cors.Config{
 
 ### Audit Trail
 
+bkt keeps a dedicated, database-backed audit log, queryable by admins via
+`GET /api/audit` (filterable by user, action, resource type, status, and time
+range; paginated).
+
 **Logged Events:**
-- User registration
-- Login attempts (success/failure)
-- Access key creation/revocation
-- Policy changes
-- Bucket operations
-- Object operations
+- User registration and user management (including deletions)
+- Login attempts, success and failure — **local and SSO** (SSO logins include
+  provider metadata)
+- Access key creation/revocation and bkt-STS credential issuance
+- Policy changes and group membership/policy operations
+- Bucket operations, including settings, versioning, and lifecycle changes
+
+**Retention:** rows older than `AUDIT_RETENTION_DAYS` (default 90) are pruned
+automatically; `<= 0` disables pruning. Deleting a user keeps their audit
+history.
 
 **Future Enhancements:**
-- Dedicated audit log table
-- Immutable log entries
 - Log export to SIEM
 - Compliance reporting
 
@@ -577,35 +625,32 @@ The system can support:
 
 ## Security Roadmap
 
+### Shipped
+
+- **Rate limiting** — per-IP limits on auth endpoints (`AUTH_RATE_LIMIT`) and
+  the S3 listener (`S3_RATE_LIMIT`), proxy-aware via `TRUSTED_PROXIES`
+- **Audit logging** — dedicated audit log table with configurable retention
+  (`AUDIT_RETENTION_DAYS`), queryable via `GET /api/audit`
+
 ### Planned Enhancements
 
-1. **Rate Limiting** (High Priority)
-   - Implement per-user rate limits
-   - Prevent brute force attacks
-   - DoS protection
-
-2. **Audit Logging** (High Priority)
-   - Dedicated audit log table
-   - Immutable log entries
-   - Log retention policies
-
-3. **Multi-Factor Authentication**
+1. **Multi-Factor Authentication**
    - TOTP support
    - SMS backup codes
    - WebAuthn/FIDO2
 
-4. **Advanced Policies**
+2. **Advanced Policies**
    - IP address conditions
    - Time-based conditions
    - MFA requirements
    - Resource tagging
 
-5. **Key Management**
+3. **Key Management**
    - Hardware Security Module (HSM) support
    - Key rotation automation
    - Key encryption keys (KEK)
 
-6. **Monitoring**
+4. **Monitoring**
    - Intrusion detection
    - Anomaly detection
    - Security dashboards

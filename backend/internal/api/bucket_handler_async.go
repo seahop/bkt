@@ -306,7 +306,15 @@ func (h *BucketHandler) processAsyncUpload(uploadID uuid.UUID, tempFilePath stri
 	// File implements io.ReadSeeker, so ProgressReader will be seekable for AWS SDK retries
 	progressReader := NewProgressReader(file, upload.ID, upload.TotalSize)
 
-	if err := storageBackend.PutObject(bucket.Name, upload.ObjectKey, progressReader, upload.TotalSize, detectedType); err != nil {
+	archivedVID, verr := prepareVersionedWrite(storageBackend, bucket, upload.ObjectKey)
+	if verr != nil {
+		upload.Status = models.UploadStatusFailed
+		upload.ErrorMessage = fmt.Sprintf("Failed to version existing object: %v", verr)
+		database.DB.Save(&upload)
+		return
+	}
+	if err := storageBackend.PutObject(bucket.Name, upload.ObjectKey, progressReader, upload.TotalSize, detectedType, nil); err != nil {
+		rollbackVersionedWrite(storageBackend, bucket, upload.ObjectKey, archivedVID)
 		upload.Status = models.UploadStatusFailed
 		upload.ErrorMessage = fmt.Sprintf("Failed to upload to storage: %v", err)
 		database.DB.Save(&upload)

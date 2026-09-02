@@ -149,7 +149,7 @@ curl -k -X POST https://localhost:9443/api/auth/login \
 
 ### Refresh Token
 
-Get a new access token using a refresh token.
+Get a new token pair using a refresh token.
 
 **Endpoint:** `POST /auth/refresh`
 
@@ -170,9 +170,13 @@ Get a new access token using a refresh token.
 }
 ```
 
+**Rotation:** every successful refresh **rotates** the refresh token — the token you sent is revoked and the response contains a new pair. Always replace your stored refresh token with the one from the response.
+
+**Reuse detection:** replaying a refresh token that was already rotated is treated as a theft indicator (per the OAuth security BCP): **all of that user's sessions are revoked** and the event is logged to the audit trail as `auth.refresh_reuse`. Replaying a token that was revoked by logout is simply rejected without revoking other sessions.
+
 **Error Responses:**
 - `400 Bad Request` - Missing or invalid refresh token
-- `401 Unauthorized` - Expired or invalid refresh token
+- `401 Unauthorized` - Expired, invalid, rotated, or revoked refresh token
 
 **Example:**
 ```bash
@@ -187,7 +191,7 @@ curl -k -X POST https://localhost:9443/api/auth/refresh \
 
 ### Logout
 
-Invalidate the current access token.
+Invalidate the current session. Logout revokes **both tokens**: the access token you present, and its sibling refresh token (whose ID is embedded in the access token, so the pair is revoked even when the client never sends the refresh token). You may also pass a refresh token explicitly in the body to blacklist it.
 
 **Endpoint:** `POST /auth/logout`
 
@@ -198,10 +202,17 @@ Invalidate the current access token.
 Authorization: Bearer <access_token>
 ```
 
+**Request Body (optional):**
+```json
+{
+  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+}
+```
+
 **Success Response (200 OK):**
 ```json
 {
-  "message": "Logged out successfully"
+  "message": "Successfully logged out"
 }
 ```
 
@@ -239,7 +250,8 @@ curl -k -X GET https://localhost:9443/api/users/me \
 
 3. **Refresh Strategy**
    - Refresh tokens proactively (e.g., at 14 min for 15 min tokens)
-   - Store refresh token securely
+   - Store refresh token securely and **replace it after every refresh** (tokens rotate; reusing an old one revokes all sessions)
+   - Never retry a refresh with the same token after a success — that replay trips reuse detection
    - Implement exponential backoff on refresh failures
 
 ## Example Token Refresh Flow
@@ -294,8 +306,10 @@ async function apiRequest(url, options = {}) {
 - Passwords are hashed with bcrypt (cost factor 12)
 - JWT tokens are signed with HS256
 - Tokens include user ID, username, and admin status
-- Refresh tokens have longer expiration for better UX
-- Failed login attempts should be rate-limited (see Rate Limiting section)
+- Refresh tokens have longer expiration for better UX, rotate on every use, and carry reuse detection (replay of a rotated token revokes all sessions)
+- Logout revokes both the access and refresh token
+- Login attempts are rate-limited per IP (`AUTH_RATE_LIMIT`, default 5/min)
+- All logins — including SSO logins, with provider metadata — are recorded in the audit log
 
 ---
 
@@ -381,6 +395,32 @@ curl -k -X POST https://localhost:9443/api/auth/vault/login \
 ```
 
 > See [SSO Setup Guide](../guides/sso-setup.md) for complete Vault configuration.
+
+---
+
+### Generic OIDC (Browser SSO)
+
+**Endpoints:** `GET /auth/vault/login` (initiate) and `GET /auth/vault/callback`
+
+Browser-based OIDC login with PKCE. Despite the `VAULT_` prefix on the configuration variables, this is a **generic, standards-based OIDC flow**: the authorization, token, and JWKS endpoints are read from the provider's **discovery document**, so it works with any compliant OIDC identity provider. It is validated against HashiCorp Vault and **Keycloak**.
+
+**Configuration:**
+
+| Environment Variable | Description |
+|---------------------|-------------|
+| `VAULT_OIDC_ENABLED` | Enable the OIDC browser flow |
+| `VAULT_OIDC_CLIENT_ID` | OIDC client ID |
+| `VAULT_OIDC_PROVIDER_URL` | Provider/issuer URL (discovery document is fetched from here) |
+| `VAULT_OIDC_REDIRECT_URL` | Callback URL (default `https://localhost:9443/api/auth/vault/callback`) |
+| `VAULT_OIDC_SCOPES` | Requested scopes (default `openid profile`) |
+
+**Flow:**
+1. The browser hits `GET /api/auth/vault/login` and is redirected to the IdP's authorization endpoint.
+2. After authentication, the IdP redirects to the callback, which creates or updates the user, syncs policies from a `policies` claim (same rules as Vault JWT login), and hands tokens to the frontend.
+
+All SSO logins (Google, Vault JWT, and OIDC) are recorded in the audit log with provider metadata.
+
+> See [SSO Setup Guide](../guides/sso-setup.md) for provider-specific setup, including Keycloak.
 
 ---
 

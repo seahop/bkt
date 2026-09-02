@@ -1,11 +1,14 @@
 package api
 
 import (
+	"crypto/subtle"
+	"net/http"
 	"time"
 
 	authpkg "bkt/internal/auth"
 	"bkt/internal/config"
 	_ "bkt/docs/swagger" // swaggo generated docs
+	"bkt/internal/logger"
 	"bkt/internal/middleware"
 	"bkt/internal/web"
 
@@ -35,9 +38,34 @@ import (
 func SetupConsoleRouter(cfg *config.Config) *gin.Engine {
 	router := gin.Default()
 
+	// Trust only explicitly-configured proxies. With the default (empty) list,
+	// c.ClientIP() uses the real connection address and ignores client-supplied
+	// X-Forwarded-For — otherwise anyone could spoof the header to defeat
+	// per-IP rate limiting. Behind a real proxy, set TRUSTED_PROXIES.
+	// A bad entry fails closed for spoofing, but gin keeps whatever prefix
+	// parsed — warn so a typo doesn't silently collapse all proxied traffic
+	// into one rate-limit bucket.
+	if err := router.SetTrustedProxies(cfg.Server.TrustedProxies); err != nil {
+		logger.Warn("Invalid TRUSTED_PROXIES entry; check the configured CIDRs/IPs", map[string]interface{}{"error": err.Error()})
+	}
+
 	// Metrics + Swagger are registered before the middleware chain so they are
 	// not subject to CORS/UA validation (standard for scraping & docs).
-	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
+	// METRICS_TOKEN (optional) gates /metrics behind a bearer token so the
+	// endpoint isn't a free recon feed (bucket/object/user counts).
+	metricsHandler := gin.WrapH(promhttp.Handler())
+	if cfg.Server.MetricsToken != "" {
+		expected := []byte("Bearer " + cfg.Server.MetricsToken)
+		router.GET("/metrics", func(c *gin.Context) {
+			if subtle.ConstantTimeCompare([]byte(c.GetHeader("Authorization")), expected) != 1 {
+				c.AbortWithStatus(http.StatusUnauthorized)
+				return
+			}
+			metricsHandler(c)
+		})
+	} else {
+		router.GET("/metrics", metricsHandler)
+	}
 	router.GET("/api/docs/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
 	router.Use(middleware.RequestIDMiddleware())
@@ -73,9 +101,21 @@ func SetupConsoleRouter(cfg *config.Config) *gin.Engine {
 func SetupS3Router(cfg *config.Config) *gin.Engine {
 	router := gin.Default()
 
+	// Same trusted-proxy policy as the console listener (see SetupConsoleRouter).
+	if err := router.SetTrustedProxies(cfg.Server.TrustedProxies); err != nil {
+		logger.Warn("Invalid TRUSTED_PROXIES entry; check the configured CIDRs/IPs", map[string]interface{}{"error": err.Error()})
+	}
+
 	router.Use(middleware.RequestIDMiddleware())
 	router.Use(middleware.MetricsMiddleware())
 	router.Use(middleware.UserAgentValidationMiddleware())
+
+	// Optional per-IP rate limit on the S3 listener (SigV4 key-guessing / abuse
+	// protection). Disabled by default (0) so high-throughput s3fs/aws-cli
+	// workloads aren't throttled; enable via S3_RATE_LIMIT (requests/minute).
+	if cfg.Auth.S3RateLimit > 0 {
+		router.Use(middleware.RateLimitMiddleware(cfg.Auth.S3RateLimit, time.Minute))
+	}
 
 	s3Handler := NewS3APIHandler(cfg)
 	s3 := router.Group("")
@@ -117,6 +157,10 @@ func registerAPIRoutes(router *gin.Engine, cfg *config.Config) {
 				authRatePerMin = 5
 			}
 			authRateLimit := middleware.RateLimitMiddleware(authRatePerMin, time.Minute)
+			// SSO browser flows involve a few redirects per login, so allow a
+			// higher ceiling than password login while still throttling abuse
+			// (e.g. brute-forcing the unverified-JWT endpoint or callback spam).
+			ssoRateLimit := middleware.RateLimitMiddleware(authRatePerMin*6, time.Minute)
 
 			auth.POST("/register", authRateLimit, authHandler.Register)
 			auth.POST("/login", authRateLimit, authHandler.Login)
@@ -124,21 +168,21 @@ func registerAPIRoutes(router *gin.Engine, cfg *config.Config) {
 
 			// SSO configuration endpoint
 			ssoConfigHandler := NewSSOConfigHandler(cfg)
-			auth.GET("/sso/config", ssoConfigHandler.GetSSOConfig)
+			auth.GET("/sso/config", ssoRateLimit, ssoConfigHandler.GetSSOConfig)
 
 			// Google OAuth routes
 			googleHandler := authpkg.NewGoogleOAuthHandler(cfg)
-			auth.GET("/google/login", googleHandler.InitiateGoogleLogin)
-			auth.GET("/google/callback", googleHandler.HandleGoogleCallback)
+			auth.GET("/google/login", ssoRateLimit, googleHandler.InitiateGoogleLogin)
+			auth.GET("/google/callback", ssoRateLimit, googleHandler.HandleGoogleCallback)
 
-			// Vault JWT routes (legacy token-based login)
+			// Vault JWT routes (legacy token-based login) — rate-limited like login.
 			vaultJWTHandler := authpkg.NewVaultJWTHandler(cfg)
-			auth.POST("/vault/login", vaultJWTHandler.LoginWithVaultJWT)
+			auth.POST("/vault/login", authRateLimit, vaultJWTHandler.LoginWithVaultJWT)
 
 			// Vault OIDC routes (browser-based SSO with PKCE)
 			vaultOIDCHandler := authpkg.NewVaultOIDCHandler(cfg)
-			auth.GET("/vault/login", vaultOIDCHandler.InitiateVaultLogin)
-			auth.GET("/vault/callback", vaultOIDCHandler.HandleVaultCallback)
+			auth.GET("/vault/login", ssoRateLimit, vaultOIDCHandler.InitiateVaultLogin)
+			auth.GET("/vault/callback", ssoRateLimit, vaultOIDCHandler.HandleVaultCallback)
 		}
 
 		// Protected routes (require authentication)
@@ -163,6 +207,22 @@ func registerAPIRoutes(router *gin.Engine, cfg *config.Config) {
 
 			// Access key routes
 			accessKeyHandler := NewAccessKeyHandler(cfg)
+			// bkt-STS: temporary credentials for the authenticated user.
+			protected.POST("/sts/credentials", accessKeyHandler.IssueTemporaryCredentials)
+
+			// Groups (admin only)
+			groupHandler := NewGroupHandler()
+			groups := protected.Group("/groups", middleware.AdminMiddleware())
+			{
+				groups.GET("", groupHandler.ListGroups)
+				groups.POST("", groupHandler.CreateGroup)
+				groups.DELETE("/:id", groupHandler.DeleteGroup)
+				groups.POST("/:id/members", groupHandler.AddGroupMember)
+				groups.DELETE("/:id/members/:user_id", groupHandler.RemoveGroupMember)
+				groups.POST("/:id/policies", groupHandler.AttachGroupPolicy)
+				groups.DELETE("/:id/policies/:policy_id", groupHandler.DetachGroupPolicy)
+			}
+
 			accessKeys := protected.Group("/access-keys")
 			{
 				accessKeys.GET("", accessKeyHandler.ListAccessKeys)
@@ -186,6 +246,16 @@ func registerAPIRoutes(router *gin.Engine, cfg *config.Config) {
 				buckets.GET("/:name/objects", bucketHandler.ListObjects)
 				buckets.POST("/:name/objects", bucketHandler.UploadObject)
 				buckets.POST("/:name/objects/async", bucketHandler.UploadObjectAsync) // Async upload
+				buckets.POST("/:name/objects/presign", bucketHandler.PresignObject)   // Presigned GET URL
+				// NOTE: "/object-versions" (not "/objects/versions") — a static
+				// segment under /objects/ would conflict with gin's /objects/*key
+				// download wildcard.
+				buckets.GET("/:name/object-versions", bucketHandler.ListObjectVersionsREST)
+				buckets.DELETE("/:name/object-versions", bucketHandler.DeleteObjectVersionREST)
+				buckets.POST("/:name/objects/restore", bucketHandler.RestoreObjectVersion)
+				buckets.PUT("/:name/versioning", bucketHandler.SetBucketVersioning)
+				buckets.PUT("/:name/lifecycle", bucketHandler.SetBucketLifecycleREST)
+				buckets.PUT("/:name/settings", bucketHandler.SetBucketSettings)
 				buckets.POST("/:name/objects/move", bucketHandler.MoveObject)         // Move object
 				buckets.POST("/:name/objects/rename", bucketHandler.RenameObject)     // Rename object
 				buckets.POST("/:name/folders/move", bucketHandler.MoveFolder)         // Move folder recursively
@@ -213,6 +283,10 @@ func registerAPIRoutes(router *gin.Engine, cfg *config.Config) {
 				policies.POST("/users/:user_id/attach", middleware.AdminMiddleware(), policyHandler.AttachPolicyToUser)   // Admin only
 				policies.DELETE("/users/:user_id/detach/:policy_id", middleware.AdminMiddleware(), policyHandler.DetachPolicyFromUser) // Admin only
 			}
+
+			// Audit log route (admin only)
+			auditHandler := NewAuditHandler(cfg)
+			protected.GET("/audit", middleware.AdminMiddleware(), auditHandler.ListAuditLogs)
 
 			// S3 Configuration routes (admin only)
 			s3ConfigHandler := NewS3ConfigHandler(cfg)

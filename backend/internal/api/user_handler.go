@@ -68,8 +68,9 @@ func (h *UserHandler) UpdateCurrentUser(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 
 	var req struct {
-		Email    string `json:"email" binding:"omitempty,email"`
-		Password string `json:"password,omitempty"`
+		Email           string `json:"email" binding:"omitempty,email"`
+		CurrentPassword string `json:"current_password,omitempty"`
+		Password        string `json:"password,omitempty"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -93,8 +94,37 @@ func (h *UserHandler) UpdateCurrentUser(c *gin.Context) {
 		user.Email = req.Email
 	}
 
-	// Update password if provided
+	passwordChanged := false
 	if req.Password != "" {
+		// SSO-provisioned accounts are governed by the identity provider and
+		// must not be able to set a local password (which would bypass SSO
+		// policy sync and let them log in outside SSO).
+		if user.SSOProvider != "" {
+			c.JSON(http.StatusForbidden, models.ErrorResponse{
+				Error:   "Password change not allowed",
+				Message: "This account signs in via SSO and cannot set a local password.",
+			})
+			return
+		}
+
+		// Require the current password (re-authentication) so a stolen/borrowed
+		// session token cannot silently take over the account.
+		if user.Password == "" || !auth.CheckPassword(req.CurrentPassword, user.Password) {
+			c.JSON(http.StatusUnauthorized, models.ErrorResponse{
+				Error:   "Current password is incorrect",
+				Message: "Please provide your current password to change it.",
+			})
+			return
+		}
+
+		if len(req.Password) < 8 {
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{
+				Error:   "Password too short",
+				Message: "Password must be at least 8 characters.",
+			})
+			return
+		}
+
 		hashedPassword, err := auth.HashPassword(req.Password, h.config.Auth.BcryptCost)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
@@ -103,14 +133,34 @@ func (h *UserHandler) UpdateCurrentUser(c *gin.Context) {
 			return
 		}
 		user.Password = hashedPassword
+		// Invalidate all outstanding sessions on password change.
+		user.TokenVersion++
+		passwordChanged = true
 	}
 
 	if err := database.DB.Save(&user).Error; err != nil {
+		// Surface a unique-constraint clash (e.g. email already in use) as 409
+		// rather than a generic 500.
+		if strings.Contains(strings.ToLower(err.Error()), "unique") || strings.Contains(strings.ToLower(err.Error()), "duplicate") {
+			c.JSON(http.StatusConflict, models.ErrorResponse{
+				Error:   "Email already in use",
+				Message: "That email address is already associated with another account.",
+			})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to update user",
 			Message: "An internal error occurred. Please try again.",
 		})
 		return
+	}
+
+	if h.auditService != nil {
+		if passwordChanged {
+			h.auditService.LogSuccess(c, user.ID, user.Username, "user.password_change", "user", user.ID.String(), user.Username, nil)
+		} else if req.Email != "" {
+			h.auditService.LogSuccess(c, user.ID, user.Username, "user.email_change", "user", user.ID.String(), user.Username, nil)
+		}
 	}
 
 	c.JSON(http.StatusOK, user)
@@ -294,6 +344,35 @@ func (h *UserHandler) DeleteUser(c *gin.Context) {
 		return
 	}
 
+	// Hard-delete the user's access keys: the FK (fk_users_access_keys)
+	// otherwise blocks deleting any user who ever created a key, and a key
+	// row pointing at a deleted user is useless (S3 auth loads the user row).
+	// Key issuance/revocation history lives in the audit log.
+	if err := database.DB.Where("user_id = ?", userID).Delete(&models.AccessKey{}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to delete user",
+			Message: "Could not remove the user's access keys. Please try again.",
+		})
+		return
+	}
+
+	// Detach policies and group memberships: pure join rows that must die
+	// with the user (their FKs otherwise block deletion).
+	if err := database.DB.Exec(`DELETE FROM user_policies WHERE user_id = ?`, userID).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to delete user",
+			Message: "Could not detach the user's policies. Please try again.",
+		})
+		return
+	}
+	if err := database.DB.Exec(`DELETE FROM user_groups WHERE user_id = ?`, userID).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to delete user",
+			Message: "Could not remove the user's group memberships. Please try again.",
+		})
+		return
+	}
+
 	if err := database.DB.Delete(&models.User{}, "id = ?", userID).Error; err != nil {
 		// Get admin user info for audit log
 		adminUserID, _ := c.Get("user_id")
@@ -408,6 +487,9 @@ func (h *UserHandler) LockUser(c *gin.Context) {
 	}
 
 	user.IsLocked = true
+	// Invalidate outstanding sessions immediately so the lock takes effect on
+	// the console path without waiting for token expiry.
+	user.TokenVersion++
 	if err := database.DB.Save(&user).Error; err != nil {
 		// Get admin user info for audit log
 		adminUserID, _ := c.Get("user_id")
@@ -434,6 +516,11 @@ func (h *UserHandler) LockUser(c *gin.Context) {
 		})
 		return
 	}
+
+	// NOTE: the user's access keys are deliberately NOT deactivated here. The
+	// S3 auth path re-checks the live User.IsLocked flag on every request, so
+	// the lock already blocks S3 access — and leaving is_active untouched means
+	// unlocking restores the user's keys instead of silently bricking them.
 
 	// Get admin user info for audit log
 	adminUserID, _ := c.Get("user_id")

@@ -15,6 +15,7 @@ import (
 	"bkt/internal/config"
 	"bkt/internal/database"
 	"bkt/internal/models"
+	"bkt/internal/services"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -179,17 +180,13 @@ func (h *GoogleOAuthHandler) HandleGoogleCallback(c *gin.Context) {
 		}
 	}
 
-	// Generate JWT token for our system
-	accessTokenDuration, _ := time.ParseDuration(h.config.Auth.AccessTokenExpiry)
-	jwtToken, err := GenerateToken(user.ID, user.Username, user.IsAdmin, h.config.Auth.JWTSecret, accessTokenDuration)
-	if err != nil {
-		h.redirectWithError(c, "token_generation_failed", err.Error())
-		return
-	}
+	services.NewAuditService().LogSuccess(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, map[string]interface{}{"provider": "google"})
 
-	// Generate refresh token
+	// Generate our access+refresh pair (access carries the refresh JTI so
+	// logout can revoke the sibling refresh token).
+	accessTokenDuration, _ := time.ParseDuration(h.config.Auth.AccessTokenExpiry)
 	refreshTokenDuration, _ := time.ParseDuration(h.config.Auth.RefreshTokenExpiry)
-	refreshToken, err := GenerateToken(user.ID, user.Username, user.IsAdmin, h.config.Auth.JWTSecret, refreshTokenDuration)
+	jwtToken, refreshToken, err := GenerateTokenPair(user.ID, user.Username, user.IsAdmin, user.TokenVersion, h.config.Auth.JWTSecret, accessTokenDuration, refreshTokenDuration)
 	if err != nil {
 		h.redirectWithError(c, "token_generation_failed", err.Error())
 		return

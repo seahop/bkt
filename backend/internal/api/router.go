@@ -179,10 +179,16 @@ func registerAPIRoutes(router *gin.Engine, cfg *config.Config) {
 			vaultJWTHandler := authpkg.NewVaultJWTHandler(cfg)
 			auth.POST("/vault/login", authRateLimit, vaultJWTHandler.LoginWithVaultJWT)
 
-			// Vault OIDC routes (browser-based SSO with PKCE)
+			// Vault OIDC routes (browser-based SSO with PKCE) — historical slot
 			vaultOIDCHandler := authpkg.NewVaultOIDCHandler(cfg)
-			auth.GET("/vault/login", ssoRateLimit, vaultOIDCHandler.InitiateVaultLogin)
-			auth.GET("/vault/callback", ssoRateLimit, vaultOIDCHandler.HandleVaultCallback)
+			auth.GET("/vault/login", ssoRateLimit, vaultOIDCHandler.Initiate)
+			auth.GET("/vault/callback", ssoRateLimit, vaultOIDCHandler.Callback)
+
+			// Generic OIDC provider (Keycloak, Okta, Entra ID, Authentik, ...):
+			// authorization code + PKCE, discovery-driven, claims-based roles.
+			oidcHandler := authpkg.NewOIDCHandler(cfg)
+			auth.GET("/oidc/login", ssoRateLimit, oidcHandler.Initiate)
+			auth.GET("/oidc/callback", ssoRateLimit, oidcHandler.Callback)
 		}
 
 		// Protected routes (require authentication)

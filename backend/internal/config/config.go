@@ -16,6 +16,7 @@ type Config struct {
 	CORS       CORSConfig
 	GoogleSSO  GoogleSSOConfig
 	VaultSSO   VaultSSOConfig
+	OIDC       OIDCConfig
 }
 
 type DatabaseConfig struct {
@@ -117,6 +118,29 @@ type VaultSSOConfig struct {
 	Scopes      string // space-separated, e.g., "openid profile"
 }
 
+// OIDCConfig is the generic OpenID Connect provider (Keycloak, Okta, Entra ID,
+// Auth0, Authentik, Kanidm, Vault, ...). Endpoints come from the issuer's
+// discovery document. The authorization-code flow always uses PKCE (S256);
+// a client secret is optional and, when set, additionally authenticates the
+// token request (confidential client).
+type OIDCConfig struct {
+	Enabled      bool
+	IssuerURL    string // e.g. https://kc.example.com/realms/myrealm
+	ClientID     string
+	ClientSecret string // optional — public client (PKCE only) when empty
+	RedirectURL  string // backend callback, must match the IdP's registered redirect URI
+	Scopes       string // space-separated; "openid" is always required
+	ProviderName string // login-button label, e.g. "Okta"
+
+	// Claims mapping
+	UsernameClaim string // claim used for the username at first login (default: preferred_username, then email local part)
+	GroupsClaim   string // claim carrying group names (default "groups")
+	AdminGroup    string // members of this group become admins (re-evaluated every login); empty = never via SSO
+	UserGroup     string // when set, non-admin users must be in this group or login is denied
+	PoliciesClaim string // claim carrying bkt policy names to sync (default "policies")
+	LinkByEmail   bool   // link an unknown subject to an existing SSO account with the same verified email
+}
+
 type CORSConfig struct {
 	AllowedOrigins   []string
 	AllowCredentials bool
@@ -202,6 +226,7 @@ func Load() *Config {
 			RedirectURL: getEnv("VAULT_OIDC_REDIRECT_URL", "https://localhost:9443/api/auth/vault/callback"),
 			Scopes:      getEnv("VAULT_OIDC_SCOPES", "openid profile"),
 		},
+		OIDC: loadOIDCConfig(),
 	}
 
 	// Validate critical secrets in production
@@ -250,6 +275,16 @@ func (c *Config) Validate() error {
 	// If Google OIDC is enabled, credentials must be set
 	if c.GoogleSSO.OIDCEnabled && (c.GoogleSSO.ClientID == "" || c.GoogleSSO.ClientSecret == "") {
 		errors = append(errors, "Google OIDC enabled but GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET not set")
+	}
+
+	// Generic OIDC: the pieces the flow cannot run without.
+	if c.OIDC.Enabled {
+		if c.OIDC.IssuerURL == "" || c.OIDC.ClientID == "" {
+			errors = append(errors, "OIDC enabled but OIDC_ISSUER_URL or OIDC_CLIENT_ID not set")
+		}
+		if !strings.HasPrefix(c.OIDC.RedirectURL, "https://") {
+			errors = append(errors, "OIDC_REDIRECT_URL must be an https:// URL in production")
+		}
 	}
 
 	// If Google Workspace integration is enabled, service account must be configured
@@ -345,4 +380,32 @@ func splitAndTrim(s, delimiter string) []string {
 		}
 	}
 	return parts
+}
+
+// loadOIDCConfig reads the generic OIDC provider settings. OIDC_ENABLED defaults
+// to "on" whenever an issuer and client ID are both supplied, so the common case
+// needs no explicit switch; set OIDC_ENABLED=false to keep a configured provider
+// off (e.g. during rollout).
+func loadOIDCConfig() OIDCConfig {
+	issuer := strings.TrimSpace(getEnv("OIDC_ISSUER_URL", ""))
+	clientID := strings.TrimSpace(getEnv("OIDC_CLIENT_ID", ""))
+	enabledDefault := "false"
+	if issuer != "" && clientID != "" {
+		enabledDefault = "true"
+	}
+	return OIDCConfig{
+		Enabled:       getEnv("OIDC_ENABLED", enabledDefault) == "true",
+		IssuerURL:     issuer,
+		ClientID:      clientID,
+		ClientSecret:  getEnv("OIDC_CLIENT_SECRET", ""),
+		RedirectURL:   getEnv("OIDC_REDIRECT_URL", "https://localhost:9443/api/auth/oidc/callback"),
+		Scopes:        getEnv("OIDC_SCOPES", "openid profile email"),
+		ProviderName:  getEnv("OIDC_PROVIDER_NAME", "SSO"),
+		UsernameClaim: getEnv("OIDC_USERNAME_CLAIM", ""),
+		GroupsClaim:   getEnv("OIDC_GROUPS_CLAIM", "groups"),
+		AdminGroup:    getEnv("OIDC_ADMIN_GROUP", ""),
+		UserGroup:     getEnv("OIDC_USER_GROUP", ""),
+		PoliciesClaim: getEnv("OIDC_POLICIES_CLAIM", "policies"),
+		LinkByEmail:   getEnv("OIDC_LINK_BY_EMAIL", "false") == "true",
+	}
 }

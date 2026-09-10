@@ -34,6 +34,18 @@ data:
   TRUSTED_PROXIES: {{ .Values.backend.env.TRUSTED_PROXIES | default "" | quote }}
   S3_RATE_LIMIT: {{ .Values.backend.env.S3_RATE_LIMIT | default "0" | quote }}
   AUDIT_RETENTION_DAYS: {{ .Values.backend.env.AUDIT_RETENTION_DAYS | default "90" | quote }}
+  OIDC_ENABLED: {{ .Values.backend.env.OIDC_ENABLED | default "" | quote }}
+  OIDC_ISSUER_URL: {{ .Values.backend.env.OIDC_ISSUER_URL | default "" | quote }}
+  OIDC_CLIENT_ID: {{ .Values.backend.env.OIDC_CLIENT_ID | default "" | quote }}
+  OIDC_REDIRECT_URL: {{ .Values.backend.env.OIDC_REDIRECT_URL | default "" | quote }}
+  OIDC_SCOPES: {{ .Values.backend.env.OIDC_SCOPES | default "openid profile email" | quote }}
+  OIDC_PROVIDER_NAME: {{ .Values.backend.env.OIDC_PROVIDER_NAME | default "SSO" | quote }}
+  OIDC_USERNAME_CLAIM: {{ .Values.backend.env.OIDC_USERNAME_CLAIM | default "" | quote }}
+  OIDC_GROUPS_CLAIM: {{ .Values.backend.env.OIDC_GROUPS_CLAIM | default "groups" | quote }}
+  OIDC_ADMIN_GROUP: {{ .Values.backend.env.OIDC_ADMIN_GROUP | default "" | quote }}
+  OIDC_USER_GROUP: {{ .Values.backend.env.OIDC_USER_GROUP | default "" | quote }}
+  OIDC_POLICIES_CLAIM: {{ .Values.backend.env.OIDC_POLICIES_CLAIM | default "policies" | quote }}
+  OIDC_LINK_BY_EMAIL: {{ .Values.backend.env.OIDC_LINK_BY_EMAIL | default "false" | quote }}
   GOOGLE_OIDC_ENABLED: {{ .Values.backend.env.GOOGLE_OIDC_ENABLED | default "false" | quote }}
   GOOGLE_CLIENT_ID: {{ .Values.backend.env.GOOGLE_CLIENT_ID | default "" | quote }}
   GOOGLE_REDIRECT_URL: {{ .Values.backend.env.GOOGLE_REDIRECT_URL | default "" | quote }}

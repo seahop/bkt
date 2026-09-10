@@ -21,6 +21,10 @@ type SSOConfigResponse struct {
 	GoogleAuthURL string `json:"google_auth_url,omitempty"`
 	VaultEnabled  bool   `json:"vault_enabled"`
 	VaultAuthURL  string `json:"vault_auth_url,omitempty"`
+	// Generic OIDC provider (OIDC_* settings)
+	OIDCEnabled      bool   `json:"oidc_enabled"`
+	OIDCAuthURL      string `json:"oidc_auth_url,omitempty"`
+	OIDCProviderName string `json:"oidc_provider_name,omitempty"`
 }
 
 // GetSSOConfig returns the SSO configuration for the frontend
@@ -41,6 +45,12 @@ func (h *SSOConfigHandler) GetSSOConfig(c *gin.Context) {
 	// Include Vault auth URL if OIDC is enabled (browser-based flow)
 	if h.config.VaultSSO.OIDCEnabled {
 		response.VaultAuthURL = "/api/auth/vault/login"
+	}
+
+	if h.config.OIDC.Enabled && h.config.OIDC.IssuerURL != "" && h.config.OIDC.ClientID != "" {
+		response.OIDCEnabled = true
+		response.OIDCAuthURL = "/api/auth/oidc/login"
+		response.OIDCProviderName = h.config.OIDC.ProviderName
 	}
 
 	c.JSON(http.StatusOK, response)

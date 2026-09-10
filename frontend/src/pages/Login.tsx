@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../store/authStore'
-import { Database } from 'lucide-react'
+import { Database, KeyRound } from 'lucide-react'
 import GoogleSignInButton from '../components/GoogleSignInButton'
 import VaultLoginModal from '../components/VaultLoginModal'
-import { getSSOConfig, SSOConfig, loginWithVaultOIDC } from '../services/sso'
+import { getSSOConfig, SSOConfig, loginWithVaultOIDC, loginWithOIDC } from '../services/sso'
 import { getErrorMessage } from '../utils/errors'
 
 export default function Login() {
@@ -110,7 +110,7 @@ export default function Login() {
           </form>
 
           {/* SSO Options */}
-          {ssoConfig && (ssoConfig.google_enabled || ssoConfig.vault_enabled) && (
+          {ssoConfig && (ssoConfig.google_enabled || ssoConfig.vault_enabled || ssoConfig.oidc_enabled) && (
             <>
               <div className="flex items-center gap-3 my-6" aria-hidden="true">
                 <div className="flex-1 border-t border-dark-border" />
@@ -121,6 +121,20 @@ export default function Login() {
               </div>
 
               <div className="space-y-3">
+                {ssoConfig.oidc_enabled && (
+                  <button
+                    onClick={() => loginWithOIDC()}
+                    disabled={loading}
+                    className="w-full inline-flex items-center justify-center gap-2.5 px-4 py-2.5 rounded-lg
+                      border border-dark-border bg-dark-inset hover:bg-dark-surfaceHover
+                      text-sm font-medium text-dark-text transition-colors duration-150
+                      disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <KeyRound className="w-5 h-5 shrink-0 text-blue-400" />
+                    <span>Sign in with {ssoConfig.oidc_provider_name || 'SSO'}</span>
+                  </button>
+                )}
+
                 {ssoConfig.google_enabled && (
                   <GoogleSignInButton disabled={loading} />
                 )}

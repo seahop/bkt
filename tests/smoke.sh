@@ -703,6 +703,15 @@ test_ui_api() {
   [[ "$sso_code" == "200" ]] \
     && pass "GET /api/auth/sso/config → 200 (login page SSO config)" \
     || fail "GET /api/auth/sso/config" "HTTP $sso_code"
+
+  # Every provider slot must be reported explicitly so the login page can
+  # render (or hide) its button; a missing key means a backend/frontend drift.
+  local sso_body
+  sso_body=$(api "${BKT_ENDPOINT}/api/auth/sso/config")
+  echo "$sso_body" | grep -q '"google_enabled"' && echo "$sso_body" | grep -q '"vault_enabled"' \
+    && echo "$sso_body" | grep -q '"oidc_enabled"' \
+    && pass "GET /api/auth/sso/config → reports google/vault/oidc provider flags" \
+    || fail "GET /api/auth/sso/config provider flags" "$sso_body"
 }
 
 # ── Section 12: S3 pagination ─────────────────────────────────────────────────

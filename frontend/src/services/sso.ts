@@ -5,6 +5,10 @@ export interface SSOConfig {
   google_auth_url?: string;
   vault_enabled: boolean;
   vault_auth_url?: string;
+  /** Generic OIDC provider (OIDC_* settings): Keycloak, Okta, Entra ID, Authentik, ... */
+  oidc_enabled: boolean;
+  oidc_auth_url?: string;
+  oidc_provider_name?: string;
 }
 
 export interface SSOLoginResponse {
@@ -49,4 +53,11 @@ export const loginWithVault = async (token: string): Promise<SSOLoginResponse> =
 export const loginWithVaultOIDC = (): void => {
   // Redirect to backend which will initiate OIDC flow with PKCE
   window.location.href = `/api/auth/vault/login`;
+};
+
+/**
+ * Initiate generic OIDC login (authorization code + PKCE) - redirects to the IdP
+ */
+export const loginWithOIDC = (): void => {
+  window.location.href = `/api/auth/oidc/login`;
 };

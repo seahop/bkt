@@ -94,6 +94,22 @@ backend:
     # Empty (default) leaves the endpoint open. Stored as a Secret.
     METRICS_TOKEN: ""
 
+    # Generic OIDC SSO (any OpenID Connect IdP; authorization code + PKCE).
+    # Enabled automatically when OIDC_ISSUER_URL and OIDC_CLIENT_ID are set.
+    OIDC_ENABLED: ""
+    OIDC_ISSUER_URL: ""
+    OIDC_CLIENT_ID: ""
+    OIDC_CLIENT_SECRET: ""        # optional; stored in the Secret
+    OIDC_REDIRECT_URL: ""         # https://<console-host>/api/auth/oidc/callback
+    OIDC_SCOPES: "openid profile email"
+    OIDC_PROVIDER_NAME: "SSO"
+    OIDC_USERNAME_CLAIM: ""
+    OIDC_GROUPS_CLAIM: "groups"
+    OIDC_ADMIN_GROUP: ""
+    OIDC_USER_GROUP: ""
+    OIDC_POLICIES_CLAIM: "policies"
+    OIDC_LINK_BY_EMAIL: "false"
+
     # Google OIDC SSO
     GOOGLE_OIDC_ENABLED: "false"
     GOOGLE_CLIENT_ID: ""
@@ -142,6 +158,7 @@ backend:
     - ENCRYPTION_KEY
     - ADMIN_PASSWORD
     - GOOGLE_CLIENT_SECRET
+    - OIDC_CLIENT_SECRET
     - S3_SECRET_ACCESS_KEY
     - S3_ACCESS_KEY_ID
     - METRICS_TOKEN

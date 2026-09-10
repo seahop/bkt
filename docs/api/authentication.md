@@ -398,29 +398,54 @@ curl -k -X POST https://localhost:9443/api/auth/vault/login \
 
 ---
 
-### Generic OIDC (Browser SSO)
+### OIDC (Browser SSO)
 
-**Endpoints:** `GET /auth/vault/login` (initiate) and `GET /auth/vault/callback`
+**Endpoints:** `GET /auth/oidc/login` (initiate) and `GET /auth/oidc/callback`
 
-Browser-based OIDC login with PKCE. Despite the `VAULT_` prefix on the configuration variables, this is a **generic, standards-based OIDC flow**: the authorization, token, and JWKS endpoints are read from the provider's **discovery document**, so it works with any compliant OIDC identity provider. It is validated against HashiCorp Vault and **Keycloak**.
+Standards-based OpenID Connect **authorization code flow with PKCE (S256)**
+against any compliant identity provider (Keycloak, Okta, Entra ID, Auth0,
+Authentik, Kanidm, Vault, …). Endpoints are discovered from
+`OIDC_ISSUER_URL/.well-known/openid-configuration`; the ID token is verified
+against the provider's JWKS (RS256/384/512, ES256/384/512), with issuer,
+audience, expiry and nonce checks. Profile and group claims are merged from the
+ID token and the UserInfo endpoint.
 
 **Configuration:**
 
-| Environment Variable | Description |
-|---------------------|-------------|
-| `VAULT_OIDC_ENABLED` | Enable the OIDC browser flow |
-| `VAULT_OIDC_CLIENT_ID` | OIDC client ID |
-| `VAULT_OIDC_PROVIDER_URL` | Provider/issuer URL (discovery document is fetched from here) |
-| `VAULT_OIDC_REDIRECT_URL` | Callback URL (default `https://localhost:9443/api/auth/vault/callback`) |
-| `VAULT_OIDC_SCOPES` | Requested scopes (default `openid profile`) |
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `OIDC_ISSUER_URL` | — | Issuer URL (discovery document is fetched from here) |
+| `OIDC_CLIENT_ID` | — | OIDC client ID |
+| `OIDC_CLIENT_SECRET` | — | Optional client secret (confidential client). PKCE is used either way |
+| `OIDC_REDIRECT_URL` | `https://localhost:9443/api/auth/oidc/callback` | Backend callback registered at the IdP |
+| `OIDC_SCOPES` | `openid profile email` | Requested scopes (`openid` is always added) |
+| `OIDC_PROVIDER_NAME` | `SSO` | Login button label |
+| `OIDC_ENABLED` | implied | `false` keeps a configured provider off |
+| `OIDC_USERNAME_CLAIM` | — | Claim for the username at first login (default `preferred_username`, then email local part) |
+| `OIDC_GROUPS_CLAIM` | `groups` | Claim carrying group names |
+| `OIDC_ADMIN_GROUP` | — | Members become admins; re-evaluated on every login |
+| `OIDC_USER_GROUP` | — | If set, non-admins must be members or login is denied |
+| `OIDC_POLICIES_CLAIM` | `policies` | Claim listing bkt policy names to sync |
+| `OIDC_LINK_BY_EMAIL` | `false` | Link new subjects to existing OIDC accounts by verified email |
 
 **Flow:**
-1. The browser hits `GET /api/auth/vault/login` and is redirected to the IdP's authorization endpoint.
-2. After authentication, the IdP redirects to the callback, which creates or updates the user, syncs policies from a `policies` claim (same rules as Vault JWT login), and hands tokens to the frontend.
+1. The browser hits `GET /api/auth/oidc/login`. bkt mints a PKCE verifier, `state` and `nonce` (HttpOnly, `SameSite=Lax` cookies, 10 min) and redirects to the IdP's authorization endpoint with `code_challenge_method=S256`.
+2. The IdP redirects to `GET /api/auth/oidc/callback?code=…&state=…`. bkt checks `state`, exchanges the code with the `code_verifier` (and client secret, if configured), verifies the ID token, calls UserInfo, resolves role and policies from claims, creates or updates the user, and redirects to `FRONTEND_URL/auth/oidc/callback#token=…&refresh_token=…`.
+3. Failures redirect to the same page with `#error=<code>&error_description=…`. Codes include `invalid_state`, `authentication_failed`, `access_denied_no_groups`, `access_denied_group`, `account_locked`, `user_error`.
 
-All SSO logins (Google, Vault JWT, and OIDC) are recorded in the audit log with provider metadata.
+Successful and denied logins are recorded in the audit log with `provider`, `subject` and `groups` metadata.
 
-> See [SSO Setup Guide](../guides/sso-setup.md) for provider-specific setup, including Keycloak.
+**SSO config response fields:** `oidc_enabled`, `oidc_auth_url`, `oidc_provider_name`.
+
+---
+
+### Vault OIDC (legacy slot)
+
+**Endpoints:** `GET /auth/vault/login` and `GET /auth/vault/callback`
+
+The same implementation driven by the older `VAULT_OIDC_*` variables (`VAULT_OIDC_ENABLED`, `VAULT_OIDC_CLIENT_ID`, `VAULT_OIDC_PROVIDER_URL`, `VAULT_OIDC_REDIRECT_URL`, `VAULT_OIDC_SCOPES`). Kept for existing deployments; it has no claims mapping beyond the `policies` claim. New integrations should use `OIDC_*`.
+
+> See [SSO Setup Guide](../guides/sso-setup.md) for provider-specific setup (Keycloak, Okta, Entra ID, Authentik, Kanidm).
 
 ---
 

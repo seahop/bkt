@@ -8,16 +8,19 @@ The system supports two SSO integrations:
 
 | Provider | Protocol | Policy Support | Use Case |
 |----------|----------|----------------|----------|
-| **Generic OIDC** (Vault, Keycloak, any standard IdP) | OIDC + PKCE | Full (via `policies` claim) | Any OpenID Connect identity provider |
+| **OIDC** (Keycloak, Okta, Entra ID, Auth0, Authentik, Kanidm, …) | OIDC authorization code + PKCE | Full (`policies` claim) + admin/user groups | Any OpenID Connect identity provider — **recommended** |
+| **Vault OIDC** (legacy slot) | OIDC + PKCE | Full (via `policies` claim) | Existing `VAULT_OIDC_*` deployments |
 | **HashiCorp Vault** (legacy) | JWT | Full (via claims) | Direct JWT login against Vault's JWT auth |
 | **Google OAuth** | OAuth 2.0 | Full (via Workspace groups) | Google Workspace environments |
 | **Google OAuth** | OAuth 2.0 | Manual only | Personal Gmail accounts |
 
-The browser-based OIDC flow is **generic**: the authorization, token, and JWKS
-endpoints are all taken from the provider's discovery document
-(`<provider>/.well-known/openid-configuration`), so **any standard OIDC IdP
-works** through the `VAULT_OIDC_*` variables (the `VAULT_` prefix is historical).
-It has been validated against HashiCorp Vault and **Keycloak 26**.
+The browser-based OIDC flow is **generic**: the authorization, token, UserInfo
+and JWKS endpoints are all taken from the provider's discovery document
+(`<issuer>/.well-known/openid-configuration`), so **any standard OIDC IdP
+works**. Configure it with the `OIDC_*` variables (below). The older
+`VAULT_OIDC_*` variables drive the same code and keep working for existing
+deployments, but they lack the claims mapping (admin/user groups, username
+claim, account linking) that `OIDC_*` adds.
 
 ### Key Features
 
@@ -74,47 +77,139 @@ Users can have multiple policies. When evaluating access:
 
 ---
 
-## Generic OIDC Configuration (any IdP)
+## OIDC Configuration (any IdP)
 
-Browser-based SSO with PKCE works with any standard OIDC provider. Configure it
-with the `VAULT_OIDC_*` variables — endpoints are discovered automatically from
-the provider URL:
+bkt is an OpenID Connect **relying party** using the **authorization code flow
+with PKCE (S256)** — the flow every current IdP requires for browser clients.
+PKCE is always sent; a client secret is optional. State and nonce protect
+against CSRF and token injection, the ID token is verified against the
+provider's JWKS (RS256/384/512 and ES256/384/512), and profile/group claims are
+read from the ID token and the UserInfo endpoint.
+
+### Environment variables
 
 ```bash
-VAULT_OIDC_ENABLED=true
-VAULT_OIDC_CLIENT_ID=<your client id>
-VAULT_OIDC_PROVIDER_URL=<issuer URL — must serve /.well-known/openid-configuration>
-VAULT_OIDC_REDIRECT_URL=https://<console-host>/api/auth/vault/callback
-VAULT_OIDC_SCOPES=openid profile
-FRONTEND_URL=https://<console-host>
+OIDC_ISSUER_URL=https://idp.example.com/realms/myrealm   # must serve /.well-known/openid-configuration
+OIDC_CLIENT_ID=bkt
+OIDC_CLIENT_SECRET=                                      # optional — confidential client. Empty = public client (PKCE only)
+OIDC_REDIRECT_URL=https://bkt.example.com/api/auth/oidc/callback
+OIDC_SCOPES=openid profile email
+OIDC_PROVIDER_NAME=Okta                                  # label on the login button
+FRONTEND_URL=https://bkt.example.com
+
+# Claims mapping (all optional)
+OIDC_USERNAME_CLAIM=          # username at first login; default preferred_username → email local part
+OIDC_GROUPS_CLAIM=groups      # claim carrying group names
+OIDC_ADMIN_GROUP=bkt-admins   # members are bkt admins; re-evaluated every login. Empty = SSO never grants admin
+OIDC_USER_GROUP=bkt-users     # if set, non-admins must be members or login is denied
+OIDC_POLICIES_CLAIM=policies  # claim listing bkt policy names to sync on every login
+OIDC_LINK_BY_EMAIL=false      # link a new subject to an existing OIDC account with the same *verified* email
 ```
 
-For a Vault-specific walkthrough (provider, client, scopes, group-based policy
-sync), see the [Vault OIDC Setup Guide](../deployment/vault-oidc-setup.md).
+`OIDC_ENABLED` is implied when the issuer and client ID are both set; set
+`OIDC_ENABLED=false` to keep a configured provider switched off.
+
+### How users and roles are resolved
+
+- **Identity** is the ID token's `sub`; it is stored as the user's SSO ID and is
+  the only thing matched on later logins. Renaming a user in the IdP never
+  creates a duplicate.
+- **Username** is chosen only when the account is first created: the
+  `OIDC_USERNAME_CLAIM` claim if set, else `preferred_username`, `name`, the
+  email local part, then `sub`. It is sanitized to `A-Z a-z 0-9 . _ -` and
+  suffixed with a number if it collides with any existing account, so an IdP
+  can never take over a local user.
+- **Email** must be unique. If the address already belongs to a local (or
+  other-provider) account, login fails with a clear message rather than
+  silently creating a second identity.
+- **Admin** is granted to members of `OIDC_ADMIN_GROUP` and revoked from
+  everyone else *on every login*, so group changes in the IdP take effect at
+  once. Leave it empty to manage admins in bkt only (SSO never touches
+  `is_admin`).
+- **Access gating**: when `OIDC_USER_GROUP` is set, users who are in neither
+  group are denied with one of two distinct errors — *no groups claim at all*
+  (a mapper is missing) or *not a member* — and the denial is audit-logged.
+- **Policies**: the `OIDC_POLICIES_CLAIM` claim (JSON array, or a space/comma
+  separated string) is synced to the user's bkt policies on every login; the
+  IdP is the source of truth. Names must match bkt policies exactly.
+- **Account linking** (`OIDC_LINK_BY_EMAIL=true`) is for IdP migrations where
+  every user receives a new `sub`: an unknown subject whose `email_verified`
+  address matches an existing **OIDC** account of this provider is attached to
+  that account. Local password accounts are never linked automatically.
 
 ### Example: Keycloak
 
-Validated against Keycloak 26.
-
-1. In your realm, create a client:
-   - **Client type**: OpenID Connect, **public** client (no client secret —
-     bkt uses PKCE with the S256 challenge)
-   - **Valid redirect URI**: `https://<console-host>/api/auth/vault/callback`
-2. Configure bkt with the **realm URL** as the provider URL:
+1. Create a client in your realm: type **OpenID Connect**, client
+   authentication **on** (confidential) or **off** (public, PKCE only — both
+   work), *Proof Key for Code Exchange* method **S256**.
+2. Valid redirect URI: `https://bkt.example.com/api/auth/oidc/callback`.
+3. Client scopes: make sure `email` and `profile` are assigned. For groups, add
+   a **Group Membership** mapper named `groups` (uncheck *Full group path* so
+   names come through as `bkt-admins`, not `/bkt-admins`).
 
 ```bash
-VAULT_OIDC_ENABLED=true
-VAULT_OIDC_CLIENT_ID=bkt
-VAULT_OIDC_PROVIDER_URL=https://kc.example.com/realms/myrealm
-VAULT_OIDC_REDIRECT_URL=https://bkt.example.com/api/auth/vault/callback
-VAULT_OIDC_SCOPES=openid profile
+OIDC_ISSUER_URL=https://kc.example.com/realms/myrealm
+OIDC_CLIENT_ID=bkt
+OIDC_CLIENT_SECRET=<from Credentials tab, or empty for a public client>
+OIDC_REDIRECT_URL=https://bkt.example.com/api/auth/oidc/callback
+OIDC_PROVIDER_NAME=Keycloak
+OIDC_ADMIN_GROUP=bkt-admins
+OIDC_USER_GROUP=bkt-users
 FRONTEND_URL=https://bkt.example.com
 ```
 
-3. **Optional — policy sync**: add a mapper (e.g. on a client scope or group
-   membership) that emits a `policies` claim as a **JSON array** of bkt policy
-   names in the ID token. On each login the user's policies are synced to that
-   list (names must match bkt policies exactly).
+### Example: Okta
+
+Create an **OIDC – Web Application**, grant *Authorization Code*, add the
+sign-in redirect URI. To send groups, add a `groups` claim to the ID token
+(Security → API → your authorization server → Claims: name `groups`, include
+in ID token, value type *Groups*, filter *Matches regex* `.*`).
+
+```bash
+OIDC_ISSUER_URL=https://<tenant>.okta.com/oauth2/default
+OIDC_CLIENT_ID=<client id>
+OIDC_CLIENT_SECRET=<client secret>
+OIDC_PROVIDER_NAME=Okta
+OIDC_ADMIN_GROUP=bkt-admins
+```
+
+### Example: Microsoft Entra ID (Azure AD)
+
+Register an app (Web platform, redirect URI as above). Under *Token
+configuration* add the **groups** claim (or use app roles) and the **email**
+and **upn** optional claims. Entra emits group *object IDs* by default; either
+switch the claim to group names for security groups or set `OIDC_ADMIN_GROUP`
+to the admin group's object ID.
+
+```bash
+OIDC_ISSUER_URL=https://login.microsoftonline.com/<tenant-id>/v2.0
+OIDC_CLIENT_ID=<application (client) id>
+OIDC_CLIENT_SECRET=<client secret>
+OIDC_USERNAME_CLAIM=upn
+OIDC_PROVIDER_NAME=Microsoft
+OIDC_ADMIN_GROUP=<group name or object id>
+```
+
+### Example: Authentik / Kanidm / Auth0
+
+All three are standard: use the issuer URL from the provider (Authentik:
+`https://auth.example.com/application/o/<slug>/`; Kanidm:
+`https://idm.example.com/oauth2/openid/<client>`; Auth0:
+`https://<tenant>.auth0.com/`), register the redirect URI, and expose a
+`groups` claim. Kanidm signs ID tokens with **ES256** by default — supported.
+
+### Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| Redirected back with `invalid_state` | The 10-minute login window expired, or cookies were blocked. Start the login again from the bkt login page. |
+| `token exchange failed (400) … PKCE` | The IdP client is configured for a different PKCE method. Use S256 (bkt does not support `plain`). |
+| `token exchange failed (401) invalid_client` | Wrong or missing `OIDC_CLIENT_SECRET` for a confidential client, or the client is public but a secret was set. |
+| `ID token verification failed: unexpected signing method` | The client is configured to sign ID tokens with HS256. Switch it to RS256 or ES256. |
+| `token response contained no id_token` | The `openid` scope is not granted to the client. |
+| `access_denied_no_groups` on the login page | The token has no groups claim: add a groups mapper/claim in the IdP. |
+| Username is `jane_doe1` | `jane_doe` already existed (local or another provider); the SSO account was created with a suffix instead of taking over the existing one. |
+| Behind a reverse proxy the callback fails silently | bkt sets `Secure` cookies when it sees TLS or `X-Forwarded-Proto: https`; make sure the proxy forwards that header. |
 
 ## Vault JWT Configuration
 

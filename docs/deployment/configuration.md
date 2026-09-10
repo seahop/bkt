@@ -92,6 +92,13 @@ creates them in `.env`.
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` | — | Generic OIDC login (authorization code + PKCE) with any OpenID Connect IdP; setting both enables it |
+| `OIDC_CLIENT_SECRET` | — | Optional; makes bkt a confidential client (PKCE is always used) |
+| `OIDC_REDIRECT_URL` | `https://localhost:9443/api/auth/oidc/callback` | Backend callback registered at the IdP |
+| `OIDC_SCOPES` / `OIDC_PROVIDER_NAME` | `openid profile email` / `SSO` | Scopes to request; login button label |
+| `OIDC_USERNAME_CLAIM` / `OIDC_GROUPS_CLAIM` / `OIDC_POLICIES_CLAIM` | — / `groups` / `policies` | Claims mapping (see [SSO guide](../guides/sso-setup.md)) |
+| `OIDC_ADMIN_GROUP` / `OIDC_USER_GROUP` | — | Group that grants admin; group required for access (optional) |
+| `OIDC_LINK_BY_EMAIL` | `false` | Link new subjects to existing OIDC accounts by verified email |
 | `GOOGLE_OIDC_ENABLED` | `false` | Enable Google OIDC login |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | — | Google OAuth credentials |
 | `GOOGLE_REDIRECT_URL` | `https://localhost:9443/api/auth/google/callback` | OAuth callback |

@@ -4,7 +4,22 @@ import { Database, AlertCircle } from 'lucide-react';
 import { useAuthStore } from '../store/authStore';
 import { userApi } from '../services/api';
 
-export default function GoogleCallback() {
+// Friendlier copy for the denial codes the backend's OIDC flow can emit.
+const ERROR_HINTS: Record<string, string> = {
+  access_denied_no_groups: 'Your account did not include group membership. Ask an administrator to add the groups claim to the identity provider token.',
+  access_denied_group: 'Your account is not in a group that grants access to bkt. Ask an administrator to add you to the appropriate group.',
+  invalid_state: 'The sign-in attempt expired or was tampered with. Please try again.',
+  missing_verifier: 'The sign-in attempt expired. Please try again.',
+  missing_nonce: 'The sign-in attempt expired. Please try again.',
+  account_locked: 'This account is locked. Contact an administrator.',
+};
+
+/**
+ * Shared landing page for every browser-based SSO provider. The backend
+ * completes the provider exchange and redirects here with either
+ * #token=…&refresh_token=… or #error=…&error_description=… in the fragment.
+ */
+export default function SSOCallback({ provider }: { provider: string }) {
   const navigate = useNavigate();
   const { setAuth } = useAuthStore();
   const [error, setError] = useState('');
@@ -20,9 +35,8 @@ export default function GoogleCallback() {
       const errorCode = params.get('error');
       const errorDesc = params.get('error_description');
       if (errorCode) {
-        setError(errorDesc || errorCode || 'Authentication failed');
+        setError(ERROR_HINTS[errorCode] || errorDesc || errorCode || 'Authentication failed');
         setProcessing(false);
-        setTimeout(() => navigate('/login'), 3000);
         return;
       }
 
@@ -32,7 +46,6 @@ export default function GoogleCallback() {
       if (!token || !refreshToken) {
         setError('Authentication failed - missing tokens');
         setProcessing(false);
-        setTimeout(() => navigate('/login'), 3000);
         return;
       }
 
@@ -64,7 +77,6 @@ export default function GoogleCallback() {
         localStorage.removeItem('refresh_token');
         setError('Failed to complete authentication');
         setProcessing(false);
-        setTimeout(() => navigate('/login'), 3000);
       }
     };
 
@@ -88,7 +100,7 @@ export default function GoogleCallback() {
               <div>
                 <p className="text-base font-semibold text-dark-text">Completing sign in...</p>
                 <p className="text-sm text-dark-textSecondary mt-1">
-                  Please wait while we authenticate you with Google
+                  Please wait while we authenticate you with {provider}
                 </p>
               </div>
             </div>
@@ -107,9 +119,6 @@ export default function GoogleCallback() {
               >
                 Back to sign in
               </button>
-              <p className="text-center text-xs text-dark-textMuted">
-                Redirecting to login...
-              </p>
             </div>
           )}
         </div>

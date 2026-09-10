@@ -230,8 +230,8 @@ BKT_VERSION=1.0.0 docker compose -f docker-compose.prod.yml up -d
 
 ### Updating to a new version
 ```bash
-BKT_VERSION=1.1.0 docker compose -f docker-compose.prod.yml pull
-BKT_VERSION=1.1.0 docker compose -f docker-compose.prod.yml up -d
+BKT_VERSION=1.2.0 docker compose -f docker-compose.prod.yml pull
+BKT_VERSION=1.2.0 docker compose -f docker-compose.prod.yml up -d
 # Only containers whose image changed are recreated
 ```
 

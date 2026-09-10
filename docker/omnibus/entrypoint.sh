@@ -144,7 +144,8 @@ done
 log "Postgres ready"
 if [ "${PG_UPGRADED:-0}" = "1" ]; then
   # pg_upgrade does not carry over all planner statistics; rebuild them.
-  su-exec postgres vacuumdb -h 127.0.0.1 --username postgres --all --analyze-in-stages >/dev/null 2>&1 || true
+  # Unix socket (auth-local=trust); -w never prompts for a password.
+  su-exec postgres vacuumdb -w --username postgres --all --analyze-in-stages >/dev/null 2>&1 || true
 fi
 
 # ── 4. Backend env (loopback DB, single data volume) ─────────────────────────

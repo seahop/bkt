@@ -229,6 +229,16 @@ BKT_VERSION=1.0.0 docker compose -f docker-compose.prod.yml up -d
 ```
 
 ### Updating to a new version
+
+**Bundled Postgres major upgrades (omnibus):** the single-container image
+upgrades its own database in place. On the first start of an image that
+bundles a newer Postgres major (e.g. 1.3.0 moved from 16 to 18), the
+entrypoint runs `pg_upgrade` on `/data/pgdata` before starting; expect a
+longer first boot. The previous cluster is kept at `/data/pgdata.pg<old>`
+so the old image can still be run against the volume if needed — delete
+that directory once you are satisfied. External-Postgres deployments
+(compose `docker-compose.prod.yml`, Helm) are not touched: upgrade those
+databases on your own schedule with `pg_dump`/`pg_restore`.
 ```bash
 BKT_VERSION=1.2.0 docker compose -f docker-compose.prod.yml pull
 BKT_VERSION=1.2.0 docker compose -f docker-compose.prod.yml up -d

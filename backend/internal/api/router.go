@@ -20,7 +20,7 @@ import (
 )
 
 // @title bkt API
-// @version 1.3.0
+// @version 1.4.0
 // @description Self-hosted S3-compatible object storage gateway
 // @contact.name bkt project
 // @contact.url https://bkt.tips

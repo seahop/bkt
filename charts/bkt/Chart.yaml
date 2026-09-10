@@ -2,8 +2,8 @@ apiVersion: v2
 name: bkt
 description: Self-hosted S3-compatible object storage gateway
 type: application
-version: 0.3.0
-appVersion: "1.3.0"
+version: 0.4.0
+appVersion: "1.4.0"
 home: https://bkt.tips
 sources:
   - https://github.com/bkt-storage/bkt

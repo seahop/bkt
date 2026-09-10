@@ -247,8 +247,8 @@ that directory once you are satisfied. External-Postgres deployments
 (compose `docker-compose.prod.yml`, Helm) are not touched: upgrade those
 databases on your own schedule with `pg_dump`/`pg_restore`.
 ```bash
-BKT_VERSION=1.3.0 docker compose -f docker-compose.prod.yml pull
-BKT_VERSION=1.3.0 docker compose -f docker-compose.prod.yml up -d
+BKT_VERSION=1.4.0 docker compose -f docker-compose.prod.yml pull
+BKT_VERSION=1.4.0 docker compose -f docker-compose.prod.yml up -d
 # Only containers whose image changed are recreated
 ```
 

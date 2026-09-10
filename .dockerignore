@@ -1,0 +1,12 @@
+# Root build context (Dockerfile): keep host-only state out of the image build.
+# Without this, a dirty checkout's frontend/node_modules overrides the
+# container's npm install, and local bucket data under data/ is shipped
+# to the daemon on every build.
+.git/
+**/node_modules/
+frontend/dist/
+data/
+certs/
+.ui-shots/
+*.log
+.env

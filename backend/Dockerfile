@@ -1,4 +1,4 @@
-FROM golang:1.25-alpine AS development
+FROM golang:1.27-alpine AS development
 
 RUN apk add --no-cache git
 
@@ -14,7 +14,7 @@ EXPOSE 9000
 CMD ["sh", "-c", "go mod tidy && swag init -g cmd/server/main.go -o docs/swagger --quiet 2>/dev/null || true && go run ./cmd/server"]
 
 # Production builder stage
-FROM golang:1.25-alpine AS builder
+FROM golang:1.27-alpine AS builder
 
 RUN apk add --no-cache git
 

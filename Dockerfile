@@ -22,7 +22,7 @@ COPY frontend/ ./
 RUN npm run build          # -> /web/dist
 
 # ── Stage 2: build the Go binary with the UI embedded ────────────────────────
-FROM golang:1.25-alpine AS builder
+FROM golang:1.27-alpine AS builder
 RUN apk add --no-cache git
 WORKDIR /app
 COPY backend/ ./

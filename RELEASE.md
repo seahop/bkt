@@ -80,6 +80,13 @@ Everything uploaded through bkt will land in your AWS S3 account. The smoke test
 
 ---
 
+## OIDC End-to-End Test
+
+`tests/oidc-e2e/run.sh` boots a real Keycloak with a PKCE-enforced client and
+drives the browser login through it against the omnibus image (see
+`tests/oidc-e2e/README.md`). Run it whenever the auth code or the login page
+changes; it takes about three minutes and cleans up after itself.
+
 ## Pre-Transfer Testing Checklist
 
 Work through this before transferring the repo. All commands assume you're running locally via `docker compose up`.

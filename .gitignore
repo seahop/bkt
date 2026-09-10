@@ -63,3 +63,5 @@ data/
 *.bak
 
 .claude
+# OIDC e2e harness scratch (screenshots, playwright install)
+tests/oidc-e2e/.work/

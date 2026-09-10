@@ -23,7 +23,7 @@ BKT_IMAGE=${BKT_IMAGE:-bkt:oidc-e2e}
 WORK="$PWD/tests/oidc-e2e/.work"; rm -rf "$WORK"; mkdir -p "$WORK"
 
 cleanup() { docker rm -f oidc-e2e-keycloak oidc-e2e-bkt >/dev/null 2>&1 || true; docker network rm $NET >/dev/null 2>&1 || true; }
-trap cleanup EXIT
+[[ "${NOCLEANUP:-0}" == "1" ]] || trap cleanup EXIT
 
 if [[ "$BKT_IMAGE" == "bkt:oidc-e2e" ]]; then
   echo "▸ Building omnibus image from working tree"
@@ -53,8 +53,16 @@ for i in $(seq 1 90); do
   sleep 1
 done
 
-echo "▸ Driving the browser"
-cp tests/oidc-e2e/oidc-e2e.js "$WORK/"
+echo "▸ Driving the browser (login, roles, denial, audit)"
+cp tests/oidc-e2e/oidc-e2e.js tests/oidc-e2e/iam-e2e.sh "$WORK/"
 docker run --rm --network $NET -v "$WORK":/work -w /work "$PW_IMAGE" bash -c \
   'npm init -y >/dev/null 2>&1; npm install --no-audit --no-fund playwright@1.58.2 >/dev/null 2>&1; node oidc-e2e.js https://oidc-e2e-bkt:9443 shots'
+
+echo "▸ IAM parity: policies, groups and access keys for the OIDC user vs a local user"
+docker build -q -t bkt-tests:oidc-e2e tests/ >/dev/null
+docker run --rm --network $NET -v "$WORK":/work --entrypoint bash bkt-tests:oidc-e2e \
+  /work/iam-e2e.sh https://oidc-e2e-bkt:9443 https://oidc-e2e-bkt:9000 E2E-Admin-Pass-1 /work
+
+echo "▸ Re-login: assigned policy survives a fresh SSO login"
+docker run --rm --network $NET -v "$WORK":/work -w /work "$PW_IMAGE" node oidc-e2e.js https://oidc-e2e-bkt:9443 shots --relogin-check
 echo "Screenshots: $WORK/shots"

@@ -41,6 +41,20 @@ async function loginVia(browser, user, pass, name) {
 (async () => {
   const browser = await chromium.launch();
 
+  if (process.argv[4] === '--relogin-check') {
+    // IAM stage already assigned bob a policy for bucket "iam-allowed"; a fresh
+    // SSO login must not wipe it (no policies claim in the token → manual
+    // assignments persist) and must keep working.
+    const r = await loginVia(browser, 'bob', 'bob-pass-1', 'bob-relogin');
+    check(!!r.token, 'bob relogin: session token issued');
+    const list = await r.ctx.request.get(`${base}/api/buckets/iam-allowed/objects`, { headers: { Authorization: `Bearer ${r.token}` } });
+    check(list.status() === 200, `bob relogin: policy assigned in bkt survives SSO re-login (list iam-allowed → ${list.status()})`);
+    const forb = await r.ctx.request.get(`${base}/api/buckets/iam-forbidden/objects`, { headers: { Authorization: `Bearer ${r.token}` } });
+    check(forb.status() === 403, `bob relogin: still denied on iam-forbidden (${forb.status()})`);
+    await r.ctx.close(); await browser.close();
+    console.log(failures ? `E2E FAILED (${failures})` : 'E2E OK'); process.exit(failures ? 1 : 0);
+  }
+
   // alice: member of bkt-admins and bkt-users → admin
   {
     const r = await loginVia(browser, 'alice', 'alice-pass-1', 'alice');
@@ -71,6 +85,7 @@ async function loginVia(browser, user, pass, name) {
     const me = await r.ctx.request.get(`${base}/api/users/me`, { headers: { Authorization: `Bearer ${r.token}` } });
     const j = me.ok() ? await me.json() : {};
     check(j.username === 'bob' && j.is_admin === false, `bob: regular user (is_admin=${j.is_admin})`);
+    fs.writeFileSync(`${outDir}/bob.json`, JSON.stringify({ token: r.token, id: j.id, username: j.username }));
     const audit = await r.ctx.request.get(`${base}/api/audit?limit=5`, { headers: { Authorization: `Bearer ${r.token}` } });
     check(audit.status() === 403 || audit.status() === 401, `bob: cannot read audit log (status ${audit.status()})`);
     await r.ctx.close();

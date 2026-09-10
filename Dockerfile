@@ -36,7 +36,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main ./cmd/server
 
 # ── Stage 3a: UI-inclusive backend (multi-container path) ─────────────────────
 FROM alpine:latest AS backend
-RUN apk --no-cache add ca-certificates wget
+RUN apk --no-cache upgrade && apk --no-cache add ca-certificates wget
 WORKDIR /app
 COPY --from=builder /app/main .
 # 9443 = console (UI + REST), 9000 = S3 API
@@ -45,7 +45,7 @@ ENTRYPOINT ["./main"]
 
 # ── Stage 3b: omnibus — backend + bundled Postgres (single-container path) ─────
 FROM postgres:16-alpine AS omnibus
-RUN apk add --no-cache bash openssl tini su-exec ca-certificates wget
+RUN apk --no-cache upgrade && apk add --no-cache bash openssl tini su-exec ca-certificates wget
 COPY --from=builder /app/main /usr/local/bin/bkt
 COPY docker/omnibus/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

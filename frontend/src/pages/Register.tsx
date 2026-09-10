@@ -45,7 +45,7 @@ export default function Register() {
       {/* Subtle ambient glow behind the card */}
       <div
         aria-hidden="true"
-        className="pointer-events-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[36rem] h-[36rem] bg-blue-600/10 blur-3xl rounded-full"
+        className="pointer-events-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-xl h-144 bg-blue-600/10 blur-3xl rounded-full"
       />
 
       <div className="relative w-full max-w-md">
@@ -128,7 +128,7 @@ export default function Register() {
               disabled={loading}
               className="btn-primary w-full py-2.5"
             >
-              {loading && <span className="spinner !w-4 !h-4 !border-white/30 !border-t-white" />}
+              {loading && <span className="spinner w-4! h-4! border-white/30! border-t-white!" />}
               {loading ? 'Creating account...' : 'Sign Up'}
             </button>
           </form>

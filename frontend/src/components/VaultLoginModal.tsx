@@ -43,7 +43,7 @@ const VaultLoginModal: React.FC<VaultLoginModalProps> = ({ isOpen, onClose }) =>
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-panel !max-w-lg" onClick={(e) => e.stopPropagation()}>
+      <div className="modal-panel max-w-lg!" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-5">
           <h2 className="modal-title">Sign in with Vault</h2>
           <button onClick={onClose} className="btn-icon">
@@ -88,7 +88,7 @@ const VaultLoginModal: React.FC<VaultLoginModalProps> = ({ isOpen, onClose }) =>
               disabled={loading || !token.trim()}
               className="btn-primary"
             >
-              {loading && <span className="spinner !w-4 !h-4 !border-white/30 !border-t-white" />}
+              {loading && <span className="spinner w-4! h-4! border-white/30! border-t-white!" />}
               {loading ? 'Signing in...' : 'Sign in'}
             </button>
           </div>

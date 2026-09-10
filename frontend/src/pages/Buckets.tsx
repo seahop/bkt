@@ -189,7 +189,7 @@ export default function Buckets() {
               <div className="flex items-center gap-2 mt-4 pt-4 border-t border-dark-border">
                 <Link
                   to={`/buckets/${bucket.name}`}
-                  className="btn-secondary btn-sm flex-1 !justify-center"
+                  className="btn-secondary btn-sm flex-1 justify-center!"
                 >
                   View Objects
                 </Link>
@@ -197,7 +197,7 @@ export default function Buckets() {
                   <button
                     onClick={() => handleDeleteBucket(bucket.name)}
                     title="Delete bucket"
-                    className="btn-icon hover:!text-red-400 hover:!bg-red-500/10"
+                    className="btn-icon hover:text-red-400! hover:bg-red-500/10!"
                   >
                     <Trash2 className="w-4 h-4" />
                   </button>
@@ -255,7 +255,7 @@ export default function Buckets() {
                   <label className="label">S3 Configuration</label>
                   {loadingS3Configs ? (
                     <div className="flex items-center gap-2 text-sm text-dark-textSecondary">
-                      <span className="spinner !w-4 !h-4" />
+                      <span className="spinner w-4! h-4!" />
                       Loading configurations...
                     </div>
                   ) : s3Configs.length === 0 ? (
@@ -315,7 +315,7 @@ export default function Buckets() {
                   Cancel
                 </button>
                 <button type="submit" disabled={creating} className="btn-primary">
-                  {creating && <span className="spinner !w-4 !h-4 !border-white/30 !border-t-white" />}
+                  {creating && <span className="spinner w-4! h-4! border-white/30! border-t-white!" />}
                   {creating ? 'Creating...' : 'Create'}
                 </button>
               </div>

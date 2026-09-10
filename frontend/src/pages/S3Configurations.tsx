@@ -148,7 +148,7 @@ export default function S3Configurations() {
                   </button>
                   <button
                     onClick={() => handleDeleteConfig(config.id)}
-                    className="btn-icon hover:!text-red-400 hover:!bg-red-500/10"
+                    className="btn-icon hover:text-red-400! hover:bg-red-500/10!"
                     title="Delete configuration"
                   >
                     <Trash2 className="w-4 h-4" />
@@ -233,7 +233,7 @@ function S3ConfigModal({ config, onClose, onSuccess }: S3ConfigModalProps) {
 
   return (
     <div className="modal-overlay">
-      <div className="modal-panel !max-w-2xl">
+      <div className="modal-panel max-w-2xl!">
         <div className="flex items-center justify-between mb-5">
           <h2 className="modal-title">
             {config ? 'Edit S3 Configuration' : 'Add S3 Configuration'}
@@ -330,7 +330,7 @@ function S3ConfigModal({ config, onClose, onSuccess }: S3ConfigModalProps) {
                 type="checkbox"
                 checked={formData.use_ssl}
                 onChange={(e) => setFormData({ ...formData, use_ssl: e.target.checked })}
-                className="w-4 h-4 rounded border-dark-border bg-dark-inset text-blue-600 focus:ring-2 focus:ring-blue-500"
+                className="w-4 h-4 rounded-sm border-dark-border bg-dark-inset text-blue-600 focus:ring-2 focus:ring-blue-500"
               />
               <span className="text-sm text-dark-text">Use SSL/TLS</span>
             </label>
@@ -340,7 +340,7 @@ function S3ConfigModal({ config, onClose, onSuccess }: S3ConfigModalProps) {
                 type="checkbox"
                 checked={formData.force_path_style}
                 onChange={(e) => setFormData({ ...formData, force_path_style: e.target.checked })}
-                className="w-4 h-4 rounded border-dark-border bg-dark-inset text-blue-600 focus:ring-2 focus:ring-blue-500"
+                className="w-4 h-4 rounded-sm border-dark-border bg-dark-inset text-blue-600 focus:ring-2 focus:ring-blue-500"
               />
               <span className="text-sm text-dark-text">Force Path Style</span>
             </label>
@@ -351,7 +351,7 @@ function S3ConfigModal({ config, onClose, onSuccess }: S3ConfigModalProps) {
               type="checkbox"
               checked={formData.is_default}
               onChange={(e) => setFormData({ ...formData, is_default: e.target.checked })}
-              className="w-4 h-4 rounded border-dark-border bg-dark-inset text-blue-600 focus:ring-2 focus:ring-blue-500"
+              className="w-4 h-4 rounded-sm border-dark-border bg-dark-inset text-blue-600 focus:ring-2 focus:ring-blue-500"
             />
             <span className="text-sm text-dark-text">Set as default configuration</span>
           </label>
@@ -361,7 +361,7 @@ function S3ConfigModal({ config, onClose, onSuccess }: S3ConfigModalProps) {
               Cancel
             </button>
             <button type="submit" disabled={submitting} className="btn-primary">
-              {submitting && <span className="spinner !w-4 !h-4" />}
+              {submitting && <span className="spinner w-4! h-4!" />}
               {submitting ? 'Saving...' : config ? 'Update Configuration' : 'Create Configuration'}
             </button>
           </div>

@@ -1169,7 +1169,7 @@ export default function BucketDetails() {
               }}
               className={
                 splitView
-                  ? 'btn-secondary !bg-accent-soft !text-blue-400 !border-blue-500/40'
+                  ? 'btn-secondary bg-accent-soft! text-blue-400! border-blue-500/40!'
                   : 'btn-secondary'
               }
               title={splitView ? 'Exit split view' : 'Enable split view'}
@@ -1222,12 +1222,12 @@ export default function BucketDetails() {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Search files… (use * for wildcard, e.g. *.jpg, report*)"
-                className="input !pl-9 !pr-9 !py-2"
+                className="input pl-9! pr-9! py-2!"
               />
               {searchQuery && (
                 <button
                   onClick={() => setSearchQuery('')}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 btn-icon !w-6 !h-6"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 btn-icon w-6! h-6!"
                   title="Clear search"
                 >
                   <X className="w-4 h-4" />
@@ -1240,14 +1240,14 @@ export default function BucketDetails() {
               onClick={() => setShowFilters(!showFilters)}
               className={
                 showFilters || (filterDateFrom || filterDateTo || filterExtension || filterMinSize || filterMaxSize || filterMaxDepth)
-                  ? 'btn-secondary !bg-accent-soft !text-blue-400 !border-blue-500/40'
+                  ? 'btn-secondary bg-accent-soft! text-blue-400! border-blue-500/40!'
                   : 'btn-secondary'
               }
             >
               <Filter className="w-4 h-4" />
               Filters
               {(filterDateFrom || filterDateTo || filterExtension || filterMinSize || filterMaxSize || filterMaxDepth) && (
-                <span className="badge-blue !px-1.5 !py-0">
+                <span className="badge-blue px-1.5! py-0!">
                   {[filterDateFrom, filterDateTo, filterExtension, filterMinSize, filterMaxSize, filterMaxDepth].filter(Boolean).length}
                 </span>
               )}
@@ -1275,7 +1275,7 @@ export default function BucketDetails() {
                     value={filterExtension}
                     onChange={(e) => setFilterExtension(e.target.value)}
                     placeholder="e.g. jpg, png, pdf"
-                    className="input !py-2"
+                    className="input py-2!"
                   />
                 </div>
 
@@ -1288,7 +1288,7 @@ export default function BucketDetails() {
                     value={filterMaxDepth}
                     onChange={(e) => setFilterMaxDepth(e.target.value)}
                     placeholder="e.g. 2 (0 = root only)"
-                    className="input !py-2"
+                    className="input py-2!"
                   />
                 </div>
 
@@ -1301,14 +1301,14 @@ export default function BucketDetails() {
                       value={filterMinSize}
                       onChange={(e) => setFilterMinSize(e.target.value)}
                       placeholder="Min (e.g. 1MB)"
-                      className="input !py-2 flex-1"
+                      className="input py-2! flex-1"
                     />
                     <input
                       type="text"
                       value={filterMaxSize}
                       onChange={(e) => setFilterMaxSize(e.target.value)}
                       placeholder="Max (e.g. 10MB)"
-                      className="input !py-2 flex-1"
+                      className="input py-2! flex-1"
                     />
                   </div>
                 </div>
@@ -1325,7 +1325,7 @@ export default function BucketDetails() {
                       type="date"
                       value={filterDateFrom}
                       onChange={(e) => setFilterDateFrom(e.target.value)}
-                      className="input !py-2 !pl-9"
+                      className="input py-2! pl-9!"
                     />
                   </div>
                 </div>
@@ -1339,7 +1339,7 @@ export default function BucketDetails() {
                       type="date"
                       value={filterDateTo}
                       onChange={(e) => setFilterDateTo(e.target.value)}
-                      className="input !py-2 !pl-9"
+                      className="input py-2! pl-9!"
                     />
                   </div>
                 </div>
@@ -1458,7 +1458,7 @@ export default function BucketDetails() {
 
       {/* Truncation notice */}
       {truncated && (
-        <div className="alert-info mb-6 !items-center justify-between gap-4">
+        <div className="alert-info mb-6 items-center! justify-between gap-4">
           <span>Results are truncated — this bucket contains more objects than are shown.</span>
           <button
             onClick={loadMoreObjects}
@@ -1551,8 +1551,8 @@ export default function BucketDetails() {
                 <thead>
                   <tr>
                     <th>Name</th>
-                    <th className="!text-right">Size</th>
-                    <th className="!text-right">Actions</th>
+                    <th className="text-right!">Size</th>
+                    <th className="text-right!">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1577,7 +1577,7 @@ export default function BucketDetails() {
                             <span className="text-dark-text font-medium truncate">{item.name}/</span>
                           </div>
                         </td>
-                        <td className="!text-right tabular-nums text-xs !text-dark-textMuted">—</td>
+                        <td className="text-right! tabular-nums text-xs !text-dark-textMuted">—</td>
                         <td></td>
                       </tr>
                     ) : (
@@ -1611,14 +1611,14 @@ export default function BucketDetails() {
                             </div>
                           </div>
                         </td>
-                        <td className="!text-right tabular-nums !text-dark-textSecondary text-xs whitespace-nowrap">{formatFileSize(item.size)}</td>
+                        <td className="text-right! tabular-nums !text-dark-textSecondary text-xs whitespace-nowrap">{formatFileSize(item.size)}</td>
                         <td>
                           <div className="flex items-center justify-end gap-1">
                             <button onClick={() => handleRenameClick(item)} className="btn-icon" title="Rename"><Pencil className="w-4 h-4" /></button>
                             <button onClick={() => handleDownload(item)} className="btn-icon" title="Download"><Download className="w-4 h-4" /></button>
                             <button onClick={() => handleShareClick(item)} className="btn-icon" title="Get shareable link"><Link2 className="w-4 h-4" /></button>
                             <button onClick={() => handleVersionHistoryClick(item)} className="btn-icon" title="Version history"><History className="w-4 h-4" /></button>
-                            <button onClick={() => handleDelete(item)} className="btn-icon hover:!text-red-400 hover:!bg-red-500/10" title="Delete"><Trash2 className="w-4 h-4" /></button>
+                            <button onClick={() => handleDelete(item)} className="btn-icon hover:text-red-400! hover:bg-red-500/10!" title="Delete"><Trash2 className="w-4 h-4" /></button>
                           </div>
                         </td>
                       </tr>
@@ -1706,8 +1706,8 @@ export default function BucketDetails() {
                 <thead>
                   <tr>
                     <th>Name</th>
-                    <th className="!text-right">Size</th>
-                    <th className="!text-right">Actions</th>
+                    <th className="text-right!">Size</th>
+                    <th className="text-right!">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1732,7 +1732,7 @@ export default function BucketDetails() {
                             <span className="text-dark-text font-medium truncate">{item.name}/</span>
                           </div>
                         </td>
-                        <td className="!text-right tabular-nums text-xs !text-dark-textMuted">—</td>
+                        <td className="text-right! tabular-nums text-xs !text-dark-textMuted">—</td>
                         <td></td>
                       </tr>
                     ) : (
@@ -1766,14 +1766,14 @@ export default function BucketDetails() {
                             </div>
                           </div>
                         </td>
-                        <td className="!text-right tabular-nums !text-dark-textSecondary text-xs whitespace-nowrap">{formatFileSize(item.size)}</td>
+                        <td className="text-right! tabular-nums !text-dark-textSecondary text-xs whitespace-nowrap">{formatFileSize(item.size)}</td>
                         <td>
                           <div className="flex items-center justify-end gap-1">
                             <button onClick={() => handleRenameClick(item)} className="btn-icon" title="Rename"><Pencil className="w-4 h-4" /></button>
                             <button onClick={() => handleDownload(item)} className="btn-icon" title="Download"><Download className="w-4 h-4" /></button>
                             <button onClick={() => handleShareClick(item)} className="btn-icon" title="Get shareable link"><Link2 className="w-4 h-4" /></button>
                             <button onClick={() => handleVersionHistoryClick(item)} className="btn-icon" title="Version history"><History className="w-4 h-4" /></button>
-                            <button onClick={() => handleDelete(item)} className="btn-icon hover:!text-red-400 hover:!bg-red-500/10" title="Delete"><Trash2 className="w-4 h-4" /></button>
+                            <button onClick={() => handleDelete(item)} className="btn-icon hover:text-red-400! hover:bg-red-500/10!" title="Delete"><Trash2 className="w-4 h-4" /></button>
                           </div>
                         </td>
                       </tr>
@@ -1875,7 +1875,7 @@ export default function BucketDetails() {
             <div
               className={`card overflow-hidden transition-colors min-h-[400px] flex flex-col ${
                 dropTarget === `pane:single:${currentPrefix}`
-                  ? '!border-blue-500/50 bg-accent-soft ring-1 ring-inset ring-blue-500/50'
+                  ? 'border-blue-500/50! bg-accent-soft ring-1 ring-inset ring-blue-500/50'
                   : ''
               }`}
               onContextMenu={(e) => handleContextMenu(e, 'pane', 'single')}
@@ -1902,10 +1902,10 @@ export default function BucketDetails() {
                 <thead>
                   <tr>
                     <th>Name</th>
-                    <th className="!text-right">Size</th>
+                    <th className="text-right!">Size</th>
                     <th>Type</th>
-                    <th className="!text-right">Last Modified</th>
-                    <th className="!text-right">Actions</th>
+                    <th className="text-right!">Last Modified</th>
+                    <th className="text-right!">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1930,9 +1930,9 @@ export default function BucketDetails() {
                             <span className="text-dark-text font-medium">{item.name}/</span>
                           </div>
                         </td>
-                        <td className="!text-right tabular-nums text-xs !text-dark-textMuted">—</td>
+                        <td className="text-right! tabular-nums text-xs !text-dark-textMuted">—</td>
                         <td className="!text-dark-textSecondary text-xs">Folder</td>
-                        <td className="!text-right tabular-nums text-xs !text-dark-textMuted">—</td>
+                        <td className="text-right! tabular-nums text-xs !text-dark-textMuted">—</td>
                         <td></td>
                       </tr>
                     ) : (
@@ -1966,9 +1966,9 @@ export default function BucketDetails() {
                             </div>
                           </div>
                         </td>
-                        <td className="!text-right tabular-nums !text-dark-textSecondary text-xs whitespace-nowrap">{formatFileSize(item.size)}</td>
+                        <td className="text-right! tabular-nums !text-dark-textSecondary text-xs whitespace-nowrap">{formatFileSize(item.size)}</td>
                         <td className="!text-dark-textSecondary text-xs truncate max-w-[160px]">{item.content_type}</td>
-                        <td className="!text-right tabular-nums !text-dark-textSecondary text-xs whitespace-nowrap">
+                        <td className="text-right! tabular-nums !text-dark-textSecondary text-xs whitespace-nowrap">
                           {new Date(item.updated_at).toLocaleString()}
                         </td>
                         <td>
@@ -2003,7 +2003,7 @@ export default function BucketDetails() {
                             </button>
                             <button
                               onClick={() => handleDelete(item)}
-                              className="btn-icon hover:!text-red-400 hover:!bg-red-500/10"
+                              className="btn-icon hover:text-red-400! hover:bg-red-500/10!"
                               title="Delete"
                             >
                               <Trash2 className="w-4 h-4" />
@@ -2037,7 +2037,7 @@ export default function BucketDetails() {
                       onClick={() => setCreateFolderPane('left')}
                       className={`flex-1 ${
                         createFolderPane === 'left'
-                          ? 'btn-secondary !bg-accent-soft !text-blue-400 !border-blue-500/40'
+                          ? 'btn-secondary bg-accent-soft! text-blue-400! border-blue-500/40!'
                           : 'btn-secondary'
                       }`}
                     >
@@ -2048,7 +2048,7 @@ export default function BucketDetails() {
                       onClick={() => setCreateFolderPane('right')}
                       className={`flex-1 ${
                         createFolderPane === 'right'
-                          ? 'btn-secondary !bg-accent-soft !text-blue-400 !border-blue-500/40'
+                          ? 'btn-secondary bg-accent-soft! text-blue-400! border-blue-500/40!'
                           : 'btn-secondary'
                       }`}
                     >
@@ -2358,7 +2358,7 @@ export default function BucketDetails() {
                       </p>
                       <button
                         onClick={handleCopyShareUrl}
-                        className={`btn-icon shrink-0 ${shareCopied ? '!text-green-400' : ''}`}
+                        className={`btn-icon shrink-0 ${shareCopied ? 'text-green-400!' : ''}`}
                         title={shareCopied ? 'Copied' : 'Copy link'}
                       >
                         {shareCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
@@ -2409,7 +2409,7 @@ export default function BucketDetails() {
                       Cancel
                     </button>
                     <button type="submit" disabled={shareLoading} className="btn-primary">
-                      {shareLoading && <span className="spinner !w-4 !h-4" />}
+                      {shareLoading && <span className="spinner w-4! h-4!" />}
                       {shareLoading ? 'Generating...' : 'Generate link'}
                     </button>
                   </div>
@@ -2494,7 +2494,7 @@ export default function BucketDetails() {
       {/* Version History Modal */}
       {versionsTarget !== null && (
         <div className="modal-overlay">
-          <div className="modal-panel !max-w-2xl">
+          <div className="modal-panel max-w-2xl!">
             <div className="flex items-center justify-between mb-5">
               <h2 className="modal-title">Version history</h2>
               <button onClick={closeVersionsModal} className="btn-icon" title="Close">
@@ -2545,7 +2545,7 @@ export default function BucketDetails() {
                         )}
                         <button
                           onClick={() => handleDeleteVersion(version.version_id)}
-                          className="btn-icon hover:!text-red-400 hover:!bg-red-500/10"
+                          className="btn-icon hover:text-red-400! hover:bg-red-500/10!"
                           title="Delete permanently"
                         >
                           <Trash2 className="w-4 h-4" />
@@ -2569,7 +2569,7 @@ export default function BucketDetails() {
       {/* Bucket Settings Modal */}
       {showBucketSettings && (
         <div className="modal-overlay">
-          <div className="modal-panel !max-w-lg">
+          <div className="modal-panel max-w-lg!">
             <div className="flex items-center justify-between mb-5">
               <h2 className="modal-title">Bucket settings</h2>
               <button onClick={closeBucketSettings} className="btn-icon" title="Close">
@@ -2656,7 +2656,7 @@ export default function BucketDetails() {
                     <p className="help-text">Set both day values to 0 (or leave empty) to clear the lifecycle rules.</p>
                     <div className="flex justify-end gap-2">
                       <button type="submit" disabled={lifecycleSaving} className="btn-primary">
-                        {lifecycleSaving && <span className="spinner !w-4 !h-4" />}
+                        {lifecycleSaving && <span className="spinner w-4! h-4!" />}
                         {lifecycleSaving ? 'Saving...' : 'Save'}
                       </button>
                     </div>
@@ -2744,7 +2744,7 @@ export default function BucketDetails() {
                             type="checkbox"
                             checked={webhookCreated}
                             onChange={(e) => setWebhookCreated(e.target.checked)}
-                            className="w-4 h-4 text-blue-600 bg-dark-inset border-dark-border rounded focus:ring-blue-500"
+                            className="w-4 h-4 text-blue-600 bg-dark-inset border-dark-border rounded-sm focus:ring-blue-500"
                           />
                           Created
                         </label>
@@ -2753,7 +2753,7 @@ export default function BucketDetails() {
                             type="checkbox"
                             checked={webhookRemoved}
                             onChange={(e) => setWebhookRemoved(e.target.checked)}
-                            className="w-4 h-4 text-blue-600 bg-dark-inset border-dark-border rounded focus:ring-blue-500"
+                            className="w-4 h-4 text-blue-600 bg-dark-inset border-dark-border rounded-sm focus:ring-blue-500"
                           />
                           Removed
                         </label>
@@ -2779,7 +2779,7 @@ export default function BucketDetails() {
                       disabled={generalSaving}
                       className="btn-primary"
                     >
-                      {generalSaving && <span className="spinner !w-4 !h-4" />}
+                      {generalSaving && <span className="spinner w-4! h-4!" />}
                       {generalSaving ? 'Saving...' : 'Save settings'}
                     </button>
                   </div>

@@ -194,7 +194,7 @@ export default function Policies() {
                         </button>
                         <button
                           onClick={() => handleDeletePolicy(policy.id)}
-                          className="btn-icon hover:!text-red-400 hover:!bg-red-500/10"
+                          className="btn-icon hover:text-red-400! hover:bg-red-500/10!"
                           title="Delete policy"
                         >
                           <Trash2 className="w-4 h-4" />
@@ -711,7 +711,7 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
 
   return (
     <div className="modal-overlay">
-      <div className="modal-panel !max-w-4xl !p-0 !overflow-hidden flex flex-col">
+      <div className="modal-panel max-w-4xl! p-0! overflow-hidden! flex flex-col">
         <div className="p-6 border-b border-dark-border shrink-0">
           <h2 className="modal-title">
             {isEditMode ? 'Edit Policy' : 'Create Policy'}
@@ -1121,7 +1121,7 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
                 setJsonManuallyEdited(true);
               }}
               className={`input font-mono min-h-[220px] ${
-                jsonError ? '!border-red-500/60 focus:!ring-red-500/50' : ''
+                jsonError ? 'border-red-500/60! focus:ring-red-500/50!' : ''
               }`}
               rows={10}
               placeholder='{"Version": "2012-10-17", "Statement": [...]}'
@@ -1144,7 +1144,7 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
             disabled={loading || !!jsonError}
             className="btn-primary"
           >
-            {loading && <span className="spinner !w-4 !h-4" />}
+            {loading && <span className="spinner w-4! h-4!" />}
             {loading
               ? (isEditMode ? 'Saving...' : 'Creating...')
               : isEditMode
@@ -1173,7 +1173,7 @@ function ViewPolicyModal({ policy, onClose }: { policy: Policy; onClose: () => v
 
   return (
     <div className="modal-overlay">
-      <div className="modal-panel !max-w-4xl !p-0 !overflow-hidden flex flex-col">
+      <div className="modal-panel max-w-4xl! p-0! overflow-hidden! flex flex-col">
         <div className="p-6 border-b border-dark-border shrink-0">
           <h2 className="modal-title font-mono">{policy.name}</h2>
           {policy.description && (

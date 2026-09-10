@@ -117,7 +117,7 @@ export default function Profile() {
         <div className="card p-6">
           <h2 className="text-base font-semibold text-dark-text mb-4">Account</h2>
           <div className="flex items-center gap-4">
-            <div className="w-12 h-12 rounded-full bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white text-lg font-semibold shrink-0">
+            <div className="w-12 h-12 rounded-full bg-linear-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white text-lg font-semibold shrink-0">
               {user?.username.charAt(0).toUpperCase()}
             </div>
             <div className="flex-1 min-w-0">
@@ -229,7 +229,7 @@ export default function Profile() {
             <p className="text-sm text-dark-textSecondary">Loading access keys…</p>
           </div>
         ) : accessKeys.length === 0 ? (
-          <div className="empty-state !py-10">
+          <div className="empty-state py-10!">
             <Key className="empty-state-icon" />
             <h3 className="text-base font-semibold text-dark-text mb-1">No access keys yet</h3>
             <p className="text-sm text-dark-textSecondary max-w-sm">
@@ -260,7 +260,7 @@ export default function Profile() {
                   <button
                     onClick={() => handleRevokeKey(key.id)}
                     title="Revoke access key"
-                    className="btn-icon hover:!text-red-400 hover:!bg-red-500/10"
+                    className="btn-icon hover:text-red-400! hover:bg-red-500/10!"
                   >
                     <Trash2 className="w-4 h-4" />
                   </button>
@@ -308,7 +308,7 @@ export default function Profile() {
                       type="checkbox"
                       checked={stsReadOnly}
                       onChange={(e) => setStsReadOnly(e.target.checked)}
-                      className="w-4 h-4 text-blue-600 bg-dark-inset border-dark-border rounded focus:ring-blue-500"
+                      className="w-4 h-4 text-blue-600 bg-dark-inset border-dark-border rounded-sm focus:ring-blue-500"
                     />
                     Read-only
                   </label>
@@ -322,7 +322,7 @@ export default function Profile() {
                     disabled={stsLoading}
                     className="btn-primary"
                   >
-                    {stsLoading && <span className="spinner !w-4 !h-4" />}
+                    {stsLoading && <span className="spinner w-4! h-4!" />}
                     {stsLoading ? 'Generating...' : 'Generate'}
                   </button>
                 </div>

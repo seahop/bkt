@@ -106,14 +106,14 @@ export default function Layout() {
 
         <div className="p-3 border-t border-dark-border shrink-0">
           <div className="flex items-center gap-3 px-2 py-2">
-            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white text-sm font-semibold shrink-0">
+            <div className="w-8 h-8 rounded-full bg-linear-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white text-sm font-semibold shrink-0">
               {user?.username.charAt(0).toUpperCase()}
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium text-dark-text truncate leading-tight">
                 {user?.username}
                 {user?.is_admin && (
-                  <span className="ml-1.5 align-middle badge-blue !text-[10px] !px-1.5 !py-0">admin</span>
+                  <span className="ml-1.5 align-middle badge-blue text-[10px]! px-1.5! py-0!">admin</span>
                 )}
               </p>
               <p className="text-xs text-dark-textMuted truncate">{user?.email}</p>
@@ -121,7 +121,7 @@ export default function Layout() {
             <button
               onClick={handleLogout}
               title="Sign out"
-              className="btn-icon hover:!text-red-400 hover:!bg-red-500/10"
+              className="btn-icon hover:text-red-400! hover:bg-red-500/10!"
             >
               <LogOut className="w-4 h-4" />
             </button>

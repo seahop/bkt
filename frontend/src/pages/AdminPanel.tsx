@@ -252,7 +252,7 @@ export default function AdminPanel() {
                           </button>
                           <button
                             onClick={() => handleDeleteUser(user.id)}
-                            className="btn-icon hover:!text-red-400 hover:!bg-red-500/10"
+                            className="btn-icon hover:text-red-400! hover:bg-red-500/10!"
                             title="Delete user"
                           >
                             <Trash2 className="w-4 h-4" />
@@ -284,7 +284,7 @@ export default function AdminPanel() {
         </div>
 
         {groups.length === 0 ? (
-          <div className="empty-state !py-10">
+          <div className="empty-state py-10!">
             <Users className="empty-state-icon" />
             <p className="text-sm text-dark-textSecondary">
               No groups yet. Create one to assign policies to several users at once.
@@ -335,7 +335,7 @@ export default function AdminPanel() {
                         </button>
                         <button
                           onClick={() => handleDeleteGroup(group)}
-                          className="btn-icon hover:!text-red-400 hover:!bg-red-500/10"
+                          className="btn-icon hover:text-red-400! hover:bg-red-500/10!"
                           title="Delete group"
                         >
                           <Trash2 className="w-4 h-4" />
@@ -443,7 +443,7 @@ function PolicyAssignmentModal({
 
   return (
     <div className="modal-overlay">
-      <div className="modal-panel !max-w-2xl">
+      <div className="modal-panel max-w-2xl!">
         <div className="flex items-center justify-between mb-5">
           <div>
             <h2 className="modal-title">Manage Policies</h2>
@@ -457,7 +457,7 @@ function PolicyAssignmentModal({
         </div>
 
         {policies.length === 0 ? (
-          <div className="empty-state !py-10">
+          <div className="empty-state py-10!">
             <Shield className="empty-state-icon" />
             <p className="text-sm text-dark-textSecondary">No policies available</p>
           </div>
@@ -581,7 +581,7 @@ function CreateUserModal({ onClose, onSuccess }: { onClose: () => void; onSucces
               id="is_admin"
               checked={isAdmin}
               onChange={(e) => setIsAdmin(e.target.checked)}
-              className="w-4 h-4 text-blue-600 bg-dark-inset border-dark-border rounded focus:ring-blue-500"
+              className="w-4 h-4 text-blue-600 bg-dark-inset border-dark-border rounded-sm focus:ring-blue-500"
             />
             <label htmlFor="is_admin" className="ml-2 text-sm text-dark-text">
               Grant administrator privileges
@@ -594,7 +594,7 @@ function CreateUserModal({ onClose, onSuccess }: { onClose: () => void; onSucces
             Cancel
           </button>
           <button onClick={handleSubmit} disabled={loading} className="btn-primary">
-            {loading && <span className="spinner !w-4 !h-4" />}
+            {loading && <span className="spinner w-4! h-4!" />}
             {loading ? 'Creating...' : 'Create User'}
           </button>
         </div>
@@ -643,7 +643,7 @@ function AccessKeysModal({ user, onClose }: { user: User; onClose: () => void })
 
   return (
     <div className="modal-overlay">
-      <div className="modal-panel !max-w-2xl">
+      <div className="modal-panel max-w-2xl!">
         <div className="flex items-center justify-between mb-5">
           <div>
             <h2 className="modal-title">Access Keys</h2>
@@ -664,7 +664,7 @@ function AccessKeysModal({ user, onClose }: { user: User; onClose: () => void })
             <p className="text-sm text-dark-textSecondary">Loading access keys…</p>
           </div>
         ) : accessKeys.length === 0 ? (
-          <div className="empty-state !py-10">
+          <div className="empty-state py-10!">
             <Key className="empty-state-icon" />
             <p className="text-sm text-dark-textSecondary">No access keys found for this user</p>
           </div>
@@ -693,7 +693,7 @@ function AccessKeysModal({ user, onClose }: { user: User; onClose: () => void })
                 </div>
                 <button
                   onClick={() => handleDeleteKey(key.id)}
-                  className="btn-icon shrink-0 hover:!text-red-400 hover:!bg-red-500/10"
+                  className="btn-icon shrink-0 hover:text-red-400! hover:bg-red-500/10!"
                   title="Delete access key"
                 >
                   <Trash2 className="w-4 h-4" />
@@ -784,7 +784,7 @@ function CreateGroupModal({ onClose, onSuccess }: { onClose: () => void; onSucce
               Cancel
             </button>
             <button type="submit" disabled={loading || !name.trim()} className="btn-primary">
-              {loading && <span className="spinner !w-4 !h-4" />}
+              {loading && <span className="spinner w-4! h-4!" />}
               {loading ? 'Creating...' : 'Create Group'}
             </button>
           </div>
@@ -854,7 +854,7 @@ function GroupDetailModal({
 
   return (
     <div className="modal-overlay">
-      <div className="modal-panel !max-w-2xl">
+      <div className="modal-panel max-w-2xl!">
         <div className="flex items-center justify-between mb-5">
           <div>
             <h2 className="modal-title">Manage Group</h2>
@@ -889,7 +889,7 @@ function GroupDetailModal({
                     <button
                       onClick={() => handleRemoveMember(member.id)}
                       disabled={busy}
-                      className="btn-icon shrink-0 hover:!text-red-400 hover:!bg-red-500/10"
+                      className="btn-icon shrink-0 hover:text-red-400! hover:bg-red-500/10!"
                       title="Remove from group"
                     >
                       <X className="w-4 h-4" />
@@ -946,7 +946,7 @@ function GroupDetailModal({
                     <button
                       onClick={() => handleDetachPolicy(policy.id)}
                       disabled={busy}
-                      className="btn-icon shrink-0 hover:!text-red-400 hover:!bg-red-500/10"
+                      className="btn-icon shrink-0 hover:text-red-400! hover:bg-red-500/10!"
                       title="Detach policy"
                     >
                       <X className="w-4 h-4" />

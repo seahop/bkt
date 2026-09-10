@@ -61,7 +61,61 @@ else
   export GO_ENV=${GO_ENV:-development}
 fi
 
-# ── 3. Postgres: init on first boot, then start on loopback ──────────────────
+# ── 3a. Postgres major-version upgrade (existing data dir from an older PG) ──
+# The image bundles the previous major's binaries (apk postgresql<N>) so a
+# volume created by an older omnibus release is upgraded in place with
+# pg_upgrade on first start. The old cluster is kept beside the new one as
+# $PGDATA.pg<N> until the operator deletes it.
+PG_NEW_MAJOR=$(postgres --version | sed -E 's/.* ([0-9]+)[.0-9]*.*/\1/')
+if [ -s "$PGDATA/PG_VERSION" ]; then
+  PG_OLD_MAJOR=$(cat "$PGDATA/PG_VERSION")
+  if [ "$PG_OLD_MAJOR" != "$PG_NEW_MAJOR" ]; then
+    OLD_BIN=/usr/libexec/postgresql${PG_OLD_MAJOR}
+    if [ ! -x "$OLD_BIN/pg_ctl" ]; then
+      log "ERROR: $PGDATA is PostgreSQL ${PG_OLD_MAJOR} but this image (PostgreSQL ${PG_NEW_MAJOR}) has no ${PG_OLD_MAJOR} binaries to upgrade from."
+      log "       Dump with the previous image release and restore, or open an issue."
+      exit 1
+    fi
+    log "Upgrading Postgres data directory: ${PG_OLD_MAJOR} -> ${PG_NEW_MAJOR} (pg_upgrade)"
+    NEW_DATA="$PGDATA.new"
+    OLD_KEEP="$PGDATA.pg${PG_OLD_MAJOR}"
+    UPG_LOG="$DATA_DIR/pg_upgrade_logs"
+    rm -rf "$NEW_DATA" "$UPG_LOG"
+    install -d -o postgres -g postgres -m 700 "$NEW_DATA" "$UPG_LOG"
+
+    # pg_upgrade refuses a cluster that was not shut down cleanly (e.g. the
+    # container was killed). Start/stop it once with the old binaries.
+    su-exec postgres "$OLD_BIN/pg_ctl" -D "$PGDATA" \
+      -o "-c listen_addresses='' -c unix_socket_directories='$UPG_LOG'" -w start >/dev/null
+    su-exec postgres "$OLD_BIN/pg_ctl" -D "$PGDATA" -m fast -w stop >/dev/null
+
+    # New cluster must match the old one's checksum setting (PG18 initdb turns
+    # checksums on by default; older releases did not).
+    CHECKSUM_FLAG=--no-data-checksums
+    if "$OLD_BIN/pg_controldata" "$PGDATA" | grep -qE 'Data page checksum version:\s+[1-9]'; then
+      CHECKSUM_FLAG=--data-checksums
+    fi
+    su-exec postgres initdb -D "$NEW_DATA" \
+      --username=postgres --auth-local=trust --auth-host=scram-sha-256 \
+      --encoding=UTF8 $CHECKSUM_FLAG >/dev/null
+
+    if ! (cd "$UPG_LOG" && su-exec postgres pg_upgrade \
+          -b "$OLD_BIN" -B /usr/local/bin -d "$PGDATA" -D "$NEW_DATA" \
+          --username=postgres >"$UPG_LOG/pg_upgrade.out" 2>&1); then
+      log "ERROR: pg_upgrade failed; the original ${PG_OLD_MAJOR} cluster at $PGDATA is untouched."
+      log "       See $UPG_LOG/pg_upgrade.out"
+      tail -20 "$UPG_LOG/pg_upgrade.out" || true
+      exit 1
+    fi
+    rm -rf "$OLD_KEEP"
+    mv "$PGDATA" "$OLD_KEEP"
+    mv "$NEW_DATA" "$PGDATA"
+    PG_UPGRADED=1
+    log "Postgres upgraded to ${PG_NEW_MAJOR}. Previous cluster kept at $OLD_KEEP — delete it once satisfied."
+  fi
+fi
+
+# ── 3b. Postgres: init on first boot, then start on loopback ─────────────────
 if [ ! -s "$PGDATA/PG_VERSION" ]; then
   log "Initialising Postgres data directory at $PGDATA"
   install -d -o postgres -g postgres -m 700 "$PGDATA"
@@ -88,6 +142,10 @@ until su-exec postgres pg_isready -h 127.0.0.1 -q 2>/dev/null; do
   sleep 1
 done
 log "Postgres ready"
+if [ "${PG_UPGRADED:-0}" = "1" ]; then
+  # pg_upgrade does not carry over all planner statistics; rebuild them.
+  su-exec postgres vacuumdb -h 127.0.0.1 --username postgres --all --analyze-in-stages >/dev/null 2>&1 || true
+fi
 
 # ── 4. Backend env (loopback DB, single data volume) ─────────────────────────
 export DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=objectstore DB_NAME=objectstore DB_SSL_MODE=disable

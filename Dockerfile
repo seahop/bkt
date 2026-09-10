@@ -44,8 +44,10 @@ EXPOSE 9000 9443
 ENTRYPOINT ["./main"]
 
 # ── Stage 3b: omnibus — backend + bundled Postgres (single-container path) ─────
-FROM postgres:16-alpine AS omnibus
-RUN apk --no-cache upgrade && apk add --no-cache bash openssl tini su-exec ca-certificates wget
+FROM postgres:18-alpine AS omnibus
+# postgresql16 provides the previous major's binaries (/usr/libexec/postgresql16)
+# so the entrypoint can pg_upgrade an existing /data/pgdata cluster in place.
+RUN apk --no-cache upgrade && apk add --no-cache bash openssl tini su-exec ca-certificates wget postgresql16
 COPY --from=builder /app/main /usr/local/bin/bkt
 COPY docker/omnibus/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

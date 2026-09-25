@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { FolderOpen, Upload, Download, Trash2, File as FileIcon, ArrowLeft, RefreshCw, Folder, FolderPlus, Home, Loader2, Pencil, Columns2, Info, Copy, ExternalLink, Search, X, Calendar, Filter, ChevronRight, CheckCircle2, XCircle, Link2, Check, History, Settings2 } from 'lucide-react'
+import { FolderOpen, Upload, Download, Trash2, File as FileIcon, ArrowLeft, RefreshCw, Folder, FolderPlus, Home, Loader2, Pencil, Columns2, Info, Copy, ExternalLink, Search, X, Calendar, Filter, ChevronRight, CheckCircle2, XCircle, Link2, Check, History, Settings2, Lock } from 'lucide-react'
 import { bucketApi } from '../services/api'
 import type { ObjectVersion } from '../services/api'
 import type { Object as StorageObject, Bucket } from '../types'
 import { getErrorMessage, getErrorStatus } from '../utils/errors'
 import { useAsyncLoad } from '../utils/useAsyncLoad'
+import { useAuthStore } from '../store/authStore'
 import {
   INLINE_OPEN_MAX_BYTES,
   closeTab,
@@ -46,9 +47,13 @@ interface ActiveUpload {
 
 export default function BucketDetails() {
   const { bucketName } = useParams<{ bucketName: string }>()
+  const isAdmin = useAuthStore((st) => st.user?.is_admin ?? false)
   const [objects, setObjects] = useState<StorageObject[]>([])
   const [currentPrefix, setCurrentPrefix] = useState('')
   const [loading, setLoading] = useState(true)
+  // Listing was refused (403): show a permission notice instead of the
+  // "folder is empty — upload" prompt, which would be misleading.
+  const [listDenied, setListDenied] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')
   // Truncation state: set when the backend indicates more objects are available
@@ -97,7 +102,7 @@ export default function BucketDetails() {
   // Share (presigned URL) modal state
   const [shareTarget, setShareTarget] = useState<string | null>(null)
   const [shareExpiry, setShareExpiry] = useState(3600)
-  const [shareResult, setShareResult] = useState<{ url: string; expires_at: string; capped_by_key: boolean; signing_key_name?: string } | null>(null)
+  const [shareResult, setShareResult] = useState<{ url: string; expires_at: string; capped_by_key: boolean; signing_key_name?: string; endpoint_derived?: boolean } | null>(null)
   const [shareLoading, setShareLoading] = useState(false)
   const [shareError, setShareError] = useState('')
   const [shareNeedsKey, setShareNeedsKey] = useState(false)
@@ -168,6 +173,7 @@ export default function BucketDetails() {
       const data = await bucketApi.listObjects(bucketName)
       // Handle both array response and object response with objects property
       const objectList = Array.isArray(data) ? data : data.objects || []
+      setListDenied(false)
       setObjects(objectList)
       if (!Array.isArray(data)) {
         setTruncated(!!data.is_truncated)
@@ -178,6 +184,7 @@ export default function BucketDetails() {
       }
     } catch (error) {
       console.error('Failed to load objects:', error)
+      setListDenied(getErrorStatus(error) === 403)
       setError(getErrorMessage(error, 'Failed to load objects'))
     } finally {
       setLoading(false)
@@ -1106,14 +1113,14 @@ export default function BucketDetails() {
           <ArrowLeft className="w-4 h-4" />
           Back to Buckets
         </Link>
-        <div className="flex items-start justify-between gap-4 mb-6">
+        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 mb-6">
           <div>
             <h1 className="page-title font-mono">{bucketName}</h1>
             <p className="page-subtitle">
               {browserItems.length} item{browserItems.length !== 1 ? 's' : ''}
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button onClick={openBucketSettings} className="btn-icon" title="Bucket settings">
               <Settings2 className="w-4 h-4" />
             </button>
@@ -1796,6 +1803,15 @@ export default function BucketDetails() {
                     Clear Search & Filters
                   </button>
                 </>
+              ) : listDenied ? (
+                <>
+                  <Lock className="empty-state-icon" />
+                  <h3 className="text-base font-semibold text-dark-text mb-1">You can't view this bucket's contents</h3>
+                  <p className="text-sm text-dark-textSecondary max-w-sm">
+                    Your permissions don't include listing objects here. If your policy allows uploads you can
+                    still add files; ask an administrator if you need access.
+                  </p>
+                </>
               ) : (
                 <>
                   <FolderOpen className="empty-state-icon" />
@@ -2327,6 +2343,13 @@ export default function BucketDetails() {
                   </div>
                   {shareResult.capped_by_key && (
                     <div className="alert-warning">Capped by your access key's expiry</div>
+                  )}
+                  {shareResult.endpoint_derived && isAdmin && (
+                    <p className="help-text mt-2">
+                      This link points at <code>{new URL(shareResult.url).origin}</code>, guessed from this
+                      page's address and the S3 listener's own port. If clients reach the S3 API somewhere
+                      else (a different published port or a reverse proxy), set <code>S3_PUBLIC_ENDPOINT</code>.
+                    </p>
                   )}
                   <div className="flex justify-end gap-2 mt-6">
                     <button

@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../store/authStore'
 import {
@@ -9,6 +10,8 @@ import {
   LogOut,
   Database,
   Server,
+  Menu,
+  X,
 } from 'lucide-react'
 
 interface NavItem {
@@ -21,6 +24,18 @@ export default function Layout() {
   const { user, logout } = useAuthStore()
   const location = useLocation()
   const navigate = useNavigate()
+  // Mobile (< md) navigation drawer; on md+ the sidebar is always visible.
+  const [navOpen, setNavOpen] = useState(false)
+  const closeNav = () => setNavOpen(false)
+
+  useEffect(() => {
+    if (!navOpen) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setNavOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [navOpen])
 
   const handleLogout = async () => {
     await logout()
@@ -53,6 +68,7 @@ export default function Layout() {
       <li key={item.path}>
         <Link
           to={item.path}
+          onClick={closeNav}
           aria-current={active ? 'page' : undefined}
           className={`group relative flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors duration-150 ${
             active
@@ -76,10 +92,25 @@ export default function Layout() {
 
   return (
     <div className="flex h-screen bg-dark-bg">
-      {/* Sidebar */}
-      <aside className="w-60 bg-dark-surface border-r border-dark-border flex flex-col">
+      {/* Mobile backdrop behind the open drawer */}
+      {navOpen && (
+        <div
+          className="fixed inset-0 z-30 bg-black/60 md:hidden"
+          onClick={closeNav}
+          aria-hidden="true"
+        />
+      )}
+
+      {/* Sidebar: static on md+, slide-in drawer below md */}
+      <aside
+        id="app-sidebar"
+        className={`fixed inset-y-0 left-0 z-40 w-60 bg-dark-surface border-r border-dark-border flex flex-col transform transition-transform duration-200 md:static md:translate-x-0 ${
+          navOpen ? 'translate-x-0' : '-translate-x-full'
+        }`}
+      >
         <Link
           to="/"
+          onClick={closeNav}
           className="flex items-center gap-2.5 px-5 h-16 border-b border-dark-border shrink-0"
         >
           <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-blue-600/15">
@@ -130,9 +161,28 @@ export default function Layout() {
       </aside>
 
       {/* Main content */}
-      <main className="flex-1 overflow-auto">
-        <Outlet />
-      </main>
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Mobile top bar */}
+        <header className="md:hidden flex items-center gap-3 h-14 px-4 border-b border-dark-border bg-dark-surface shrink-0">
+          <button
+            type="button"
+            onClick={() => setNavOpen((o) => !o)}
+            className="btn-icon"
+            aria-label={navOpen ? 'Close menu' : 'Open menu'}
+            aria-controls="app-sidebar"
+            aria-expanded={navOpen}
+          >
+            {navOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+          </button>
+          <Link to="/" onClick={closeNav} className="flex items-center gap-2">
+            <Database className="w-[18px] h-[18px] text-blue-500" />
+            <span className="text-[15px] font-semibold text-dark-text tracking-tight">bkt</span>
+          </Link>
+        </header>
+        <main className="flex-1 overflow-auto">
+          <Outlet />
+        </main>
+      </div>
     </div>
   )
 }

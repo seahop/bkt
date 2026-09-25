@@ -28,6 +28,7 @@ Then:
 
 - Get the first-boot admin password: `docker logs bkt | grep -A2 "admin credentials"` — or set your own with `-e ADMIN_PASSWORD=...`.
 - Create an access key in the UI (Profile) and point S3 tools at `https://localhost:9000`.
+- Publishing the S3 port somewhere else (e.g. `-p 19000:9000`) or behind a reverse proxy? Set `-e S3_PUBLIC_ENDPOINT=https://host:19000` so the console's shareable links point at the address clients actually use.
 
 All state (database, objects, certs, secrets) lives in the `bkt-data` volume, so the container itself is disposable. For multi-node / external-Postgres deployments, use the Helm chart in [`charts/bkt`](charts/bkt) or [docker-compose.prod.yml](docker-compose.prod.yml).
 
@@ -43,6 +44,7 @@ docker run -d -p 9443:9443 -p 9000:9000 -v bkt-data:/data \
   -e S3_ENABLED=true \
   -e S3_ACCESS_KEY_ID='AKIA...' -e S3_SECRET_ACCESS_KEY='...' \
   -e S3_BUCKETS='my-existing-bucket' \   # auto-provision a bucket on startup
+  -e S3_PUBLIC_ENDPOINT='https://s3.example.com' \  # base URL for shareable links
   ghcr.io/seahop/bkt
 ```
 

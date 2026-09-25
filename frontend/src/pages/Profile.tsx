@@ -151,14 +151,14 @@ export default function Profile() {
       </div>
 
       <div className="card p-6">
-        <div className="flex items-start justify-between gap-4 mb-6">
+        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 mb-6">
           <div>
             <h2 className="text-base font-semibold text-dark-text">Access Keys</h2>
             <p className="text-sm text-dark-textSecondary mt-0.5">
               Generate and manage API credentials
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button onClick={openStsModal} className="btn-secondary">
               <Clock className="w-4 h-4" />
               Temporary credentials

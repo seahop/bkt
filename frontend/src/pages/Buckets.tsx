@@ -225,7 +225,7 @@ export default function Buckets() {
                   required
                   minLength={3}
                   maxLength={63}
-                  pattern="[a-z0-9-]+"
+                  pattern="[a-z0-9\-]+"
                   title="Only lowercase letters, numbers, and hyphens"
                 />
                 <p className="help-text">

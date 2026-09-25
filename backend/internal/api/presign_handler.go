@@ -155,6 +155,10 @@ func (h *BucketHandler) PresignObject(c *gin.Context) {
 		"expires_at":       urlExpiresAt.UTC().Format(time.RFC3339),
 		"capped_by_key":    capped,
 		"signing_key_name": signingKey.Name,
+		// True when S3_PUBLIC_ENDPOINT is unset and the base URL was guessed
+		// from the console host + the S3 listener's own port; the console
+		// shows admins a hint, since a remapped port or proxy breaks it.
+		"endpoint_derived": h.config.Server.S3PublicEndpoint == "",
 	})
 }
 

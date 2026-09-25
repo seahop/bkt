@@ -396,8 +396,8 @@ export const bucketApi = {
     return data
   },
 
-  presignObject: async (bucketName: string, key: string, expiresIn: number): Promise<{ url: string; expires_at: string; capped_by_key: boolean; signing_key_name?: string }> => {
-    const { data } = await api.post<{ url: string; expires_at: string; capped_by_key: boolean; signing_key_name?: string }>(`/buckets/${bucketName}/objects/presign`, {
+  presignObject: async (bucketName: string, key: string, expiresIn: number): Promise<{ url: string; expires_at: string; capped_by_key: boolean; signing_key_name?: string; endpoint_derived?: boolean }> => {
+    const { data } = await api.post<{ url: string; expires_at: string; capped_by_key: boolean; signing_key_name?: string; endpoint_derived?: boolean }>(`/buckets/${bucketName}/objects/presign`, {
       key,
       expires_in: expiresIn,
     })

@@ -195,6 +195,7 @@ legacy-format values are examined).
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `GIN_MODE` | `release` | HTTP framework mode. `debug` prints every registered route and a "running in debug mode" warning at startup (docker-compose.yml sets it for development); leave unset in production |
 | `TLS_ENABLED` | `true` (omnibus; bare binary: `false`) | `false` serves plain HTTP (use behind a TLS-terminating proxy — and set `TRUSTED_PROXIES`). Production (`GO_ENV=production`) refuses to start without TLS unless `TLS_TERMINATED_UPSTREAM=true` |
 | `TLS_TERMINATED_UPSTREAM` | `false` | Declare that a reverse proxy / ingress terminates TLS in front of bkt. Satisfies the production TLS requirement with `TLS_ENABLED=false` (logged at startup). Only set it when the listeners are reachable solely through that proxy |
 | `TLS_CERT_FILE` / `TLS_KEY_FILE` | _auto self-signed_ | Mount your own cert/key to override the generated pair |

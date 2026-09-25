@@ -17,9 +17,18 @@ import (
 	"strconv"
 	"syscall"
 	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
 func main() {
+	// Gin runs in debug mode (route dump + "Running in debug mode" warning)
+	// unless GIN_MODE is set. Default to release so production deployments are
+	// quiet out of the box; set GIN_MODE=debug for local development.
+	if os.Getenv(gin.EnvGinMode) == "" {
+		gin.SetMode(gin.ReleaseMode)
+	}
+
 	// Load configuration
 	cfg := config.Load()
 	log.Println("Configuration loaded")

@@ -140,6 +140,9 @@ func (s3s *S3Storage) BucketExists(bucketName string) (bool, error) {
 
 // PutObject stores an object in S3
 func (s3s *S3Storage) PutObject(bucketName, objectKey string, data io.Reader, size int64, contentType string, metadata map[string]string) error {
+	if err := checkS3UserKey(objectKey); err != nil {
+		return err
+	}
 	ctx := context.Background()
 	actualBucketName := s3s.getBucketName(bucketName)
 
@@ -176,11 +179,13 @@ func (s3s *S3Storage) PutObject(bucketName, objectKey string, data io.Reader, si
 
 	// Upload object
 	putInput := &s3.PutObjectInput{
-		Bucket:        aws.String(actualBucketName),
-		Key:           aws.String(objectKey),
-		Body:          data,
-		ContentLength: aws.Int64(size),
-		ContentType:   aws.String(contentType),
+		Bucket:      aws.String(actualBucketName),
+		Key:         aws.String(objectKey),
+		Body:        data,
+		ContentType: aws.String(contentType),
+	}
+	if size >= 0 {
+		putInput.ContentLength = aws.Int64(size)
 	}
 	if len(metadata) > 0 {
 		putInput.Metadata = metadata
@@ -198,6 +203,9 @@ func (s3s *S3Storage) PutObject(bucketName, objectKey string, data io.Reader, si
 
 // GetObject retrieves an object from S3
 func (s3s *S3Storage) GetObject(bucketName, objectKey string) (io.ReadCloser, error) {
+	if err := checkS3UserKey(objectKey); err != nil {
+		return nil, err
+	}
 	ctx := context.Background()
 	actualBucketName := s3s.getBucketName(bucketName)
 
@@ -214,6 +222,9 @@ func (s3s *S3Storage) GetObject(bucketName, objectKey string) (io.ReadCloser, er
 
 // DeleteObject removes an object from S3
 func (s3s *S3Storage) DeleteObject(bucketName, objectKey string) error {
+	if err := checkS3UserKey(objectKey); err != nil {
+		return err
+	}
 	ctx := context.Background()
 	actualBucketName := s3s.getBucketName(bucketName)
 
@@ -297,6 +308,9 @@ func (s3s *S3Storage) ListObjects(bucketName, prefix string) ([]ObjectInfo, erro
 
 // ObjectExists checks if an object exists in S3
 func (s3s *S3Storage) ObjectExists(bucketName, objectKey string) (bool, error) {
+	if err := checkS3UserKey(objectKey); err != nil {
+		return false, err
+	}
 	ctx := context.Background()
 	actualBucketName := s3s.getBucketName(bucketName)
 
@@ -308,9 +322,9 @@ func (s3s *S3Storage) ObjectExists(bucketName, objectKey string) (bool, error) {
 		// Check if error is "not found"
 		var notFound *types.NotFound
 		var noSuchKey *types.NoSuchKey
-		if strings.Contains(err.Error(), "NotFound") || 
-		   strings.Contains(err.Error(), "NoSuchKey") ||
-		   err == notFound || err == noSuchKey {
+		if strings.Contains(err.Error(), "NotFound") ||
+			strings.Contains(err.Error(), "NoSuchKey") ||
+			err == notFound || err == noSuchKey {
 			return false, nil
 		}
 		return false, fmt.Errorf("failed to check object: %w", err)
@@ -321,6 +335,9 @@ func (s3s *S3Storage) ObjectExists(bucketName, objectKey string) (bool, error) {
 
 // GetObjectInfo gets metadata about an object
 func (s3s *S3Storage) GetObjectInfo(bucketName, objectKey string) (*ObjectInfo, error) {
+	if err := checkS3UserKey(objectKey); err != nil {
+		return nil, err
+	}
 	ctx := context.Background()
 	actualBucketName := s3s.getBucketName(bucketName)
 
@@ -363,15 +380,24 @@ func (s3s *S3Storage) GetObjectInfo(bucketName, objectKey string) (*ObjectInfo, 
 
 // CopyObject copies an object within the same bucket using S3 CopyObject API
 func (s3s *S3Storage) CopyObject(bucketName, srcKey, dstKey string) error {
+	if err := checkS3UserKey(srcKey); err != nil {
+		return err
+	}
+	if err := checkS3UserKey(dstKey); err != nil {
+		return err
+	}
 	ctx := context.Background()
 	actualBucketName := s3s.getBucketName(bucketName)
 
-	copySource := fmt.Sprintf("%s/%s", actualBucketName, srcKey)
-	_, err := s3s.client.CopyObject(ctx, &s3.CopyObjectInput{
+	input := &s3.CopyObjectInput{
 		Bucket:     aws.String(actualBucketName),
 		Key:        aws.String(dstKey),
-		CopySource: aws.String(copySource),
-	})
+		CopySource: aws.String(s3CopySource(actualBucketName, srcKey)),
+	}
+	if s3s.sse {
+		input.ServerSideEncryption = types.ServerSideEncryptionAes256
+	}
+	_, err := s3s.client.CopyObject(ctx, input)
 	if err != nil {
 		return fmt.Errorf("failed to copy object: %w", err)
 	}
@@ -379,6 +405,9 @@ func (s3s *S3Storage) CopyObject(bucketName, srcKey, dstKey string) error {
 }
 
 func (s3s *S3Storage) CreateMultipartUpload(bucketName, objectKey, contentType string, metadata map[string]string) (string, error) {
+	if err := checkS3UserKey(objectKey); err != nil {
+		return "", err
+	}
 	ctx := context.Background()
 	mpuInput := &s3.CreateMultipartUploadInput{
 		Bucket:      aws.String(s3s.getBucketName(bucketName)),
@@ -404,15 +433,21 @@ func (s3s *S3Storage) UploadPart(bucketName, objectKey, uploadID string, partNum
 	if partNumber < 1 || partNumber > 10000 {
 		return "", fmt.Errorf("invalid part number %d", partNumber)
 	}
+	if err := checkS3UserKey(objectKey); err != nil {
+		return "", err
+	}
 	ctx := context.Background()
-	out, err := s3s.client.UploadPart(ctx, &s3.UploadPartInput{
-		Bucket:        aws.String(s3s.getBucketName(bucketName)),
-		Key:           aws.String(objectKey),
-		UploadId:      aws.String(uploadID),
-		PartNumber:    aws.Int32(int32(partNumber)),
-		Body:          data,
-		ContentLength: aws.Int64(size),
-	})
+	input := &s3.UploadPartInput{
+		Bucket:     aws.String(s3s.getBucketName(bucketName)),
+		Key:        aws.String(objectKey),
+		UploadId:   aws.String(uploadID),
+		PartNumber: aws.Int32(int32(partNumber)),
+		Body:       data,
+	}
+	if size >= 0 {
+		input.ContentLength = aws.Int64(size)
+	}
+	out, err := s3s.client.UploadPart(ctx, input)
 	if err != nil {
 		return "", fmt.Errorf("failed to upload part: %w", err)
 	}
@@ -420,6 +455,9 @@ func (s3s *S3Storage) UploadPart(bucketName, objectKey, uploadID string, partNum
 }
 
 func (s3s *S3Storage) CompleteMultipartUpload(bucketName, objectKey, uploadID string, parts []CompletedPart) error {
+	if err := checkS3UserKey(objectKey); err != nil {
+		return err
+	}
 	ctx := context.Background()
 	awsParts := make([]types.CompletedPart, len(parts))
 	for i, p := range parts {
@@ -449,6 +487,9 @@ func (s3s *S3Storage) CompleteMultipartUpload(bucketName, objectKey, uploadID st
 }
 
 func (s3s *S3Storage) AbortMultipartUpload(bucketName, objectKey, uploadID string) error {
+	if err := checkS3UserKey(objectKey); err != nil {
+		return err
+	}
 	ctx := context.Background()
 	_, err := s3s.client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
 		Bucket:   aws.String(s3s.getBucketName(bucketName)),
@@ -462,6 +503,9 @@ func (s3s *S3Storage) AbortMultipartUpload(bucketName, objectKey, uploadID strin
 }
 
 func (s3s *S3Storage) ListParts(bucketName, objectKey, uploadID string) ([]PartInfo, error) {
+	if err := checkS3UserKey(objectKey); err != nil {
+		return nil, err
+	}
 	ctx := context.Background()
 	out, err := s3s.client.ListParts(ctx, &s3.ListPartsInput{
 		Bucket:   aws.String(s3s.getBucketName(bucketName)),
@@ -485,4 +529,53 @@ func (s3s *S3Storage) ListParts(bucketName, objectKey, uploadID string) ([]PartI
 		}
 	}
 	return parts, nil
+}
+
+// GetObjectRange implements RangeReader with a native ranged GET, so serving
+// the tail of a large object doesn't download (and discard) everything before
+// the requested offset.
+func (s3s *S3Storage) GetObjectRange(bucketName, objectKey string, start, length int64) (io.ReadCloser, error) {
+	if err := checkS3UserKey(objectKey); err != nil {
+		return nil, err
+	}
+	if start < 0 || length < 0 {
+		return nil, fmt.Errorf("invalid range")
+	}
+	if length == 0 {
+		return io.NopCloser(strings.NewReader("")), nil
+	}
+	result, err := s3s.client.GetObject(context.Background(), &s3.GetObjectInput{
+		Bucket: aws.String(s3s.getBucketName(bucketName)),
+		Key:    aws.String(objectKey),
+		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", start, start+length-1)),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get object range: %w", err)
+	}
+	return limitedReadCloser{Reader: io.LimitReader(result.Body, length), Closer: result.Body}, nil
+}
+
+// PartSizes implements PartSizer, following ListParts pagination (a single
+// ListParts page holds at most 1000 parts).
+func (s3s *S3Storage) PartSizes(bucketName, objectKey, uploadID string) (map[int]int64, error) {
+	if err := checkS3UserKey(objectKey); err != nil {
+		return nil, err
+	}
+	ctx := context.Background()
+	paginator := s3.NewListPartsPaginator(s3s.client, &s3.ListPartsInput{
+		Bucket:   aws.String(s3s.getBucketName(bucketName)),
+		Key:      aws.String(objectKey),
+		UploadId: aws.String(uploadID),
+	})
+	sizes := make(map[int]int64)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list parts: %w", err)
+		}
+		for _, p := range page.Parts {
+			sizes[int(aws.ToInt32(p.PartNumber))] = aws.ToInt64(p.Size)
+		}
+	}
+	return sizes, nil
 }

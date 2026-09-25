@@ -5,9 +5,9 @@ import (
 	"net/http"
 	"time"
 
+	_ "bkt/docs/swagger" // swaggo generated docs
 	authpkg "bkt/internal/auth"
 	"bkt/internal/config"
-	_ "bkt/docs/swagger" // swaggo generated docs
 	"bkt/internal/logger"
 	"bkt/internal/middleware"
 	"bkt/internal/web"
@@ -36,7 +36,15 @@ import (
 // probes. It deliberately has no `/:bucket` S3 routes, so the SPA can safely own
 // every unmatched path via NoRoute.
 func SetupConsoleRouter(cfg *config.Config) *gin.Engine {
-	router := gin.Default()
+	router := newEngine()
+
+	// Browser hardening headers (CSP, frame-ancestors/X-Frame-Options, nosniff,
+	// Referrer-Policy, HSTS). Registered first so every route below — including
+	// /metrics, Swagger and the SPA fallback — carries them.
+	router.Use(middleware.ConsoleSecurityHeaders(middleware.SecurityHeadersConfig{
+		HSTS:       cfg.TLS.Enabled || cfg.TLS.TerminatedUpstream,
+		HSTSMaxAge: cfg.Server.HSTSMaxAge,
+	}))
 
 	// Trust only explicitly-configured proxies. With the default (empty) list,
 	// c.ClientIP() uses the real connection address and ignores client-supplied
@@ -64,9 +72,17 @@ func SetupConsoleRouter(cfg *config.Config) *gin.Engine {
 			metricsHandler(c)
 		})
 	} else {
+		if cfg.Server.Production {
+			logger.Warn("METRICS_TOKEN is not set: /metrics is served without authentication and exposes bucket/object/user counts. "+
+				"Set METRICS_TOKEN (and give Prometheus the same bearer token) or keep the console port network-isolated.", nil)
+		}
 		router.GET("/metrics", metricsHandler)
 	}
-	router.GET("/api/docs/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+	// Swagger UI: on by default in development, off in production unless
+	// SWAGGER_ENABLED=true (it advertises the full API surface).
+	if cfg.Server.SwaggerEnabled {
+		router.GET("/api/docs/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+	}
 
 	router.Use(middleware.RequestIDMiddleware())
 	router.Use(middleware.MetricsMiddleware())
@@ -99,7 +115,7 @@ func SetupConsoleRouter(cfg *config.Config) *gin.Engine {
 // s3fs) address buckets at the host root, so these routes own `/` and cannot
 // share a listener with the web UI.
 func SetupS3Router(cfg *config.Config) *gin.Engine {
-	router := gin.Default()
+	router := newEngine()
 
 	// Same trusted-proxy policy as the console listener (see SetupConsoleRouter).
 	if err := router.SetTrustedProxies(cfg.Server.TrustedProxies); err != nil {
@@ -132,12 +148,24 @@ func SetupS3Router(cfg *config.Config) *gin.Engine {
 
 		// Object-level operations
 		s3.HEAD("/:bucket/*key", s3Handler.HeadObject)
-		s3.GET("/:bucket/*key", s3Handler.GetObject)         // also handles ListParts (?uploadId)
+		// GET also handles ListParts (?uploadId). S3ObjectResponseHeaders adds
+		// nosniff and serves active content (HTML/SVG/XML/JS) as an attachment
+		// so a presigned link can't render uploader-controlled markup.
+		s3.GET("/:bucket/*key", middleware.S3ObjectResponseHeaders(), s3Handler.GetObject)
 		s3.PUT("/:bucket/*key", s3Handler.PutObject)         // also handles UploadPart (?partNumber&uploadId)
 		s3.POST("/:bucket/*key", s3Handler.HandleObjectPost) // CreateMultipartUpload (?uploads) or CompleteMultipartUpload (?uploadId)
 		s3.DELETE("/:bucket/*key", s3Handler.DeleteObject)   // also handles AbortMultipartUpload (?uploadId)
 	}
 
+	return router
+}
+
+// newEngine is gin.Default() with the access logger swapped for one that
+// redacts credentials in query strings (presigned-URL signatures, STS session
+// tokens, SSO authorization codes).
+func newEngine() *gin.Engine {
+	router := gin.New()
+	router.Use(middleware.AccessLogger(), gin.Recovery())
 	return router
 }
 
@@ -161,10 +189,19 @@ func registerAPIRoutes(router *gin.Engine, cfg *config.Config) {
 			// higher ceiling than password login while still throttling abuse
 			// (e.g. brute-forcing the unverified-JWT endpoint or callback spam).
 			ssoRateLimit := middleware.RateLimitMiddleware(authRatePerMin*6, time.Minute)
+			// Token refresh is not a password guess and happens routinely for
+			// every signed-in user; give it its own, larger budget so users
+			// behind a shared egress IP aren't logged out by each other's
+			// logins (AUTH_REFRESH_RATE_LIMIT, default 30/min per IP).
+			refreshPerMin := cfg.Auth.RefreshRateLimit
+			if refreshPerMin <= 0 {
+				refreshPerMin = 30
+			}
+			refreshRateLimit := middleware.RateLimitMiddleware(refreshPerMin, time.Minute)
 
 			auth.POST("/register", authRateLimit, authHandler.Register)
 			auth.POST("/login", authRateLimit, authHandler.Login)
-			auth.POST("/refresh", authRateLimit, authHandler.RefreshToken)
+			auth.POST("/refresh", refreshRateLimit, authHandler.RefreshToken)
 
 			// SSO configuration endpoint
 			ssoConfigHandler := NewSSOConfigHandler(cfg)
@@ -244,7 +281,7 @@ func registerAPIRoutes(router *gin.Engine, cfg *config.Config) {
 				buckets.GET("", bucketHandler.ListBuckets)
 				buckets.POST("", middleware.AdminMiddleware(), bucketHandler.CreateBucket) // Admin only
 				buckets.GET("/:name", bucketHandler.GetBucket)
-				buckets.DELETE("/:name", middleware.AdminMiddleware(), bucketHandler.DeleteBucket)       // Admin only
+				buckets.DELETE("/:name", middleware.AdminMiddleware(), bucketHandler.DeleteBucket)        // Admin only
 				buckets.PUT("/:name/policy", middleware.AdminMiddleware(), bucketHandler.SetBucketPolicy) // Admin only
 				buckets.GET("/:name/policy", bucketHandler.GetBucketPolicy)
 
@@ -262,9 +299,9 @@ func registerAPIRoutes(router *gin.Engine, cfg *config.Config) {
 				buckets.PUT("/:name/versioning", bucketHandler.SetBucketVersioning)
 				buckets.PUT("/:name/lifecycle", bucketHandler.SetBucketLifecycleREST)
 				buckets.PUT("/:name/settings", bucketHandler.SetBucketSettings)
-				buckets.POST("/:name/objects/move", bucketHandler.MoveObject)         // Move object
-				buckets.POST("/:name/objects/rename", bucketHandler.RenameObject)     // Rename object
-				buckets.POST("/:name/folders/move", bucketHandler.MoveFolder)         // Move folder recursively
+				buckets.POST("/:name/objects/move", bucketHandler.MoveObject)     // Move object
+				buckets.POST("/:name/objects/rename", bucketHandler.RenameObject) // Rename object
+				buckets.POST("/:name/folders/move", bucketHandler.MoveFolder)     // Move folder recursively
 				buckets.GET("/:name/objects/*key", bucketHandler.DownloadObject)
 				buckets.DELETE("/:name/objects/*key", bucketHandler.DeleteObject)
 				buckets.HEAD("/:name/objects/*key", bucketHandler.HeadObject)
@@ -281,12 +318,12 @@ func registerAPIRoutes(router *gin.Engine, cfg *config.Config) {
 			policyHandler := NewPolicyHandler(cfg)
 			policies := protected.Group("/policies")
 			{
-				policies.GET("", policyHandler.ListPolicies)                                                              // Regular users see their policies, admins see all
-				policies.POST("", middleware.AdminMiddleware(), policyHandler.CreatePolicy)                               // Admin only
-				policies.GET("/:id", middleware.AdminMiddleware(), policyHandler.GetPolicy)                               // Admin only
-				policies.PUT("/:id", middleware.AdminMiddleware(), policyHandler.UpdatePolicy)                            // Admin only
-				policies.DELETE("/:id", middleware.AdminMiddleware(), policyHandler.DeletePolicy)                         // Admin only
-				policies.POST("/users/:user_id/attach", middleware.AdminMiddleware(), policyHandler.AttachPolicyToUser)   // Admin only
+				policies.GET("", policyHandler.ListPolicies)                                                                           // Regular users see their policies, admins see all
+				policies.POST("", middleware.AdminMiddleware(), policyHandler.CreatePolicy)                                            // Admin only
+				policies.GET("/:id", middleware.AdminMiddleware(), policyHandler.GetPolicy)                                            // Admin only
+				policies.PUT("/:id", middleware.AdminMiddleware(), policyHandler.UpdatePolicy)                                         // Admin only
+				policies.DELETE("/:id", middleware.AdminMiddleware(), policyHandler.DeletePolicy)                                      // Admin only
+				policies.POST("/users/:user_id/attach", middleware.AdminMiddleware(), policyHandler.AttachPolicyToUser)                // Admin only
 				policies.DELETE("/users/:user_id/detach/:policy_id", middleware.AdminMiddleware(), policyHandler.DetachPolicyFromUser) // Admin only
 			}
 

@@ -50,17 +50,57 @@ var (
 	// once per distinct ciphertext salt — critical because DecryptSecretKey runs
 	// on the S3 auth hot path (once per request, same salt per access key).
 	derivedKeyCache sync.Map // hex(salt) -> []byte
+
+	// fallbackSource is DECRYPT-ONLY key material derived from JWT_SECRET, set
+	// when a dedicated ENCRYPTION_KEY is configured. Deployments that ran
+	// without ENCRYPTION_KEY stored credentials under the JWT_SECRET fallback;
+	// adding an ENCRYPTION_KEY later must not strand that data, so decryption
+	// retries with this source when the primary key fails. New ciphertexts
+	// are always written with the primary key.
+	fallbackSource *keySource
+	fallbackUsed   sync.Once
 )
+
+// keySource caches the derived keys for one piece of secret material.
+type keySource struct {
+	secret     []byte
+	legacyOnce sync.Once
+	legacy     []byte
+	v2Cache    sync.Map // hex(salt) -> []byte
+}
+
+func newKeySource(secret []byte) *keySource { return &keySource{secret: secret} }
+
+func (k *keySource) legacyKey() ([]byte, error) {
+	k.legacyOnce.Do(func() {
+		k.legacy = pbkdf2.Key(k.secret, []byte("bkt-object-storage-v1"), legacyIters, derivedKeyLen, sha256.New)
+	})
+	return k.legacy, nil
+}
+
+func (k *keySource) v2Key(salt []byte) ([]byte, error) {
+	saltHex := hex.EncodeToString(salt)
+	if cached, ok := k.v2Cache.Load(saltHex); ok {
+		return cached.([]byte), nil
+	}
+	key := pbkdf2.Key(k.secret, salt, v2Iterations, derivedKeyLen, sha256.New)
+	k.v2Cache.Store(saltHex, key)
+	return key, nil
+}
 
 func getSecretMaterial() ([]byte, error) {
 	secretMaterialOnce.Do(func() {
 		keyString := os.Getenv("ENCRYPTION_KEY")
+		jwtSecret := os.Getenv("JWT_SECRET")
 		if keyString == "" {
-			keyString = os.Getenv("JWT_SECRET")
+			keyString = jwtSecret
 			if keyString != "" {
 				log.Println("WARNING: ENCRYPTION_KEY is not set; falling back to JWT_SECRET to encrypt stored credentials. " +
-					"Set a dedicated ENCRYPTION_KEY so a JWT secret rotation/leak does not affect credential encryption.")
+					"Set a dedicated ENCRYPTION_KEY so a JWT secret rotation/leak does not affect credential encryption " +
+					"(credentials already encrypted under JWT_SECRET remain readable after you add it).")
 			}
+		} else if jwtSecret != "" && jwtSecret != keyString {
+			fallbackSource = newKeySource([]byte(jwtSecret))
 		}
 		if keyString == "" {
 			secretMaterialErr = fmt.Errorf("ENCRYPTION_KEY (or JWT_SECRET) must be set")
@@ -100,11 +140,15 @@ func deriveV2Key(salt []byte) ([]byte, error) {
 // EncryptSecretKey encrypts a secret using AES-256-GCM (format v2) and returns
 // base64-encoded ciphertext.
 func EncryptSecretKey(secretKey string) (string, error) {
+	return encryptV2With(secretKey, deriveV2Key)
+}
+
+func encryptV2With(secretKey string, derive func(salt []byte) ([]byte, error)) (string, error) {
 	salt := make([]byte, v2SaltLen)
 	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
 		return "", fmt.Errorf("failed to generate salt: %w", err)
 	}
-	key, err := deriveV2Key(salt)
+	key, err := derive(salt)
 	if err != nil {
 		return "", err
 	}
@@ -134,15 +178,35 @@ func EncryptSecretKey(secretKey string) (string, error) {
 }
 
 // DecryptSecretKey decrypts a secret produced by EncryptSecretKey. It handles
-// both the current v2 format and legacy v1 ciphertexts.
+// both the current v2 format and legacy v1 ciphertexts, and — when a dedicated
+// ENCRYPTION_KEY is configured — data written earlier under the JWT_SECRET
+// fallback key.
 func DecryptSecretKey(encryptedSecretKey string) (string, error) {
 	raw, err := base64.StdEncoding.DecodeString(encryptedSecretKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to decode base64: %w", err)
 	}
 
+	plaintext, err := decryptWith(raw, deriveV2Key, getLegacyKey)
+	if err == nil {
+		return plaintext, nil
+	}
+	if _, merr := getSecretMaterial(); merr == nil && fallbackSource != nil {
+		if fbPlain, fbErr := decryptWith(raw, fallbackSource.v2Key, fallbackSource.legacyKey); fbErr == nil {
+			fallbackUsed.Do(func() {
+				log.Println("NOTICE: decrypted stored credentials with the JWT_SECRET-derived key (written before ENCRYPTION_KEY was set). " +
+					"They stay readable while JWT_SECRET is unchanged; re-save those S3 configurations to re-encrypt them under ENCRYPTION_KEY.")
+			})
+			return fbPlain, nil
+		}
+	}
+	return "", err
+}
+
+// decryptWith dispatches on the format version using the given key sources.
+func decryptWith(raw []byte, derive func(salt []byte) ([]byte, error), legacy func() ([]byte, error)) (string, error) {
 	if len(raw) > 0 && raw[0] == encVersionV2 {
-		plaintext, err := decryptV2(raw)
+		plaintext, err := decryptV2With(raw, derive)
 		if err == nil {
 			return plaintext, nil
 		}
@@ -150,22 +214,22 @@ func DecryptSecretKey(encryptedSecretKey string) (string, error) {
 		// legacy blobs happen to begin with the v2 version byte. GCM authentication
 		// makes a wrong-format decrypt fail, never succeed spuriously, so fall back
 		// to the legacy path before reporting failure.
-		if legacyPlain, lerr := decryptLegacy(raw); lerr == nil {
+		if legacyPlain, lerr := decryptLegacyWith(raw, legacy); lerr == nil {
 			return legacyPlain, nil
 		}
 		return "", err
 	}
-	return decryptLegacy(raw)
+	return decryptLegacyWith(raw, legacy)
 }
 
-func decryptV2(raw []byte) (string, error) {
+func decryptV2With(raw []byte, derive func(salt []byte) ([]byte, error)) (string, error) {
 	if len(raw) < 1+v2SaltLen+12 {
 		return "", fmt.Errorf("ciphertext too short")
 	}
 	salt := raw[1 : 1+v2SaltLen]
 	rest := raw[1+v2SaltLen:]
 
-	key, err := deriveV2Key(salt)
+	key, err := derive(salt)
 	if err != nil {
 		return "", err
 	}
@@ -189,8 +253,8 @@ func decryptV2(raw []byte) (string, error) {
 	return string(plaintext), nil
 }
 
-func decryptLegacy(ciphertext []byte) (string, error) {
-	key, err := getLegacyKey()
+func decryptLegacyWith(ciphertext []byte, getKey func() ([]byte, error)) (string, error) {
+	key, err := getKey()
 	if err != nil {
 		return "", err
 	}

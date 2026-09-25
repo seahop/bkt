@@ -134,6 +134,7 @@ Authenticate and receive access tokens.
 **Error Responses:**
 - `400 Bad Request` - Invalid request format
 - `401 Unauthorized` - Invalid credentials
+- `429 Too Many Requests` - Too many failed attempts. Lockout is per **username + client IP** (10 failures in 15 minutes locks that source for 15 minutes), so failures from one address cannot lock the account for everyone. Beyond 100 failures per username across all addresses, attempts are throttled with exponential backoff (max 1 minute) rather than hard-locked.
 
 **Example:**
 ```bash
@@ -425,8 +426,11 @@ ID token and the UserInfo endpoint.
 | `OIDC_GROUPS_CLAIM` | `groups` | Claim carrying group names |
 | `OIDC_ADMIN_GROUP` | — | Members become admins; re-evaluated on every login |
 | `OIDC_USER_GROUP` | — | If set, non-admins must be members or login is denied |
-| `OIDC_POLICIES_CLAIM` | `policies` | Claim listing bkt policy names to sync |
-| `OIDC_LINK_BY_EMAIL` | `false` | Link new subjects to existing OIDC accounts by verified email |
+| `OIDC_POLICIES_CLAIM` | `policies` | Claim listing bkt policy names to sync (a present claim — even empty — replaces the user's policies) |
+| `OIDC_POLICIES_AUTHORITATIVE` | `true` if `OIDC_POLICIES_CLAIM` set | A missing policies claim also clears policies |
+| `OIDC_LINK_BY_EMAIL` | `false` | Link new subjects to an existing OIDC account whose IdP-asserted (`sso_email`) verified address matches exactly one account; re-linking revokes that account's sessions and access keys |
+
+The discovery `issuer` must equal `OIDC_ISSUER_URL`; UserInfo is used only when its `sub` equals the ID token's.
 
 **Flow:**
 1. The browser hits `GET /api/auth/oidc/login`. bkt mints a PKCE verifier, `state` and `nonce` (HttpOnly, `SameSite=Lax` cookies, 10 min) and redirects to the IdP's authorization endpoint with `code_challenge_method=S256`.
@@ -475,6 +479,9 @@ When `GOOGLE_WORKSPACE_ENABLED=true`, the system automatically syncs policies ba
 | `GOOGLE_WORKSPACE_ADMIN_EMAIL` | Admin email for delegation |
 | `GOOGLE_POLICY_SYNC_MODE` | `direct` or `prefix` |
 | `GOOGLE_POLICY_GROUP_PREFIX` | Filter groups by prefix |
+| `GOOGLE_ALLOWED_DOMAINS` | Comma-separated Workspace domains allowed to sign in. Unset: new users are provisioned only with `ALLOW_REGISTRATION=true` |
+
+With Workspace enabled, the mapped policies always replace the user's policies (an empty result removes them) and a failed group lookup fails the login.
 
 > See [SSO Setup Guide](../guides/sso-setup.md) for complete Google Workspace configuration.
 

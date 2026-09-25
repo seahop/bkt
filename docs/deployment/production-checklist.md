@@ -32,10 +32,14 @@ own port (`9000`).
   - [ ] Update `DB_PASSWORD` in backend environment
   - [ ] Test database connectivity
 
-- [ ] **Rotate JWT Secret**
-  - [ ] Generate strong random secret (32+ characters)
-  - [ ] Update `JWT_SECRET` in `docker-compose.yml`
-  - [ ] Document secret rotation procedure
+- [ ] **Strong JWT Secret**
+  - [ ] Generate a strong random secret (`openssl rand -hex 32`; the backend
+        refuses anything shorter than 32 characters, the old dev default, or a
+        `<placeholder>` in every environment)
+  - [ ] Set `JWT_SECRET` in `.env` (the compose files have no fallback)
+  - [ ] Document secret rotation procedure (rotating `JWT_SECRET` logs everyone
+        out; if `ENCRYPTION_KEY` was ever unset, credentials stored under the
+        `JWT_SECRET` fallback also need it — re-save them first)
 
 - [ ] **Back Up `ENCRYPTION_KEY`**
   - [ ] Store it securely, separately from the database backups
@@ -45,12 +49,19 @@ own port (`9000`).
 
 - [ ] **Protect `/metrics`**
   - [ ] Set `METRICS_TOKEN` so `GET /metrics` requires `Authorization: Bearer <token>`
+        (production logs a warning while it is unset)
   - [ ] Or network-isolate the endpoint (it exposes bucket/object/user counts)
+  - [ ] Leave `SWAGGER_ENABLED` unset (Swagger UI is off in production) unless
+        you need `/api/docs/`
 
 - [ ] **Reverse Proxy Awareness**
   - [ ] Set `TRUSTED_PROXIES` to your proxy's CIDR/IP when running behind a
         reverse proxy / ingress — otherwise all clients share one rate-limit
         bucket (the proxy's IP); when not behind a proxy, leave it empty
+  - [ ] If the proxy terminates TLS, set `TLS_ENABLED=false` **and**
+        `TLS_TERMINATED_UPSTREAM=true` (production refuses plain HTTP otherwise),
+        and make sure the backend is reachable only through the proxy
+  - [ ] Set `FRONTEND_URL` to the public console URL so SSO logins land there
   - [ ] Consider `S3_RATE_LIMIT` for per-IP limiting on the S3 listener
 
 - [ ] **S3 Endpoint & Encryption**
@@ -282,7 +293,9 @@ own port (`9000`).
 ### Docker
 
 - [ ] Use minimal base images
-- [ ] Run containers as non-root
+- [ ] Run containers as non-root (the images run the backend as uid 10001;
+      re-own bind mounts from older releases — `docker-compose.prod.yml`'s
+      `init-perms` service does this)
 - [ ] Enable Docker Content Trust
 - [ ] Scan images for vulnerabilities
 - [ ] Keep Docker updated
@@ -291,8 +304,9 @@ own port (`9000`).
 
 - [ ] Enable rate limiting
 - [ ] Implement audit logging
-- [ ] Configure HSTS headers
-- [ ] Set security headers
+- [ ] Configure HSTS headers (sent automatically when TLS is on; `HSTS_MAX_AGE`)
+- [ ] Set security headers (CSP, `X-Frame-Options`, `nosniff`, `Referrer-Policy`
+      are set by the console listener)
 - [ ] Disable debug mode
 
 ### Database

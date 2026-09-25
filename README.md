@@ -88,6 +88,7 @@ Full usage details for the data-management features live in the **[Feature guide
 - **Temporary credentials** - Short-lived S3 key pairs via bkt-STS ([guide](docs/guides/features.md#temporary-credentials-bkt-sts))
 - **Audit log** - Filterable admin audit trail of logins, key, policy, and bucket operations
 - **TLS everywhere** - HTTPS for all services with auto-generated certificates
+- **Hardened by default** - CSP and security headers on the console, non-root containers, secret-strength checks at startup, redacted access logs ([details](docs/security/security-overview.md))
 
 ### Web Interface
 - **Dual-pane file browser** - Split view for easier file organization
@@ -140,8 +141,14 @@ python3 setup.py
 This generates:
 - Admin credentials in `.env`
 - Database password in `.env`
-- JWT secret in `.env`
+- `JWT_SECRET` and `ENCRYPTION_KEY` in `.env` (64 hex chars each)
 - SSL/TLS certificates in `certs/`
+
+Re-running it is safe: an existing `.env` keeps all its values (only missing
+keys are added — secrets are never rotated, which would break the Postgres
+volume or stored S3 credentials), and existing certificates are kept unless you
+pass `--regenerate-certs`. The backend refuses to start with an empty, short
+(< 32 chars), placeholder, or old default `JWT_SECRET`/`ENCRYPTION_KEY`.
 
 **Save the admin credentials displayed by the setup script.**
 

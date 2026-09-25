@@ -15,7 +15,7 @@ echo "  • Remove all volumes"
 echo "  • Clean PostgreSQL data directory"
 echo "  • Remove bucket storage data"
 echo ""
-read -p "Are you sure you want to continue? (yes/no): " confirm
+read -r -p "Are you sure you want to continue? (yes/no): " confirm
 
 if [ "$confirm" != "yes" ]; then
     echo "Cancelled."

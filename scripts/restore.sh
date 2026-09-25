@@ -109,8 +109,21 @@ log()  { echo "[restore] $*"; }
 warn() { echo "[restore] WARNING: $*" >&2; }
 die()  { echo "[restore] ERROR: $*" >&2; exit 1; }
 
-# Strip one layer of surrounding single or double quotes from stdin.
-strip_quotes() { sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/"; }
+# Strip one layer of surrounding single or double quotes from stdin. Single-
+# quoted values (as written by the omnibus entrypoint for non-alphanumeric
+# secrets) also have their embedded '\'' escapes undone.
+strip_quotes() { sed -e 's/^"\(.*\)"$/\1/' -e "/^'.*'\$/{s/^'\(.*\)'\$/\1/;s/'\\\\''/'/g;}"; }
+
+# Emit KEY=VALUE in the omnibus secrets.env format (bare when safe, otherwise
+# single-quoted with embedded quotes escaped).
+kv_line() {
+  local v=$2
+  if [[ $v =~ ^[A-Za-z0-9._+/=:@%,-]+$ ]]; then
+    printf '%s=%s\n' "$1" "$v"
+  else
+    printf "%s='%s'\n" "$1" "${v//\'/\'\\\'\'}"
+  fi
+}
 
 confirm() {
   # $1 = prompt. Honours --yes.
@@ -304,10 +317,10 @@ fi
 CURRENT_KEY=""
 if [[ "$MODE" == "omnibus" ]]; then
   if docker exec "$OMNIBUS_CONTAINER" test -f "$OMNIBUS_SECRETS" 2>/dev/null; then
-    CURRENT_KEY="$(docker exec "$OMNIBUS_CONTAINER" sh -c "grep -E '^ENCRYPTION_KEY=' '$OMNIBUS_SECRETS' | head -1 | cut -d= -f2-" 2>/dev/null || true)"
+    CURRENT_KEY="$(docker exec "$OMNIBUS_CONTAINER" sh -c "grep -E '^ENCRYPTION_KEY=' '$OMNIBUS_SECRETS' | head -1 | cut -d= -f2-" 2>/dev/null | strip_quotes || true)"
   fi
 elif [[ -f "$COMPOSE_ENV_FILE" ]]; then
-  CURRENT_KEY="$(grep -E '^ENCRYPTION_KEY=' "$COMPOSE_ENV_FILE" | head -1 | cut -d= -f2- || true)"
+  CURRENT_KEY="$(grep -E '^ENCRYPTION_KEY=' "$COMPOSE_ENV_FILE" | head -1 | cut -d= -f2- | strip_quotes || true)"
 fi
 if [[ -n "$CURRENT_KEY" && -n "$BACKUP_KEY" && "$CURRENT_KEY" != "$BACKUP_KEY" ]]; then
   warn "The target already runs a DIFFERENT ENCRYPTION_KEY than this backup."
@@ -416,7 +429,7 @@ if [[ "$MODE" == "omnibus" ]]; then
   if [[ -n "$CURRENT_DB_PASSWORD_LINE" ]]; then
     printf '%s\n' "$CURRENT_DB_PASSWORD_LINE" >> "$RESTORED_SECRETS"
   else
-    printf 'DB_PASSWORD=%s\n' "$CURRENT_DB_PASSWORD" >> "$RESTORED_SECRETS"
+    kv_line DB_PASSWORD "$CURRENT_DB_PASSWORD" >> "$RESTORED_SECRETS"
   fi
   chmod 600 "$RESTORED_SECRETS"
   docker cp "$RESTORED_SECRETS" "${OMNIBUS_CONTAINER}:${OMNIBUS_SECRETS}"

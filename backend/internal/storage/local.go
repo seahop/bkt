@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -58,6 +59,41 @@ func (ls *LocalStorage) resolve(parts ...string) (string, error) {
 		return "", fmt.Errorf("path escapes storage root")
 	}
 	return joined, nil
+}
+
+// checkLocalObjectKey rejects object keys that the filesystem would alias to
+// a different key. filepath.Join (inside resolve) cleans its input, so "a//b",
+// "./a", "a/./b" and "a/" would all land on the same file as their canonical
+// form — letting a caller reach an object through a spelling that policy
+// rules and the metadata index treat as a different key. Only canonical keys
+// (path.Clean(key) == key) are accepted. Keys ending in "/" (S3-style folder
+// marker objects) cannot be represented on a filesystem without colliding
+// with the file of the same name, so the local backend rejects them; the
+// console represents folders with "<folder>/.keep" objects instead.
+func checkLocalObjectKey(bucketName, objectKey string) error {
+	if strings.HasPrefix(bucketName, ".") {
+		return fmt.Errorf("invalid bucket name")
+	}
+	if objectKey == "" {
+		return fmt.Errorf("invalid empty object key")
+	}
+	if strings.HasSuffix(objectKey, "/") {
+		return fmt.Errorf("object keys ending in '/' are not supported by the local storage backend")
+	}
+	if strings.ContainsAny(objectKey, "\\\x00") || strings.HasPrefix(objectKey, "/") || path.Clean(objectKey) != objectKey {
+		return fmt.Errorf("non-canonical object key")
+	}
+	return nil
+}
+
+// objectPath resolves the on-disk path of an object after checking that the
+// key is canonical (see checkLocalObjectKey). Every object-level filesystem
+// sink goes through here rather than calling resolve directly.
+func (ls *LocalStorage) objectPath(bucketName, objectKey string) (string, error) {
+	if err := checkLocalObjectKey(bucketName, objectKey); err != nil {
+		return "", err
+	}
+	return ls.resolve(bucketName, objectKey)
 }
 
 // writeAtomic streams data into a temp file in dir and renames it into place
@@ -145,7 +181,7 @@ func (ls *LocalStorage) BucketExists(bucketName string) (bool, error) {
 // PutObject stores an object in the local filesystem atomically.
 func (ls *LocalStorage) PutObject(bucketName, objectKey string, data io.Reader, size int64, contentType string, metadata map[string]string) error {
 	_ = metadata // user metadata is served from the database for the local backend
-	objectPath, err := ls.resolve(bucketName, objectKey)
+	objectPath, err := ls.objectPath(bucketName, objectKey)
 	if err != nil {
 		return err
 	}
@@ -157,7 +193,7 @@ func (ls *LocalStorage) PutObject(bucketName, objectKey string, data io.Reader, 
 
 // GetObject retrieves an object from the local filesystem
 func (ls *LocalStorage) GetObject(bucketName, objectKey string) (io.ReadCloser, error) {
-	objectPath, err := ls.resolve(bucketName, objectKey)
+	objectPath, err := ls.objectPath(bucketName, objectKey)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +209,7 @@ func (ls *LocalStorage) GetObject(bucketName, objectKey string) (io.ReadCloser, 
 
 // DeleteObject removes an object from the local filesystem
 func (ls *LocalStorage) DeleteObject(bucketName, objectKey string) error {
-	objectPath, err := ls.resolve(bucketName, objectKey)
+	objectPath, err := ls.objectPath(bucketName, objectKey)
 	if err != nil {
 		return err
 	}
@@ -244,7 +280,7 @@ func (ls *LocalStorage) ListObjects(bucketName, prefix string) ([]ObjectInfo, er
 
 // ObjectExists checks if an object exists in a bucket
 func (ls *LocalStorage) ObjectExists(bucketName, objectKey string) (bool, error) {
-	objectPath, err := ls.resolve(bucketName, objectKey)
+	objectPath, err := ls.objectPath(bucketName, objectKey)
 	if err != nil {
 		return false, err
 	}
@@ -259,7 +295,7 @@ func (ls *LocalStorage) ObjectExists(bucketName, objectKey string) (bool, error)
 
 // GetObjectInfo gets metadata about an object
 func (ls *LocalStorage) GetObjectInfo(bucketName, objectKey string) (*ObjectInfo, error) {
-	objectPath, err := ls.resolve(bucketName, objectKey)
+	objectPath, err := ls.objectPath(bucketName, objectKey)
 	if err != nil {
 		return nil, err
 	}
@@ -292,11 +328,11 @@ func (ls *LocalStorage) GetObjectInfo(bucketName, objectKey string) (*ObjectInfo
 
 // CopyObject copies an object within the same bucket.
 func (ls *LocalStorage) CopyObject(bucketName, srcKey, dstKey string) error {
-	srcPath, err := ls.resolve(bucketName, srcKey)
+	srcPath, err := ls.objectPath(bucketName, srcKey)
 	if err != nil {
 		return err
 	}
-	dstPath, err := ls.resolve(bucketName, dstKey)
+	dstPath, err := ls.objectPath(bucketName, dstKey)
 	if err != nil {
 		return err
 	}
@@ -360,6 +396,9 @@ type multipartMeta struct {
 
 func (ls *LocalStorage) CreateMultipartUpload(bucketName, objectKey, contentType string, metadata map[string]string) (string, error) {
 	_ = metadata // applied from the tracking row at complete; DB is source of truth locally
+	if err := checkLocalObjectKey(bucketName, objectKey); err != nil {
+		return "", err
+	}
 	uploadID := uuid.New().String()
 	dir, err := ls.multipartDir(uploadID)
 	if err != nil {
@@ -417,7 +456,7 @@ func (ls *LocalStorage) CompleteMultipartUpload(bucketName, objectKey, uploadID 
 		}
 	}
 
-	finalPath, err := ls.resolve(bucketName, objectKey)
+	finalPath, err := ls.objectPath(bucketName, objectKey)
 	if err != nil {
 		return err
 	}
@@ -513,4 +552,57 @@ func (ls *LocalStorage) ListParts(bucketName, objectKey, uploadID string) ([]Par
 	}
 	sort.Slice(parts, func(i, j int) bool { return parts[i].PartNumber < parts[j].PartNumber })
 	return parts, nil
+}
+
+// GetObjectRange implements RangeReader: it opens the object file and seeks
+// to start, returning a reader limited to length bytes.
+func (ls *LocalStorage) GetObjectRange(bucketName, objectKey string, start, length int64) (io.ReadCloser, error) {
+	if start < 0 || length < 0 {
+		return nil, fmt.Errorf("invalid range")
+	}
+	p, err := ls.objectPath(bucketName, objectKey)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(p) //nolint:gosec // path validated by objectPath()/resolve() containment
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("object not found")
+		}
+		return nil, fmt.Errorf("failed to open file: %w", err)
+	}
+	if _, err := f.Seek(start, io.SeekStart); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("failed to seek: %w", err)
+	}
+	return limitedReadCloser{Reader: io.LimitReader(f, length), Closer: f}, nil
+}
+
+// PartSizes implements PartSizer by stat-ing the staged part files.
+func (ls *LocalStorage) PartSizes(bucketName, objectKey, uploadID string) (map[int]int64, error) {
+	dir, err := ls.multipartDir(uploadID)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("multipart upload not found: %s", uploadID)
+	}
+	sizes := make(map[int]int64)
+	for _, entry := range entries {
+		numStr, ok := strings.CutPrefix(entry.Name(), "part.")
+		if !ok {
+			continue
+		}
+		partNum, err := strconv.Atoi(numStr)
+		if err != nil {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		sizes[partNum] = info.Size()
+	}
+	return sizes, nil
 }

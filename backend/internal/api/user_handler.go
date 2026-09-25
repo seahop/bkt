@@ -1,8 +1,11 @@
 package api
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
+
 	"bkt/internal/auth"
 	"bkt/internal/config"
 	"bkt/internal/database"
@@ -11,6 +14,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type UserHandler struct {
@@ -71,6 +76,11 @@ func (h *UserHandler) UpdateCurrentUser(c *gin.Context) {
 		Email           string `json:"email" binding:"omitempty,email"`
 		CurrentPassword string `json:"current_password,omitempty"`
 		Password        string `json:"password,omitempty"`
+		// RevokeAccessKeys (with a password change) also deactivates every
+		// long-lived S3 access key — use it when the account may have been
+		// compromised. Temporary (STS) credentials are always revoked on a
+		// password change via the TokenVersion bump.
+		RevokeAccessKeys bool `json:"revoke_access_keys,omitempty"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -89,8 +99,18 @@ func (h *UserHandler) UpdateCurrentUser(c *gin.Context) {
 		return
 	}
 
-	// Update email if provided (already validated by binding tag)
-	if req.Email != "" {
+	// Update email if provided (already validated by binding tag). SSO
+	// accounts are governed by the identity provider: their address comes from
+	// the IdP, and letting users rewrite it would let them impersonate another
+	// identity in any email-based matching.
+	if req.Email != "" && !strings.EqualFold(req.Email, user.Email) {
+		if user.SSOProvider != "" {
+			c.JSON(http.StatusForbidden, models.ErrorResponse{
+				Error:   "Email change not allowed",
+				Message: "This account signs in via SSO; its email address is managed by your identity provider.",
+			})
+			return
+		}
 		user.Email = req.Email
 	}
 
@@ -138,6 +158,14 @@ func (h *UserHandler) UpdateCurrentUser(c *gin.Context) {
 		passwordChanged = true
 	}
 
+	if req.RevokeAccessKeys && !passwordChanged {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Invalid request",
+			Message: "revoke_access_keys requires a password change (current_password and password).",
+		})
+		return
+	}
+
 	if err := database.DB.Save(&user).Error; err != nil {
 		// Surface a unique-constraint clash (e.g. email already in use) as 409
 		// rather than a generic 500.
@@ -155,9 +183,18 @@ func (h *UserHandler) UpdateCurrentUser(c *gin.Context) {
 		return
 	}
 
+	if passwordChanged {
+		// STS credentials are bound to TokenVersion (bumped above), so they
+		// stop working immediately; delete them outright as well.
+		database.DB.Where("user_id = ? AND temporary = ?", user.ID, true).Delete(&models.AccessKey{})
+		if req.RevokeAccessKeys {
+			database.DB.Model(&models.AccessKey{}).Where("user_id = ? AND is_active = ?", user.ID, true).Update("is_active", false)
+		}
+	}
+
 	if h.auditService != nil {
 		if passwordChanged {
-			_ = h.auditService.LogSuccess(c, user.ID, user.Username, "user.password_change", "user", user.ID.String(), user.Username, nil)
+			_ = h.auditService.LogSuccess(c, user.ID, user.Username, "user.password_change", "user", user.ID.String(), user.Username, map[string]interface{}{"revoked_access_keys": req.RevokeAccessKeys})
 		} else if req.Email != "" {
 			_ = h.auditService.LogSuccess(c, user.ID, user.Username, "user.email_change", "user", user.ID.String(), user.Username, nil)
 		}
@@ -312,9 +349,13 @@ func (h *UserHandler) ListUsers(c *gin.Context) {
 	c.JSON(http.StatusOK, users)
 }
 
+// errLastAdmin is returned inside the delete transaction when the target is
+// the only remaining administrator.
+var errLastAdmin = errors.New("cannot delete the last administrator")
+
 // DeleteUser deletes a user account (admin only)
 // @Summary Delete a user
-// @Description Admin-only. Permanently deletes the specified user account.
+// @Description Admin-only. Permanently deletes the specified user account. Refused (409) for your own account, for the last remaining administrator, and for users who still own buckets (reassign or delete those buckets first). The user's name is removed from every bucket-policy Principal so a future account with the same username does not inherit their grants.
 // @Tags users
 // @Accept json
 // @Produce json
@@ -322,6 +363,7 @@ func (h *UserHandler) ListUsers(c *gin.Context) {
 // @Success 200 {object} models.SuccessResponse
 // @Failure 400 {object} models.ErrorResponse
 // @Failure 404 {object} models.ErrorResponse
+// @Failure 409 {object} models.ErrorResponse
 // @Failure 500 {object} models.ErrorResponse
 // @Security BearerAuth
 // @Router /api/users/{id} [delete]
@@ -335,6 +377,18 @@ func (h *UserHandler) DeleteUser(c *gin.Context) {
 		return
 	}
 
+	adminUserID, adminUsername := actor(c)
+
+	// An admin deleting their own account is almost always a mistake (and can
+	// strand the instance without an administrator).
+	if userID == adminUserID {
+		c.JSON(http.StatusConflict, models.ErrorResponse{
+			Error:   "Cannot delete yourself",
+			Message: "You cannot delete your own account. Ask another administrator.",
+		})
+		return
+	}
+
 	// Get user info before deletion for audit log
 	var targetUser models.User
 	if err := database.DB.First(&targetUser, "id = ?", userID).Error; err != nil {
@@ -344,79 +398,125 @@ func (h *UserHandler) DeleteUser(c *gin.Context) {
 		return
 	}
 
-	// Hard-delete the user's access keys: the FK (fk_users_access_keys)
-	// otherwise blocks deleting any user who ever created a key, and a key
-	// row pointing at a deleted user is useless (S3 auth loads the user row).
-	// Key issuance/revocation history lives in the audit log.
-	if err := database.DB.Where("user_id = ?", userID).Delete(&models.AccessKey{}).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Failed to delete user",
-			Message: "Could not remove the user's access keys. Please try again.",
+	// Buckets reference their owner (FK). Rather than failing with a 500 — or
+	// silently moving data to someone else — require the admin to reassign or
+	// delete the user's buckets first.
+	var owned []string
+	database.DB.Model(&models.Bucket{}).Where("owner_id = ?", userID).Order("name").Limit(11).Pluck("name", &owned)
+	if len(owned) > 0 {
+		list := owned
+		more := ""
+		if len(list) > 10 {
+			list, more = list[:10], ", ..."
+		}
+		c.JSON(http.StatusConflict, models.ErrorResponse{
+			Error:   "User owns buckets",
+			Message: fmt.Sprintf("%s still owns bucket(s): %s%s. Reassign or delete them before deleting the user.", targetUser.Username, strings.Join(list, ", "), more),
 		})
 		return
 	}
 
-	// Detach policies and group memberships: pure join rows that must die
-	// with the user (their FKs otherwise block deletion).
-	if err := database.DB.Exec(`DELETE FROM user_policies WHERE user_id = ?`, userID).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Failed to delete user",
-			Message: "Could not detach the user's policies. Please try again.",
-		})
-		return
-	}
-	if err := database.DB.Exec(`DELETE FROM user_groups WHERE user_id = ?`, userID).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Failed to delete user",
-			Message: "Could not remove the user's group memberships. Please try again.",
-		})
-		return
-	}
+	var scrubbed int
+	err = database.DB.Transaction(func(tx *gorm.DB) error {
+		if targetUser.IsAdmin {
+			// Lock the admin rows so two admins can't delete each other
+			// concurrently and leave none.
+			var admins []models.User
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("is_admin = ?", true).Find(&admins).Error; err != nil {
+				return err
+			}
+			others := 0
+			for _, a := range admins {
+				if a.ID != userID {
+					others++
+				}
+			}
+			if others == 0 {
+				return errLastAdmin
+			}
+		}
 
-	if err := database.DB.Delete(&models.User{}, "id = ?", userID).Error; err != nil {
-		// Get admin user info for audit log
-		adminUserID, _ := c.Get("user_id")
-		adminUsername, _ := c.Get("username")
+		// Hard-delete the user's access keys: the FK (fk_users_access_keys)
+		// otherwise blocks deleting any user who ever created a key, and a key
+		// row pointing at a deleted user is useless (S3 auth loads the user row).
+		// Key issuance/revocation history lives in the audit log.
+		if err := tx.Where("user_id = ?", userID).Delete(&models.AccessKey{}).Error; err != nil {
+			return fmt.Errorf("remove access keys: %w", err)
+		}
+		// Detach policies and group memberships: pure join rows that must die
+		// with the user (their FKs otherwise block deletion). Idempotency
+		// records and async-upload tracking rows also reference the user.
+		for _, stmt := range []string{
+			`DELETE FROM user_policies WHERE user_id = ?`,
+			`DELETE FROM user_groups WHERE user_id = ?`,
+		} {
+			if err := tx.Exec(stmt, userID).Error; err != nil {
+				return fmt.Errorf("detach user: %w", err)
+			}
+		}
+		if err := tx.Where("user_id = ?", userID).Delete(&models.IdempotencyKey{}).Error; err != nil {
+			return fmt.Errorf("remove idempotency keys: %w", err)
+		}
+		if err := tx.Where("user_id = ?", userID).Delete(&models.Upload{}).Error; err != nil {
+			return fmt.Errorf("remove upload records: %w", err)
+		}
 
-		// Log failure
+		// Bucket policies grant by username, and usernames are reusable:
+		// remove this name from every Principal so the next "alice" doesn't
+		// inherit the deleted alice's bucket access.
+		n, err := auth.RemovePrincipalFromBucketPolicies(tx, targetUser.Username)
+		if err != nil {
+			return fmt.Errorf("scrub bucket policies: %w", err)
+		}
+		scrubbed = n
+
+		return tx.Delete(&models.User{}, "id = ?", userID).Error
+	})
+	if err != nil {
+		status, msg := http.StatusInternalServerError, "An internal error occurred. Please try again."
+		errText := err.Error()
+		switch {
+		case errors.Is(err, errLastAdmin):
+			status, msg = http.StatusConflict, "This is the last administrator account; promote another user to admin first."
+		case strings.Contains(errText, "foreign key") || strings.Contains(errText, "violates"):
+			status, msg = http.StatusConflict, "The user is still referenced by other data (e.g. a bucket created meanwhile). Reassign or delete it and retry."
+		}
+
 		_ = h.auditService.LogFailure(
 			c,
-			adminUserID.(uuid.UUID),
-			adminUsername.(string),
+			adminUserID,
+			adminUsername,
 			"DeleteUser",
 			"User",
 			userID.String(),
 			targetUser.Username,
-			err.Error(),
+			errText,
 			map[string]interface{}{
 				"target_username": targetUser.Username,
 				"target_email":    targetUser.Email,
 			},
 		)
 
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+		c.JSON(status, models.ErrorResponse{
 			Error:   "Failed to delete user",
-			Message: "An internal error occurred. Please try again.",
+			Message: msg,
 		})
 		return
 	}
 
-	// Get admin user info for audit log
-	adminUserID, _ := c.Get("user_id")
-	adminUsername, _ := c.Get("username")
-
 	// Log success
 	_ = h.auditService.LogSuccess(
 		c,
-		adminUserID.(uuid.UUID),
-		adminUsername.(string),
+		adminUserID,
+		adminUsername,
 		"DeleteUser",
 		"User",
 		userID.String(),
 		targetUser.Username,
 		map[string]interface{}{
-			"target_username": targetUser.Username,
-			"target_email":    targetUser.Email,
+			"target_username":          targetUser.Username,
+			"target_email":             targetUser.Email,
+			"bucket_policies_scrubbed": scrubbed,
 		},
 	)
 

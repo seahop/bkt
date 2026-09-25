@@ -1,15 +1,15 @@
 package api
 
 import (
-	"encoding/json"
-	"fmt"
-	"net/http"
-	"strings"
 	"bkt/internal/config"
 	"bkt/internal/database"
 	"bkt/internal/models"
 	"bkt/internal/security"
 	"bkt/internal/services"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -350,6 +350,17 @@ func (h *PolicyHandler) DeletePolicy(c *gin.Context) {
 		c.JSON(http.StatusConflict, models.ErrorResponse{
 			Error:   "Cannot delete policy",
 			Message: "Policy is attached to users. Detach it first.",
+		})
+		return
+	}
+
+	// Check if policy is attached to any groups
+	var groupCount int64
+	database.DB.Table("group_policies").Where("policy_id = ?", policyUUID).Count(&groupCount)
+	if groupCount > 0 {
+		c.JSON(http.StatusConflict, models.ErrorResponse{
+			Error:   "Cannot delete policy",
+			Message: "Policy is attached to groups. Detach it first.",
 		})
 		return
 	}

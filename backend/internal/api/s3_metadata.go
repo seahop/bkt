@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -193,7 +192,7 @@ func (h *S3APIHandler) PutObjectTagging(c *gin.Context) {
 	if !ok {
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(c.Request.Body, 64*1024))
+	body, err := readBoundedBody(c.Request.Body, 64*1024)
 	if err != nil {
 		h.s3Error(c, "InvalidRequest", "Failed to read request body", "", http.StatusBadRequest)
 		return

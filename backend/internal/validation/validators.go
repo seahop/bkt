@@ -88,7 +88,38 @@ func ValidateObjectKey(key string) error {
 		return fmt.Errorf("object key cannot contain backslashes")
 	}
 
+	// Reject non-canonical spellings. The local backend maps keys onto the
+	// filesystem, which collapses "a//b", "./a" and "a/./b" onto the same file
+	// as "a/b"; accepting them would let a caller reach one object through a
+	// key that policy rules, versioning and the metadata index treat as a
+	// different object. A single trailing "/" (an S3 folder-marker object) is
+	// allowed here; backends that cannot represent it reject it themselves.
+	for _, seg := range strings.Split(strings.TrimSuffix(key, "/"), "/") {
+		if seg == "" {
+			return fmt.Errorf("object key cannot contain empty path segments ('//')")
+		}
+		if seg == "." {
+			return fmt.Errorf("object key cannot contain '.' path segments")
+		}
+	}
+
+	if IsReservedObjectKey(key) {
+		return fmt.Errorf("object keys under %q are reserved", ReservedObjectKeyPrefix)
+	}
+
 	return nil
+}
+
+// ReservedObjectKeyPrefix is the keyspace the S3 storage backend uses for
+// archived object versions inside the real bucket (see storage/s3_versioning.go).
+// User keys under it would read, overwrite or delete version bytes directly.
+const ReservedObjectKeyPrefix = ".bkt-versions/"
+
+// IsReservedObjectKey reports whether key lies in bkt's internal keyspace.
+// Read and delete paths use it (in addition to write paths via
+// ValidateObjectKey) so internal data can never be addressed as an object.
+func IsReservedObjectKey(key string) bool {
+	return strings.HasPrefix(key, ReservedObjectKeyPrefix)
 }
 
 // ValidateIPAddress checks if a string is a valid IP address

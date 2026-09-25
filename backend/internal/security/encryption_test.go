@@ -128,3 +128,42 @@ func TestDecryptLegacyWithV2LeadingByte(t *testing.T) {
 		t.Errorf("mismatch: got %q want %q", dec, secret)
 	}
 }
+
+// Credentials written while ENCRYPTION_KEY was unset were encrypted under the
+// JWT_SECRET fallback. Adding a dedicated ENCRYPTION_KEY later must not strand
+// them: decryption retries with the JWT_SECRET-derived (decrypt-only) source.
+func TestDecryptFallsBackToJWTSecretMaterial(t *testing.T) {
+	useTestKeyMaterial(t)
+	old := fallbackSource
+	t.Cleanup(func() { fallbackSource = old })
+
+	jwtSource := newKeySource([]byte("an-older-jwt-secret-used-as-encryption-key"))
+	enc, err := encryptV2With("written-before-encryption-key", jwtSource.v2Key)
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+
+	fallbackSource = nil
+	if _, err := DecryptSecretKey(enc); err == nil {
+		t.Fatal("expected decrypt with the wrong primary key and no fallback to fail")
+	}
+
+	fallbackSource = jwtSource
+	dec, err := DecryptSecretKey(enc)
+	if err != nil {
+		t.Fatalf("fallback decrypt failed: %v", err)
+	}
+	if dec != "written-before-encryption-key" {
+		t.Errorf("fallback mismatch: got %q", dec)
+	}
+
+	// New ciphertexts are always written with the primary key.
+	fresh, err := EncryptSecretKey("new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallbackSource = nil
+	if got, err := DecryptSecretKey(fresh); err != nil || got != "new" {
+		t.Fatalf("primary round trip failed: %q %v", got, err)
+	}
+}

@@ -42,6 +42,7 @@ type fakeIdP struct {
 	audience      string // defaults to clientID
 	extraIDClaims map[string]interface{}
 	userInfo      map[string]interface{}
+	advIssuer     *string // overrides the issuer advertised in discovery
 
 	// recordings
 	gotVerifier   string
@@ -64,8 +65,12 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 	f := &fakeIdP{rsaKey: rsaKey, ecKey: ecKey, clientID: "bkt-client", signWith: "RS256"}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		issuer := f.srv.URL
+		if f.advIssuer != nil {
+			issuer = *f.advIssuer
+		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"issuer":                                f.srv.URL,
+			"issuer":                                issuer,
 			"jwks_uri":                              f.srv.URL + "/jwks",
 			"authorization_endpoint":                f.srv.URL + "/authorize",
 			"token_endpoint":                        f.srv.URL + "/token",
@@ -455,5 +460,59 @@ func TestPKCEChallengeIsS256(t *testing.T) {
 	verifier, err := generateCodeVerifier()
 	if err != nil || len(verifier) < 43 || len(verifier) > 128 {
 		t.Errorf("verifier length %d err %v", len(verifier), err)
+	}
+}
+
+func TestOIDCDiscoveryIssuerMustMatchConfiguredIssuer(t *testing.T) {
+	f := newFakeIdP(t)
+	f.issueNonce = "n"
+	// Configured issuer differs from what discovery advertises.
+	h := f.handler(t, func(s *OIDCProviderSettings) { s.IssuerURL = f.srv.URL + "/" })
+	if _, err := h.authenticate(context.Background(), "good-code", "v", "n"); err != nil {
+		t.Fatalf("trailing slash difference should be tolerated: %v", err)
+	}
+	for _, adv := range []string{"https://evil.example", ""} {
+		adv := adv
+		f.advIssuer = &adv
+		h = f.handler(t, nil) // fresh handler: no cached discovery
+		if _, err := h.authenticate(context.Background(), "good-code", "v", "n"); err == nil || !strings.Contains(err.Error(), "issuer") {
+			t.Errorf("advertised issuer %q must be rejected, got %v", adv, err)
+		}
+	}
+}
+
+func TestOIDCUserInfoWithoutSubIgnored(t *testing.T) {
+	f := newFakeIdP(t)
+	f.issueNonce = "n"
+	f.userInfo = map[string]interface{}{"preferred_username": "mallory", "groups": []interface{}{"bkt-admins"}, "policies": []interface{}{"admin"}}
+	h := f.handler(t, nil)
+	id, err := h.authenticate(context.Background(), "good-code", "v", "n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.Username != "jdoe" || id.HasGroups || id.HasPolicies {
+		t.Errorf("userinfo without sub must be ignored: %+v", id)
+	}
+}
+
+func TestOIDCPoliciesClaimPresenceTracked(t *testing.T) {
+	f := newFakeIdP(t)
+	f.issueNonce = "n"
+	h := f.handler(t, nil)
+	id, err := h.authenticate(context.Background(), "good-code", "v", "n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.HasPolicies {
+		t.Error("no policies claim: HasPolicies must be false")
+	}
+	// An explicitly empty claim is still "present" → policies get cleared.
+	f.extraIDClaims = map[string]interface{}{"policies": []interface{}{}}
+	id, err = h.authenticate(context.Background(), "good-code", "v", "n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !id.HasPolicies || len(id.Policies) != 0 {
+		t.Errorf("empty policies claim: %+v", id)
 	}
 }

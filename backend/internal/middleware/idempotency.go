@@ -21,6 +21,11 @@ const (
 	// IdempotencyKeyHeader is the header name for idempotency keys
 	IdempotencyKeyHeader = "Idempotency-Key"
 
+	// CtxNoIdempotencyStore: handlers whose response contains secret material
+	// (e.g. freshly minted access keys) set this on the gin context so the
+	// response is never persisted in the idempotency table.
+	CtxNoIdempotencyStore = "idempotency_no_store"
+
 	// IdempotencyKeyTTL is how long idempotency keys are valid (24 hours)
 	IdempotencyKeyTTL = 24 * time.Hour
 )
@@ -47,9 +52,9 @@ func IdempotencyMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Only apply to mutating requests (POST, PUT, PATCH, DELETE)
 		if c.Request.Method != http.MethodPost &&
-		   c.Request.Method != http.MethodPut &&
-		   c.Request.Method != http.MethodPatch &&
-		   c.Request.Method != http.MethodDelete {
+			c.Request.Method != http.MethodPut &&
+			c.Request.Method != http.MethodPatch &&
+			c.Request.Method != http.MethodDelete {
 			c.Next()
 			return
 		}
@@ -160,8 +165,9 @@ func IdempotencyMiddleware() gin.HandlerFunc {
 		c.Next()
 
 		// After request processing, store idempotency key if request was successful
-		// Only cache successful responses (2xx status codes)
-		if writer.statusCode >= 200 && writer.statusCode < 300 {
+		// Only cache successful responses (2xx status codes), and never ones
+		// carrying secrets — the table stores bodies in plaintext.
+		if writer.statusCode >= 200 && writer.statusCode < 300 && cacheableResponse(c, responseBodyBuffer.Bytes()) {
 			idempotencyRecord := models.IdempotencyKey{
 				Key:          idempotencyKey,
 				UserID:       userID,
@@ -184,4 +190,21 @@ func IdempotencyMiddleware() gin.HandlerFunc {
 func CleanupExpiredIdempotencyKeys() error {
 	result := database.DB.Where("expires_at < ?", time.Now()).Delete(&models.IdempotencyKey{})
 	return result.Error
+}
+
+// secretResponseMarkers are JSON fields whose presence means a response holds
+// credentials and must not be cached.
+var secretResponseMarkers = [][]byte{[]byte(`"secret_key"`), []byte(`"secret_access_key"`), []byte(`"refresh_token"`)}
+
+// cacheableResponse reports whether a successful response may be persisted.
+func cacheableResponse(c *gin.Context, body []byte) bool {
+	if c.GetBool(CtxNoIdempotencyStore) {
+		return false
+	}
+	for _, m := range secretResponseMarkers {
+		if bytes.Contains(body, m) {
+			return false
+		}
+	}
+	return true
 }

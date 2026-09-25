@@ -188,7 +188,7 @@ fi
 
 # Read DB_PASSWORD from the captured secrets for the pg_dump auth
 # (strips surrounding single/double quotes if present).
-DB_PASSWORD="$(grep -E '^DB_PASSWORD=' "$WORK/secrets.env" | head -1 | cut -d= -f2- | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/" || true)"
+DB_PASSWORD="$(grep -E '^DB_PASSWORD=' "$WORK/secrets.env" | head -1 | cut -d= -f2- | sed -e 's/^"\(.*\)"$/\1/' -e "/^'.*'\$/{s/^'\(.*\)'\$/\1/;s/'\\\\''/'/g;}" || true)"
 
 # ── 2. Database dump (metadata) ──────────────────────────────────────────────
 # --clean --if-exists makes the dump self-drop objects on restore, so it can be

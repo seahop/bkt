@@ -74,3 +74,16 @@ Database host — bitnami subchart or external
 {{- define "bkt.databaseUser" -}}
 {{- if .Values.postgresql.enabled }}{{- .Values.postgresql.auth.username }}{{- else }}{{- .Values.externalDatabase.username }}{{- end }}
 {{- end }}
+
+{{/*
+Trusted proxies for X-Forwarded-For. An explicit value always wins; with an
+ingress and no value, trust the private/CGNAT ranges ingress controllers run in
+so per-IP rate limiting sees real clients (see values.yaml for the trade-off).
+*/}}
+{{- define "bkt.trustedProxies" -}}
+{{- if .Values.backend.env.TRUSTED_PROXIES }}
+{{- .Values.backend.env.TRUSTED_PROXIES }}
+{{- else if .Values.ingress.enabled }}
+{{- "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,fc00::/7" }}
+{{- end }}
+{{- end }}

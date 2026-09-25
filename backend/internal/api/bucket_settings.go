@@ -25,10 +25,18 @@ type bucketSettingsRequest struct {
 	ReplicateTo   *string `json:"replicate_to,omitempty"`
 }
 
-// SetBucketSettings handles PUT /api/buckets/:name/settings (owner or admin).
-// Only fields present in the request are changed.
+// SetBucketSettings handles PUT /api/buckets/:name/settings.
+// Only fields present in the request are changed. Each field is authorized
+// separately (admin, or the matching policy action on the bucket — bucket
+// ownership alone grants nothing):
+//
+//	quota_bytes                     s3:PutBucketQuota (bkt extension)
+//	retention_days                  s3:PutBucketObjectLockConfiguration
+//	webhook_url/secret/events       s3:PutBucketNotification
+//	replicate_to                    s3:PutReplicationConfiguration (+ object access, see authorizeReplication)
+//
 // @Summary Update bucket settings
-// @Description Updates quota, WORM retention, webhook notification, and replication settings. Only fields present in the body are changed. Bucket owner or admin only.
+// @Description Updates quota, WORM retention, webhook notification, and replication settings. Only fields present in the body are changed. Requires admin or the matching policy action per field (s3:PutBucketQuota, s3:PutBucketObjectLockConfiguration, s3:PutBucketNotification, s3:PutReplicationConfiguration). retention_days can be raised at any time but only lowered once no data is still under retention.
 // @Tags buckets
 // @Accept json
 // @Produce json
@@ -40,8 +48,6 @@ func (h *BucketHandler) SetBucketSettings(c *gin.Context) {
 	bucketName := c.Param("name")
 	userID, _ := c.Get("user_id")
 	userUUID := userID.(uuid.UUID)
-	isAdminVal, _ := c.Get("is_admin")
-	admin, _ := isAdminVal.(bool)
 
 	var req bucketSettingsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -54,9 +60,29 @@ func (h *BucketHandler) SetBucketSettings(c *gin.Context) {
 		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "Bucket not found"})
 		return
 	}
-	if !admin && bucket.OwnerID != userUUID {
-		c.JSON(http.StatusForbidden, models.ErrorResponse{Error: "Only the bucket owner can change settings"})
-		return
+
+	// Authorize every requested field before changing anything.
+	required := []string{}
+	if req.QuotaBytes != nil {
+		required = append(required, services.ActionPutBucketQuota)
+	}
+	if req.RetentionDays != nil {
+		required = append(required, services.ActionPutBucketObjectLockConfiguration)
+	}
+	if req.WebhookURL != nil || req.WebhookSecret != nil || req.WebhookEvents != nil {
+		required = append(required, services.ActionPutBucketNotification)
+	}
+	if req.ReplicateTo != nil {
+		required = append(required, services.ActionPutReplicationConfiguration)
+	}
+	for _, action := range required {
+		if !authorizeBucketConfig(h.policyService, userUUID, bucket.Name, action) {
+			c.JSON(http.StatusForbidden, models.ErrorResponse{
+				Error:   "Permission denied",
+				Message: fmt.Sprintf("Changing this setting requires admin or %s on the bucket", action),
+			})
+			return
+		}
 	}
 
 	updates := map[string]interface{}{}
@@ -80,6 +106,14 @@ func (h *BucketHandler) SetBucketSettings(c *gin.Context) {
 				Message: "Enable versioning on this bucket before setting a retention period",
 			})
 			return
+		}
+		// WORM: retention can be raised at any time, but lowered/cleared only
+		// once nothing is still inside the current retention window.
+		if *req.RetentionDays < bucket.RetentionDays {
+			if err := checkRetentionChange(bucket.RetentionDays, *req.RetentionDays, retainedDataCount(&bucket)); err != nil {
+				c.JSON(http.StatusConflict, models.ErrorResponse{Error: "Retention cannot be lowered", Message: err.Error()})
+				return
+			}
 		}
 		updates["retention_days"] = *req.RetentionDays
 	}
@@ -118,8 +152,14 @@ func (h *BucketHandler) SetBucketSettings(c *gin.Context) {
 				c.JSON(http.StatusNotFound, models.ErrorResponse{Error: fmt.Sprintf("Replication target bucket %q not found", target)})
 				return
 			}
-			if targetBucket.ReplicateTo == bucket.Name {
-				c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "Replication cycle: the target already replicates to this bucket"})
+			// The caller must be able to do what replication will do on their
+			// behalf: read the source, overwrite and delete in the target.
+			if err := authorizeReplication(h.policyService, userUUID, bucket.Name, targetBucket.Name); err != nil {
+				c.JSON(http.StatusForbidden, models.ErrorResponse{Error: "Permission denied", Message: err.Error()})
+				return
+			}
+			if replicationCreatesCycle(bucket.Name, targetBucket.Name, replicateToLookup) {
+				c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "Replication cycle: the target (directly or through a chain) already replicates back to this bucket"})
 				return
 			}
 			var sourcesToTarget int64
@@ -154,28 +194,6 @@ func (h *BucketHandler) SetBucketSettings(c *gin.Context) {
 	}
 	_ = h.auditService.LogSuccess(c, userUUID, "", "bucket.settings", "bucket", bucket.ID.String(), bucket.Name, meta)
 	c.JSON(http.StatusOK, models.SuccessResponse{Message: "Settings updated"})
-}
-
-// checkBucketQuota rejects a write that would push the bucket's CURRENT
-// object usage past its quota. incomingSize <= 0 (unknown/chunked) only
-// enforces that usage isn't already over quota.
-func checkBucketQuota(bucket *models.Bucket, incomingSize int64) error {
-	if bucket.QuotaBytes <= 0 {
-		return nil
-	}
-	var used int64
-	if err := database.DB.Model(&models.Object{}).
-		Where("bucket_id = ?", bucket.ID).
-		Select("COALESCE(SUM(size), 0)").Scan(&used).Error; err != nil {
-		return nil // fail open on a transient DB error rather than blocking writes
-	}
-	if incomingSize < 0 {
-		incomingSize = 0
-	}
-	if used+incomingSize > bucket.QuotaBytes {
-		return fmt.Errorf("bucket quota exceeded (%d of %d bytes used)", used, bucket.QuotaBytes)
-	}
-	return nil
 }
 
 // notifyObjectEvent enqueues a webhook event when the bucket has one

@@ -5,8 +5,8 @@ import (
 	"bkt/internal/database"
 	"bkt/internal/models"
 	"bkt/internal/services"
+	"bkt/internal/storage"
 	"bkt/internal/validation"
-	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/xml"
@@ -65,8 +65,8 @@ type ListBucketResult struct {
 	Name    string   `xml:"Name"`
 	Prefix  string   `xml:"Prefix"`
 	// V1 fields
-	Marker      string `xml:"Marker,omitempty"`
-	NextMarker  string `xml:"NextMarker,omitempty"`
+	Marker     string `xml:"Marker,omitempty"`
+	NextMarker string `xml:"NextMarker,omitempty"`
 	// V2 fields (populated only when list-type=2)
 	KeyCount              int    `xml:"KeyCount,omitempty"`
 	ContinuationToken     string `xml:"ContinuationToken,omitempty"`
@@ -109,8 +109,8 @@ type CopyObjectResult struct {
 
 // DeleteRequest is the XML body for POST /?delete
 type DeleteRequest struct {
-	XMLName xml.Name      `xml:"Delete"`
-	Quiet   bool          `xml:"Quiet"`
+	XMLName xml.Name       `xml:"Delete"`
+	Quiet   bool           `xml:"Quiet"`
 	Objects []DeleteObject `xml:"Object"`
 }
 
@@ -119,8 +119,8 @@ type DeleteObject struct {
 }
 
 type DeleteResult struct {
-	XMLName xml.Name      `xml:"DeleteResult"`
-	Xmlns   string        `xml:"xmlns,attr"`
+	XMLName xml.Name        `xml:"DeleteResult"`
+	Xmlns   string          `xml:"xmlns,attr"`
 	Deleted []DeletedObject `xml:"Deleted"`
 	Errors  []DeleteError   `xml:"Error"`
 }
@@ -314,7 +314,7 @@ func (h *S3APIHandler) ListObjects(c *gin.Context) {
 	}
 
 	var objects []models.Object
-	if err := query.Limit(maxKeys+1).Order("key ASC").Find(&objects).Error; err != nil {
+	if err := query.Limit(maxKeys + 1).Order("key ASC").Find(&objects).Error; err != nil {
 		h.s3Error(c, "InternalError", "Failed to list objects", bucketName, http.StatusInternalServerError)
 		return
 	}
@@ -411,6 +411,12 @@ func (h *S3APIHandler) GetObject(c *gin.Context) {
 		return
 	}
 
+	// bkt's internal version keyspace is never addressable as an object.
+	if validation.IsReservedObjectKey(objectKey) {
+		h.s3Error(c, "NoSuchKey", "The specified key does not exist", objectKey, http.StatusNotFound)
+		return
+	}
+
 	userID, _ := c.Get("user_id")
 	userUUID := userID.(uuid.UUID)
 
@@ -460,14 +466,6 @@ func (h *S3APIHandler) GetObject(c *gin.Context) {
 		return
 	}
 
-	// Get object from storage
-	file, err := storageBackend.GetObject(bucketName, objectKey)
-	if err != nil {
-		h.s3Error(c, "InternalError", "Failed to retrieve object", objectKey, http.StatusInternalServerError)
-		return
-	}
-	defer file.Close() //nolint:errcheck // best-effort close of read stream
-
 	// Common S3-compatible headers
 	c.Header("Content-Type", object.ContentType)
 	c.Header("ETag", fmt.Sprintf(`"%s"`, object.ETag))
@@ -486,21 +484,26 @@ func (h *S3APIHandler) GetObject(c *gin.Context) {
 			h.s3Error(c, "InvalidRange", "The requested range is not satisfiable", objectKey, http.StatusRequestedRangeNotSatisfiable)
 			return
 		}
-		// Advance to the start offset: seek when the backend supports it
-		// (local files), otherwise discard the leading bytes.
-		if seeker, isSeeker := file.(io.Seeker); isSeeker {
-			if _, err := seeker.Seek(start, io.SeekStart); err != nil {
-				h.s3Error(c, "InternalError", "Failed to seek object", objectKey, http.StatusInternalServerError)
-				return
-			}
-		} else if _, err := io.CopyN(io.Discard, file, start); err != nil {
+		// Native ranged read: an S3 Range GET / a file seek, rather than
+		// streaming and discarding everything before the start offset.
+		rangeReader, err := storage.GetObjectRange(storageBackend, bucketName, objectKey, start, length)
+		if err != nil {
 			h.s3Error(c, "InternalError", "Failed to read object range", objectKey, http.StatusInternalServerError)
 			return
 		}
+		defer rangeReader.Close() //nolint:errcheck // best-effort close of read stream
 		c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+length-1, object.Size))
-		c.DataFromReader(http.StatusPartialContent, length, object.ContentType, io.LimitReader(file, length), nil)
+		c.DataFromReader(http.StatusPartialContent, length, object.ContentType, rangeReader, nil)
 		return
 	}
+
+	// Get object from storage
+	file, err := storageBackend.GetObject(bucketName, objectKey)
+	if err != nil {
+		h.s3Error(c, "InternalError", "Failed to retrieve object", objectKey, http.StatusInternalServerError)
+		return
+	}
+	defer file.Close() //nolint:errcheck // best-effort close of read stream
 
 	// Stream the full object — cap at object.Size so we never emit more bytes
 	// than Content-Length declares (multipart-assembled files on disk may carry
@@ -604,6 +607,10 @@ func (h *S3APIHandler) PutObject(c *gin.Context) {
 		h.s3Error(c, "NoSuchBucket", "The specified bucket does not exist", bucketName, http.StatusNotFound)
 		return
 	}
+	if err := validateKeyForBucket(&bucket, objectKey); err != nil {
+		h.s3Error(c, "InvalidArgument", err.Error(), objectKey, http.StatusBadRequest)
+		return
+	}
 
 	// Check permissions
 	allowed, _ := h.policyService.CheckObjectAccess(userUUID, bucketName, objectKey, services.ActionPutObject)
@@ -625,31 +632,17 @@ func (h *S3APIHandler) PutObject(c *gin.Context) {
 		return
 	}
 
-	// Get content length.
-	// AWS CLI sends Transfer-Encoding: chunked + Content-Encoding: aws-chunked without
-	// a Content-Length header. Use X-Amz-Decoded-Content-Length as the fallback.
-	contentLength := c.Request.ContentLength
-	if contentLength < 0 {
-		if v := c.GetHeader("X-Amz-Decoded-Content-Length"); v != "" {
-			contentLength, _ = strconv.ParseInt(v, 10, 64)
-		}
-	}
-	if contentLength < 0 {
-		h.s3Error(c, "MissingContentLength", "You must provide the Content-Length HTTP header", objectKey, http.StatusLengthRequired)
+	// Decode the body (aws-chunked with chunk-signature verification when
+	// streaming) and determine its authoritative decoded length. For
+	// aws-chunked bodies that is X-Amz-Decoded-Content-Length, never the
+	// encoded Content-Length.
+	upload, berr := prepareUploadBody(c, h.config.Storage.MaxFileSize)
+	if berr != nil {
+		h.s3Error(c, berr.code, berr.msg, objectKey, berr.status)
 		return
 	}
-
-	// Check file size
-	if contentLength > h.config.Storage.MaxFileSize {
-		h.s3Error(c, "EntityTooLarge", "Your proposed upload exceeds the maximum allowed object size", objectKey, http.StatusRequestEntityTooLarge)
-		return
-	}
-
-	// Decode aws-chunked encoding if present (AWS CLI streaming uploads)
-	bodyReader := io.Reader(c.Request.Body)
-	if c.GetHeader("Content-Encoding") == "aws-chunked" {
-		bodyReader = newAWSChunkedReader(c.Request.Body)
-	}
+	contentLength := upload.declared
+	bodyReader := upload.reader
 
 	var contentType string
 	var combinedReader io.Reader
@@ -659,7 +652,11 @@ func (h *S3APIHandler) PutObject(c *gin.Context) {
 		// "unsafe" types. Off by default — see StorageConfig.
 		detectedType, firstBytes, derr := validation.DetectContentType(bodyReader)
 		if derr != nil {
-			h.s3Error(c, "InternalError", "Failed to detect content type", objectKey, http.StatusInternalServerError)
+			// A body that fails verification while being sniffed (bad chunk
+			// signature, truncated stream, payload-hash mismatch) is a client
+			// error, not an internal one.
+			code, msg, status, _ := bodyFailure(&guardedBody{err: derr})
+			h.s3Error(c, code, msg, objectKey, status)
 			return
 		}
 		if !validation.IsSafeContentType(detectedType) {
@@ -678,10 +675,6 @@ func (h *S3APIHandler) PutObject(c *gin.Context) {
 		combinedReader = bodyReader
 	}
 
-	// Bound the stored body so a client can't exceed the max by understating
-	// its declared length (e.g. via chunked encoding).
-	combinedReader = &maxBytesReader{r: combinedReader, remaining: h.config.Storage.MaxFileSize}
-
 	// Get storage backend
 	storageBackend, err := h.bucketHandler.getStorageBackend(&bucket)
 	if err != nil {
@@ -689,11 +682,26 @@ func (h *S3APIHandler) PutObject(c *gin.Context) {
 		return
 	}
 
-	// Quota: reject before any bytes are written.
-	if qerr := checkBucketQuota(&bucket, contentLength); qerr != nil {
+	// Serialize with other writers of this key: archive → write → metadata
+	// must not interleave with a concurrent overwrite or delete.
+	unlock := lockObjectKeys(bucketName, objectKey)
+	defer unlock()
+
+	// Quota: reserve the declared size before any bytes are written; the
+	// reservation also tracks the bytes actually read (see guardedBody).
+	reservation, qerr := reserveBucketQuota(&bucket, contentLength)
+	if qerr != nil {
 		h.s3Error(c, "QuotaExceeded", qerr.Error(), objectKey, http.StatusForbidden)
 		return
 	}
+	defer reservation.release()
+
+	// The guarded body enforces the exact declared length, the size cap and
+	// the quota, and withholds the final byte until the whole stream (incl.
+	// payload hash / chunk signatures) verified — so the backend can never
+	// commit an unverified or truncated body.
+	body := newGuardedBody(combinedReader, contentLength, h.config.Storage.MaxFileSize, reservation)
+	hadPrior := currentObjectExists(bucket.ID, objectKey)
 
 	// Versioning: archive the current version before overwriting.
 	archivedVID, verr := prepareVersionedWrite(storageBackend, &bucket, objectKey)
@@ -702,66 +710,54 @@ func (h *S3APIHandler) PutObject(c *gin.Context) {
 		return
 	}
 
-	// Save object (use combinedReader that includes first 512 bytes)
-	err = storageBackend.PutObject(bucketName, objectKey, combinedReader, contentLength, contentType, userMeta)
-	if err != nil {
+	err = storageBackend.PutObject(bucketName, objectKey, body, contentLength, contentType, userMeta)
+	if err != nil || !body.Complete() {
+		if err == nil {
+			discardFailedWrite(storageBackend, &bucket, objectKey, archivedVID, hadPrior)
+			h.s3Error(c, "InternalError", "Failed to save object", objectKey, http.StatusInternalServerError)
+			return
+		}
 		rollbackVersionedWrite(storageBackend, &bucket, objectKey, archivedVID)
+		if code, msg, status, ok := bodyFailure(body); ok {
+			h.s3Error(c, code, msg, objectKey, status)
+			return
+		}
 		h.s3Error(c, "InternalError", "Failed to save object", objectKey, http.StatusInternalServerError)
 		return
-	}
-	newVersionID := ""
-	if bucket.Versioning == models.VersioningEnabled {
-		newVersionID = uuid.New().String()
 	}
 
 	// Get object info (including ETag)
 	objectInfo, err := storageBackend.GetObjectInfo(bucketName, objectKey)
 	if err != nil {
+		discardFailedWrite(storageBackend, &bucket, objectKey, archivedVID, hadPrior)
 		h.s3Error(c, "InternalError", "Failed to get object info", objectKey, http.StatusInternalServerError)
 		return
 	}
 
-	// Create or update object metadata in database
-	var object models.Object
-	result := database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, objectKey).First(&object)
-
-	if result.Error == nil {
-		// Update existing object
-		object.Size = objectInfo.Size
-		object.ContentType = objectInfo.ContentType
-		object.ETag = objectInfo.ETag
-		object.StoragePath = objectKey
-		object.Metadata = mapToJSONPtr(userMeta)
-		object.Tags = mapToJSONPtr(objTags)
-		object.VersionID = newVersionID
-		object.UpdatedAt = time.Now()
-		database.DB.Save(&object)
-	} else {
-		// Create new object
-		object = models.Object{
-			BucketID:    bucket.ID,
-			Key:         objectKey,
-			Size:        objectInfo.Size,
-			ContentType: objectInfo.ContentType,
-			ETag:        objectInfo.ETag,
-			StoragePath: objectKey,
-			Metadata:    mapToJSONPtr(userMeta),
-			Tags:        mapToJSONPtr(objTags),
-			VersionID:   newVersionID,
-		}
-		if err := database.DB.Create(&object).Error; err != nil {
-			_ = storageBackend.DeleteObject(bucketName, objectKey)
-			h.s3Error(c, "InternalError", "Failed to create object metadata", objectKey, http.StatusInternalServerError)
-			return
-		}
+	// Record the new current version atomically (upsert).
+	object := models.Object{
+		BucketID:    bucket.ID,
+		Key:         objectKey,
+		Size:        objectInfo.Size,
+		ContentType: contentType,
+		ETag:        objectInfo.ETag,
+		StoragePath: objectKey,
+		Metadata:    mapToJSONPtr(userMeta),
+		Tags:        mapToJSONPtr(objTags),
+		VersionID:   newCurrentVersionID(&bucket),
+	}
+	if err := upsertCurrentObject(&object); err != nil {
+		discardFailedWrite(storageBackend, &bucket, objectKey, archivedVID, hadPrior)
+		h.s3Error(c, "InternalError", "Failed to save object metadata", objectKey, http.StatusInternalServerError)
+		return
 	}
 
-	notifyObjectEvent(&bucket, services.EventObjectCreated, objectKey, object.Size, object.ETag, newVersionID)
+	notifyObjectEvent(&bucket, services.EventObjectCreated, objectKey, object.Size, object.ETag, object.VersionID)
 
 	// Return success with ETag
 	c.Header("ETag", fmt.Sprintf(`"%s"`, object.ETag))
-	if newVersionID != "" {
-		c.Header("x-amz-version-id", newVersionID)
+	if object.VersionID != "" {
+		c.Header("x-amz-version-id", object.VersionID)
 	}
 	c.Header("x-amz-request-id", uuid.New().String())
 	c.Status(http.StatusOK)
@@ -794,6 +790,12 @@ func (h *S3APIHandler) DeleteObject(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 	userUUID := userID.(uuid.UUID)
 
+	// Internal version keyspace: behaves like a key that does not exist.
+	if validation.IsReservedObjectKey(objectKey) {
+		c.Status(http.StatusNoContent)
+		return
+	}
+
 	// Get bucket
 	var bucket models.Bucket
 	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
@@ -815,6 +817,10 @@ func (h *S3APIHandler) DeleteObject(c *gin.Context) {
 		h.s3Error(c, "InternalError", "Failed to get storage backend", objectKey, http.StatusInternalServerError)
 		return
 	}
+
+	// Serialize with other writers of this key.
+	unlock := lockObjectKeys(bucketName, objectKey)
+	defer unlock()
 
 	// Version-addressed delete: permanently removes that one version.
 	if vid := c.Query("versionId"); vid != "" {
@@ -850,6 +856,12 @@ func (h *S3APIHandler) DeleteObject(c *gin.Context) {
 		return
 	}
 
+	// WORM: an unversioned delete is permanent, so retention forbids it.
+	if retentionBlocks(&bucket, object.UpdatedAt) {
+		h.s3Error(c, "AccessDenied", fmt.Sprintf("Object is under retention for %d days and cannot be deleted yet", bucket.RetentionDays), objectKey, http.StatusForbidden)
+		return
+	}
+
 	// Delete from storage first - MUST succeed before database delete (prevents inconsistency)
 	if err := storageBackend.DeleteObject(bucketName, objectKey); err != nil {
 		h.s3Error(c, "InternalError", "Failed to delete object from storage", objectKey, http.StatusInternalServerError)
@@ -874,6 +886,11 @@ func (h *S3APIHandler) HeadObject(c *gin.Context) {
 	objectKey := strings.TrimPrefix(c.Param("key"), "/")
 	userID, _ := c.Get("user_id")
 	userUUID := userID.(uuid.UUID)
+
+	if validation.IsReservedObjectKey(objectKey) {
+		c.Status(http.StatusNotFound)
+		return
+	}
 
 	// Get bucket
 	var bucket models.Bucket
@@ -912,7 +929,7 @@ func (h *S3APIHandler) HeadObject(c *gin.Context) {
 	// Check if any objects exist with this prefix
 	if err != nil && strings.HasSuffix(objectKey, "/") {
 		var count int64
-		database.DB.Model(&models.Object{}).Where("bucket_id = ? AND key LIKE ?", bucket.ID, objectKey+"%").Count(&count)
+		database.DB.Model(&models.Object{}).Where("bucket_id = ? AND key LIKE ?", bucket.ID, validation.EscapeLikeWildcards(objectKey)+"%").Count(&count)
 		if count > 0 {
 			// It's a folder - return folder-like metadata
 			c.Header("Content-Type", "application/x-directory")
@@ -988,6 +1005,15 @@ func (h *S3APIHandler) CopyObject(c *gin.Context, copySource string) {
 	srcBucket := decoded[:slashIdx]
 	srcKey := decoded[slashIdx+1:]
 
+	if validation.IsReservedObjectKey(srcKey) {
+		h.s3Error(c, "NoSuchKey", "Source key does not exist", srcKey, http.StatusNotFound)
+		return
+	}
+	if err := validation.ValidateObjectKey(destKey); err != nil {
+		h.s3Error(c, "InvalidArgument", err.Error(), destKey, http.StatusBadRequest)
+		return
+	}
+
 	// Permission: GetObject on source
 	if allowed, _ := h.policyService.CheckObjectAccess(userUUID, srcBucket, srcKey, services.ActionGetObject); !allowed {
 		h.s3Error(c, "AccessDenied", "Access Denied on source", srcKey, http.StatusForbidden)
@@ -1008,23 +1034,38 @@ func (h *S3APIHandler) CopyObject(c *gin.Context, copySource string) {
 		h.s3Error(c, "NoSuchBucket", "Destination bucket does not exist", destBucket, http.StatusNotFound)
 		return
 	}
+	if err := validateKeyForBucket(&destBucketModel, destKey); err != nil {
+		h.s3Error(c, "InvalidArgument", err.Error(), destKey, http.StatusBadRequest)
+		return
+	}
 
-	var srcObj models.Object
-	if err := database.DB.Where("bucket_id = ? AND key = ?", srcBucketModel.ID, srcKey).First(&srcObj).Error; err != nil {
-		h.s3Error(c, "NoSuchKey", "Source key does not exist", srcKey, http.StatusNotFound)
+	sameObject := srcBucket == destBucket && srcKey == destKey
+	metaReplace := strings.EqualFold(c.GetHeader("x-amz-metadata-directive"), "REPLACE")
+	tagReplace := strings.EqualFold(c.GetHeader("x-amz-tagging-directive"), "REPLACE")
+	if sameObject && !metaReplace && !tagReplace {
+		h.s3Error(c, "InvalidRequest", "This copy request is illegal because it is trying to copy an object to itself without changing the object's metadata, storage class, website redirect location or encryption attributes.", destKey, http.StatusBadRequest)
 		return
 	}
 
 	// Metadata directive: COPY (default) carries the source's user metadata to
 	// the destination; REPLACE takes the request's x-amz-meta-* headers instead.
-	destMeta := jsonPtrToMap(srcObj.Metadata)
-	if strings.EqualFold(c.GetHeader("x-amz-metadata-directive"), "REPLACE") {
+	var replaceMeta map[string]string
+	if metaReplace {
 		m, merr := extractUserMetadata(c)
 		if merr != nil {
 			h.s3Error(c, "MetadataTooLarge", merr.Error(), destKey, http.StatusBadRequest)
 			return
 		}
-		destMeta = m
+		replaceMeta = m
+	}
+	var replaceTags map[string]string
+	if tagReplace {
+		t, terr := parseTaggingHeader(c.GetHeader("x-amz-tagging"))
+		if terr != nil {
+			h.s3Error(c, "InvalidTag", terr.Error(), destKey, http.StatusBadRequest)
+			return
+		}
+		replaceTags = t
 	}
 
 	srcStorage, err := h.bucketHandler.getStorageBackend(&srcBucketModel)
@@ -1032,94 +1073,143 @@ func (h *S3APIHandler) CopyObject(c *gin.Context, copySource string) {
 		h.s3Error(c, "InternalError", "Failed to initialize source storage", srcKey, http.StatusInternalServerError)
 		return
 	}
-
-	// Versioning: archive the destination's current version before overwrite.
-	destStorageForVer, dsvErr := h.bucketHandler.getStorageBackend(&destBucketModel)
-	if dsvErr != nil {
+	destStorage, err := h.bucketHandler.getStorageBackend(&destBucketModel)
+	if err != nil {
 		h.s3Error(c, "InternalError", "Failed to initialize destination storage", destKey, http.StatusInternalServerError)
 		return
 	}
-	archivedVID, verr := prepareVersionedWrite(destStorageForVer, &destBucketModel, destKey)
+
+	// Serialize with other writers of the destination (and, within one
+	// bucket, of the source so it is read in a stable state).
+	var unlock func()
+	if srcBucket == destBucket {
+		unlock = lockObjectKeys(destBucket, srcKey, destKey)
+	} else {
+		unlock = lockObjectKeys(destBucket, destKey)
+	}
+	defer unlock()
+
+	var srcObj models.Object
+	if err := database.DB.Where("bucket_id = ? AND key = ?", srcBucketModel.ID, srcKey).First(&srcObj).Error; err != nil {
+		h.s3Error(c, "NoSuchKey", "Source key does not exist", srcKey, http.StatusNotFound)
+		return
+	}
+
+	destMeta := jsonPtrToMap(srcObj.Metadata)
+	if metaReplace {
+		destMeta = replaceMeta
+	}
+	destTags := jsonPtrToMap(srcObj.Tags)
+	if tagReplace {
+		destTags = replaceTags
+	}
+	destContentType := srcObj.ContentType
+	if metaReplace {
+		if ct := c.GetHeader("Content-Type"); ct != "" {
+			destContentType = ct
+		}
+	}
+
+	// Quota: the copy adds srcObj.Size bytes to the destination (a metadata-
+	// only self-copy adds nothing).
+	var reservation *quotaReservation
+	if !sameObject {
+		res, qerr := reserveBucketQuota(&destBucketModel, srcObj.Size)
+		if qerr != nil {
+			h.s3Error(c, "QuotaExceeded", qerr.Error(), destKey, http.StatusForbidden)
+			return
+		}
+		reservation = res
+	}
+	defer reservation.release()
+
+	hadPrior := currentObjectExists(destBucketModel.ID, destKey)
+
+	// Versioning: archive the destination's current version before overwrite.
+	archivedVID, verr := prepareVersionedWrite(destStorage, &destBucketModel, destKey)
 	if verr != nil {
 		h.s3Error(c, "InternalError", "Failed to version existing object", destKey, http.StatusInternalServerError)
 		return
 	}
-	copyFailed := func() { rollbackVersionedWrite(destStorageForVer, &destBucketModel, destKey, archivedVID) }
+	// Every failure before the destination bytes are written must restore the
+	// archived version.
+	writeFailed := func(code, msg, resource string) {
+		rollbackVersionedWrite(destStorage, &destBucketModel, destKey, archivedVID)
+		h.s3Error(c, code, msg, resource, http.StatusInternalServerError)
+	}
 
-	// If same bucket, use native CopyObject; otherwise stream copy
-	if srcBucket == destBucket {
-		if err := srcStorage.CopyObject(srcBucket, srcKey, destKey); err != nil {
-			copyFailed()
-			h.s3Error(c, "InternalError", "Failed to copy object", srcKey, http.StatusInternalServerError)
-			return
-		}
-	} else {
-		destStorage, err := h.bucketHandler.getStorageBackend(&destBucketModel)
+	switch {
+	case sameObject && archivedVID == "":
+		// Unversioned metadata-only self-copy: the bytes are unchanged.
+	case sameObject:
+		// Versioned self-copy: the current bytes were just archived, so copy
+		// them forward from version storage as the new current version.
+		rc, err := destStorage.GetObjectVersion(destBucket, destKey, archivedVID)
 		if err != nil {
-			h.s3Error(c, "InternalError", "Failed to initialize destination storage", destKey, http.StatusInternalServerError)
+			writeFailed("InternalError", "Failed to read source object", srcKey)
 			return
 		}
+		perr := destStorage.PutObject(destBucket, destKey, rc, srcObj.Size, destContentType, destMeta)
+		_ = rc.Close()
+		if perr != nil {
+			writeFailed("InternalError", "Failed to write destination object", destKey)
+			return
+		}
+	case srcBucket == destBucket:
+		if err := srcStorage.CopyObject(srcBucket, srcKey, destKey); err != nil {
+			writeFailed("InternalError", "Failed to copy object", srcKey)
+			return
+		}
+	default:
 		reader, err := srcStorage.GetObject(srcBucket, srcKey)
 		if err != nil {
-			h.s3Error(c, "InternalError", "Failed to read source object", srcKey, http.StatusInternalServerError)
+			writeFailed("InternalError", "Failed to read source object", srcKey)
 			return
 		}
-		defer reader.Close() //nolint:errcheck // best-effort close of read stream
-		if err := destStorage.PutObject(destBucket, destKey, reader, srcObj.Size, srcObj.ContentType, destMeta); err != nil {
-			copyFailed()
-			h.s3Error(c, "InternalError", "Failed to write destination object", destKey, http.StatusInternalServerError)
-			return
-		}
-	}
-
-	// Upsert DB metadata for destination
-	destInfo, err := h.bucketHandler.getStorageBackend(&destBucketModel)
-	if err == nil {
-		if info, err := destInfo.GetObjectInfo(destBucket, destKey); err == nil {
-			destTags := jsonPtrToMap(srcObj.Tags)
-			if strings.EqualFold(c.GetHeader("x-amz-tagging-directive"), "REPLACE") {
-				if t, terr := parseTaggingHeader(c.GetHeader("x-amz-tagging")); terr == nil {
-					destTags = t
-				}
-			}
-			newVID := ""
-			if destBucketModel.Versioning == models.VersioningEnabled {
-				newVID = uuid.New().String()
-				c.Header("x-amz-version-id", newVID)
-			}
-			destObj := models.Object{
-				BucketID:    destBucketModel.ID,
-				Key:         destKey,
-				Size:        info.Size,
-				ContentType: info.ContentType,
-				ETag:        info.ETag,
-				StoragePath: destKey,
-				Metadata:    mapToJSONPtr(destMeta),
-				Tags:        mapToJSONPtr(destTags),
-			}
-			destObj.VersionID = newVID
-			var existing models.Object
-			if database.DB.Where("bucket_id = ? AND key = ?", destBucketModel.ID, destKey).First(&existing).Error == nil {
-				existing.Size = destObj.Size
-				existing.ContentType = destObj.ContentType
-				existing.ETag = destObj.ETag
-				existing.Metadata = destObj.Metadata
-				existing.Tags = destObj.Tags
-				existing.VersionID = newVID
-				database.DB.Save(&existing)
-				destObj = existing
-			} else {
-				database.DB.Create(&destObj)
-			}
-			c.Header("ETag", fmt.Sprintf(`"%s"`, destObj.ETag))
-			c.Header("x-amz-request-id", uuid.New().String())
-			c.XML(http.StatusOK, CopyObjectResult{ETag: fmt.Sprintf(`"%s"`, destObj.ETag), LastModified: destObj.UpdatedAt})
+		perr := destStorage.PutObject(destBucket, destKey, io.LimitReader(reader, srcObj.Size), srcObj.Size, destContentType, destMeta)
+		_ = reader.Close()
+		if perr != nil {
+			writeFailed("InternalError", "Failed to write destination object", destKey)
 			return
 		}
 	}
 
+	// Record the destination as the new current version (atomic upsert).
+	info, err := destStorage.GetObjectInfo(destBucket, destKey)
+	if err != nil {
+		discardFailedWrite(destStorage, &destBucketModel, destKey, archivedVID, hadPrior)
+		h.s3Error(c, "InternalError", "Failed to read destination object", destKey, http.StatusInternalServerError)
+		return
+	}
+	destObj := models.Object{
+		BucketID:    destBucketModel.ID,
+		Key:         destKey,
+		Size:        info.Size,
+		ContentType: destContentType,
+		ETag:        info.ETag,
+		SHA256:      srcObj.SHA256,
+		StoragePath: destKey,
+		Metadata:    mapToJSONPtr(destMeta),
+		Tags:        mapToJSONPtr(destTags),
+		VersionID:   newCurrentVersionID(&destBucketModel),
+	}
+	if sameObject {
+		destObj.CreatedAt = srcObj.CreatedAt
+	}
+	if err := upsertCurrentObject(&destObj); err != nil {
+		discardFailedWrite(destStorage, &destBucketModel, destKey, archivedVID, hadPrior)
+		h.s3Error(c, "InternalError", "Failed to save object metadata", destKey, http.StatusInternalServerError)
+		return
+	}
+
+	notifyObjectEvent(&destBucketModel, services.EventObjectCreated, destKey, destObj.Size, destObj.ETag, destObj.VersionID)
+
+	if destObj.VersionID != "" {
+		c.Header("x-amz-version-id", destObj.VersionID)
+	}
+	c.Header("ETag", fmt.Sprintf(`"%s"`, destObj.ETag))
 	c.Header("x-amz-request-id", uuid.New().String())
-	c.XML(http.StatusOK, CopyObjectResult{ETag: fmt.Sprintf(`"%s"`, srcObj.ETag), LastModified: time.Now()})
+	c.XML(http.StatusOK, CopyObjectResult{ETag: fmt.Sprintf(`"%s"`, destObj.ETag), LastModified: destObj.UpdatedAt})
 }
 
 // HandleBucketPost dispatches POST /{bucket} based on query params
@@ -1143,7 +1233,7 @@ func (h *S3APIHandler) DeleteObjects(c *gin.Context) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(c.Request.Body, 1<<20)) // 1MB max
+	body, err := readBoundedBody(c.Request.Body, 1<<20) // 1MB max
 	if err != nil {
 		h.s3Error(c, "MalformedXML", "Failed to read request body", "", http.StatusBadRequest)
 		return
@@ -1169,40 +1259,55 @@ func (h *S3APIHandler) DeleteObjects(c *gin.Context) {
 			result.Errors = append(result.Errors, DeleteError{Key: obj.Key, Code: "AccessDenied", Message: "Access Denied"})
 			continue
 		}
-
-		var dbObj models.Object
-		if err := database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, obj.Key).First(&dbObj).Error; err != nil {
-			// S3 treats deleting a non-existent key as success
-			if !deleteReq.Quiet {
-				result.Deleted = append(result.Deleted, DeletedObject{Key: obj.Key})
-			}
+		deleted, errEntry := h.deleteOneForBatch(storageBackend, &bucket, obj.Key)
+		if errEntry != nil {
+			result.Errors = append(result.Errors, *errEntry)
 			continue
 		}
-
-		if markerID, handled, derr := versionedDeleteCurrent(storageBackend, &bucket, &dbObj); handled {
-			if derr != nil {
-				result.Errors = append(result.Errors, DeleteError{Key: obj.Key, Code: "InternalError", Message: "Failed to delete"})
-				continue
-			}
-			if !deleteReq.Quiet {
-				result.Deleted = append(result.Deleted, DeletedObject{Key: obj.Key, DeleteMarker: true, DeleteMarkerVersionId: markerID})
-			}
-			continue
-		}
-
-		if err := storageBackend.DeleteObject(bucketName, obj.Key); err != nil {
-			result.Errors = append(result.Errors, DeleteError{Key: obj.Key, Code: "InternalError", Message: "Failed to delete"})
-			continue
-		}
-		database.DB.Delete(&dbObj)
-
 		if !deleteReq.Quiet {
-			result.Deleted = append(result.Deleted, DeletedObject{Key: obj.Key})
+			result.Deleted = append(result.Deleted, deleted)
 		}
 	}
 
 	c.Header("x-amz-request-id", uuid.New().String())
 	c.XML(http.StatusOK, result)
+}
+
+// deleteOneForBatch deletes one key for DeleteObjects under the key's write
+// lock, with the same versioning and retention rules as DeleteObject.
+func (h *S3APIHandler) deleteOneForBatch(storageBackend storage.StorageBackend, bucket *models.Bucket, key string) (DeletedObject, *DeleteError) {
+	// S3 treats deleting a non-existent key as success; the internal version
+	// keyspace is never an object.
+	if validation.IsReservedObjectKey(key) {
+		return DeletedObject{Key: key}, nil
+	}
+	unlock := lockObjectKeys(bucket.Name, key)
+	defer unlock()
+
+	var dbObj models.Object
+	if err := database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, key).First(&dbObj).Error; err != nil {
+		return DeletedObject{Key: key}, nil
+	}
+
+	if markerID, handled, derr := versionedDeleteCurrent(storageBackend, bucket, &dbObj); handled {
+		if derr != nil {
+			return DeletedObject{}, &DeleteError{Key: key, Code: "InternalError", Message: "Failed to delete"}
+		}
+		notifyObjectEvent(bucket, services.EventObjectRemoved, key, 0, "", markerID)
+		return DeletedObject{Key: key, DeleteMarker: true, DeleteMarkerVersionId: markerID}, nil
+	}
+
+	if retentionBlocks(bucket, dbObj.UpdatedAt) {
+		return DeletedObject{}, &DeleteError{Key: key, Code: "AccessDenied", Message: "Object is under retention"}
+	}
+	if err := storageBackend.DeleteObject(bucket.Name, key); err != nil {
+		return DeletedObject{}, &DeleteError{Key: key, Code: "InternalError", Message: "Failed to delete"}
+	}
+	if err := database.DB.Delete(&dbObj).Error; err != nil {
+		return DeletedObject{}, &DeleteError{Key: key, Code: "InternalError", Message: "Failed to delete object metadata"}
+	}
+	notifyObjectEvent(bucket, services.EventObjectRemoved, key, 0, "", "")
+	return DeletedObject{Key: key}, nil
 }
 
 // s3Error sends an S3-compatible XML error response
@@ -1229,60 +1334,4 @@ func (h *S3APIHandler) CreateBucket(c *gin.Context) {
 	}
 
 	h.s3Error(c, "AccessDenied", "Bucket creation via S3 API is not supported. Use web UI.", "", http.StatusForbidden)
-}
-
-// awsChunkedReader decodes the AWS chunked transfer encoding (Content-Encoding: aws-chunked).
-// Format per chunk: "{hex_size};chunk-signature={sig}\r\n{data}\r\n"
-// Terminated by: "0;chunk-signature={sig}\r\n[trailers]\r\n\r\n"
-type awsChunkedReader struct {
-	r         *bufio.Reader
-	remaining int
-	done      bool
-}
-
-func newAWSChunkedReader(r io.Reader) *awsChunkedReader {
-	return &awsChunkedReader{r: bufio.NewReaderSize(r, 32*1024)}
-}
-
-func (a *awsChunkedReader) Read(p []byte) (int, error) {
-	if a.done {
-		return 0, io.EOF
-	}
-	for a.remaining == 0 {
-		// Read the chunk header line: "{hex};chunk-signature=...\r\n"
-		line, err := a.r.ReadString('\n')
-		if err != nil && len(line) == 0 {
-			return 0, io.EOF
-		}
-		line = strings.TrimRight(line, "\r\n")
-		if line == "" {
-			continue
-		}
-		// Size is the part before the first semicolon (or the whole line for plain chunks)
-		sizePart := line
-		if idx := strings.IndexByte(line, ';'); idx >= 0 {
-			sizePart = line[:idx]
-		}
-		size, parseErr := strconv.ParseInt(strings.TrimSpace(sizePart), 16, 64)
-		if parseErr != nil {
-			return 0, fmt.Errorf("aws-chunked: invalid chunk size %q", sizePart)
-		}
-		if size == 0 {
-			a.done = true
-			return 0, io.EOF
-		}
-		a.remaining = int(size)
-	}
-
-	toRead := len(p)
-	if toRead > a.remaining {
-		toRead = a.remaining
-	}
-	n, err := a.r.Read(p[:toRead])
-	a.remaining -= n
-	if a.remaining == 0 {
-		// Consume the trailing \r\n after chunk data
-		_, _ = a.r.ReadString('\n')
-	}
-	return n, err
 }

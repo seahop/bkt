@@ -1,10 +1,10 @@
 package services
 
 import (
-	"fmt"
 	"bkt/internal/database"
 	"bkt/internal/models"
 	"bkt/internal/security"
+	"fmt"
 
 	"github.com/google/uuid"
 )
@@ -22,6 +22,21 @@ const (
 	ActionHeadObject        = "s3:HeadObject"
 	ActionGetBucketPolicy   = "s3:GetBucketPolicy"
 	ActionPutBucketPolicy   = "s3:PutBucketPolicy"
+)
+
+// Bucket-configuration actions. These gate the bucket settings endpoints
+// (versioning, lifecycle, replication, webhook notifications, WORM retention,
+// quota) for non-admins; bucket ownership alone grants nothing. AWS names are
+// used where AWS has an equivalent; s3:PutBucketQuota is a bkt extension.
+// All are covered by "s3:*" (and e.g. "s3:Put*").
+const (
+	ActionPutBucketVersioning              = "s3:PutBucketVersioning"
+	ActionGetLifecycleConfiguration        = "s3:GetLifecycleConfiguration"
+	ActionPutLifecycleConfiguration        = "s3:PutLifecycleConfiguration" // also covers deleting the configuration, as in AWS
+	ActionPutReplicationConfiguration      = "s3:PutReplicationConfiguration"
+	ActionPutBucketNotification            = "s3:PutBucketNotification"            // webhook URL/secret/events
+	ActionPutBucketObjectLockConfiguration = "s3:PutBucketObjectLockConfiguration" // WORM retention_days
+	ActionPutBucketQuota                   = "s3:PutBucketQuota"                   // bkt extension: quota_bytes
 )
 
 // PolicyService handles policy evaluation and enforcement
@@ -200,7 +215,11 @@ func (ps *PolicyService) evaluatePolicy(policyJSON string, action, resource stri
 		}
 	}()
 
-	policyDoc, err := security.ValidatePolicyDocument(policyJSON)
+	// Stored documents are parsed leniently: a legacy document containing an
+	// element that strict validation now rejects (e.g. Condition) is still
+	// evaluated — fail-safe, by security.EvaluatePolicy — instead of being
+	// skipped wholesale, which would also discard its Deny statements.
+	policyDoc, err := security.ParseStoredPolicyDocument(policyJSON)
 	if err != nil {
 		return security.PolicyNoMatch, fmt.Errorf("failed to parse policy: %w", err)
 	}

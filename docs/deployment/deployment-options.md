@@ -72,6 +72,12 @@ docker compose -f docker-compose.prod.yml up -d
 - Use this when you need to scale the app independently of the database, run HA, or point
   at a managed Postgres. The frontend is embedded in the backend image — there is no
   separate frontend container.
+- The backend runs as the unprivileged uid/gid 10001. A one-shot `init-perms`
+  service runs before it on every `up`: it re-owns `./data/buckets` if an older
+  (root-run) release created it, and copies `certs/backend` into a volume only
+  uid 10001 can read (the private key stays 0600).
+- `JWT_SECRET` and `ENCRYPTION_KEY` are required (`docker compose` stops with an
+  error if either is missing from `.env`).
 
 ## 4. Kubernetes — Helm chart (for clusters)
 

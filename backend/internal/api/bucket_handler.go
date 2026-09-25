@@ -1,12 +1,6 @@
 package api
 
 import (
-	"bytes"
-	"context"
-	"fmt"
-	"io"
-	"net/http"
-	"sync"
 	"bkt/internal/config"
 	"bkt/internal/database"
 	"bkt/internal/logger"
@@ -15,10 +9,17 @@ import (
 	"bkt/internal/services"
 	"bkt/internal/storage"
 	"bkt/internal/validation"
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -45,8 +46,8 @@ type s3ConfigData struct {
 
 // Global S3 config cache with 5 minute TTL (reduces database load)
 var (
-	s3ConfigCache   = make(map[string]*s3ConfigCacheEntry)
-	s3ConfigCacheMu sync.RWMutex
+	s3ConfigCache    = make(map[string]*s3ConfigCacheEntry)
+	s3ConfigCacheMu  sync.RWMutex
 	s3ConfigCacheTTL = 5 * time.Minute
 )
 
@@ -413,8 +414,19 @@ func (h *BucketHandler) CreateBucket(c *gin.Context) {
 				"storage_backend": bucket.StorageBackend,
 				"error":           err.Error(),
 			})
-			// Don't fail the request - the database record was created
-			// The bucket will be created lazily on first object upload if this fails
+			// Roll back the record: a bucket the backend refused to create
+			// (e.g. IAM without s3:CreateBucket) would fail every later write.
+			if derr := database.DB.Unscoped().Delete(&bucket).Error; derr != nil {
+				logger.Error("Failed to roll back bucket record", map[string]interface{}{
+					"bucket_name": bucket.Name,
+					"error":       derr.Error(),
+				})
+			}
+			c.JSON(http.StatusBadGateway, models.ErrorResponse{
+				Error:   "Storage backend could not create the bucket",
+				Message: err.Error(),
+			})
+			return
 		} else {
 			logger.Info("Bucket created in storage backend", map[string]interface{}{
 				"bucket_name":     bucket.Name,
@@ -442,10 +454,10 @@ func (h *BucketHandler) CreateBucket(c *gin.Context) {
 		bucket.ID.String(),
 		bucket.Name,
 		map[string]interface{}{
-			"bucket_name":       bucket.Name,
-			"region":            bucket.Region,
-			"storage_backend":   bucket.StorageBackend,
-			"is_public":         bucket.IsPublic,
+			"bucket_name":        bucket.Name,
+			"region":             bucket.Region,
+			"storage_backend":    bucket.StorageBackend,
+			"is_public":          bucket.IsPublic,
 			"linked_to_existing": linkedToExisting,
 		},
 	)
@@ -528,11 +540,16 @@ func (h *BucketHandler) ListBuckets(c *gin.Context) {
 		}
 	}
 
-	// Convert map back to slice
-	accessibleBuckets := make([]models.Bucket, 0, len(accessibleBucketMap))
+	// Convert map back to slice. Non-admins get the reduced bucket view (no
+	// owner user record, storage config reference, webhook URL or replication
+	// target — GET /api/buckets/:name shows the latter two to callers allowed
+	// to change them).
+	accessibleBuckets := make([]bucketView, 0, len(accessibleBucketMap))
 	for _, bucket := range accessibleBucketMap {
-		accessibleBuckets = append(accessibleBuckets, bucket)
+		b := bucket
+		accessibleBuckets = append(accessibleBuckets, newBucketView(&b, false, false))
 	}
+	sort.Slice(accessibleBuckets, func(i, j int) bool { return accessibleBuckets[i].Name < accessibleBuckets[j].Name })
 
 	c.JSON(http.StatusOK, accessibleBuckets)
 }
@@ -580,7 +597,16 @@ func (h *BucketHandler) GetBucket(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, bucket)
+	if isAdmin, _ := c.Get("is_admin"); isAdmin == true {
+		c.JSON(http.StatusOK, bucket)
+		return
+	}
+	// Non-admins get the reduced view; the webhook URL (a bearer secret for
+	// many receivers) and replication target are shown only to callers who
+	// may change them.
+	showNotification, _ := h.policyService.CheckBucketAccess(userUUID, bucketName, services.ActionPutBucketNotification)
+	showReplication, _ := h.policyService.CheckBucketAccess(userUUID, bucketName, services.ActionPutReplicationConfiguration)
+	c.JSON(http.StatusOK, newBucketView(&bucket, showNotification, showReplication))
 }
 
 // DeleteBucket deletes a bucket and all its contents
@@ -673,6 +699,19 @@ func (h *BucketHandler) DeleteBucket(c *gin.Context) {
 		}
 	}
 
+	// Delete archived version bytes too. On the S3 backend they live inside
+	// the real bucket (".bkt-versions/"), which otherwise can never be
+	// emptied and deleted; the local backend removes its version directory
+	// in DeleteBucket anyway.
+	var versions []models.ObjectVersion
+	if err := database.DB.Where("bucket_id = ? AND is_delete_marker = false", bucket.ID).Find(&versions).Error; err == nil {
+		for _, v := range versions {
+			if err := storageBackend.DeleteObjectVersion(bucketName, v.Key, v.VersionID); err != nil {
+				storageErrors = append(storageErrors, fmt.Sprintf("%s@%s: %v", v.Key, v.VersionID, err))
+			}
+		}
+	}
+
 	// Delete the bucket from storage backend (after objects are removed)
 	if err := storageBackend.DeleteBucket(bucketName); err != nil {
 		storageErrors = append(storageErrors, fmt.Sprintf("bucket deletion: %v", err))
@@ -680,14 +719,13 @@ func (h *BucketHandler) DeleteBucket(c *gin.Context) {
 
 	// Use transaction to delete all objects and the bucket from database
 	err = database.DB.Transaction(func(tx *gorm.DB) error {
-		// Delete all objects from database
-		if len(objects) > 0 {
-			if err := tx.Where("bucket_id = ?", bucket.ID).Delete(&models.ObjectVersion{}).Error; err != nil {
+		// Delete all objects and version history from database (history
+		// can exist even when no current objects remain).
+		if err := tx.Where("bucket_id = ?", bucket.ID).Delete(&models.ObjectVersion{}).Error; err != nil {
 			return err
 		}
 		if err := tx.Where("bucket_id = ?", bucket.ID).Delete(&models.Object{}).Error; err != nil {
-				return fmt.Errorf("failed to delete objects: %w", err)
-			}
+			return fmt.Errorf("failed to delete objects: %w", err)
 		}
 
 		// Delete any bucket policies
@@ -1149,6 +1187,13 @@ func (h *BucketHandler) UploadObject(c *gin.Context) {
 		return
 	}
 
+	// Cap the request body BEFORE anything parses the multipart form:
+	// c.PostForm / c.FormFile spool the entire upload to memory/temp disk, so
+	// the MaxFileSize check on the parsed file header came too late.
+	if !h.limitMultipartBody(c) {
+		return
+	}
+
 	// Get object key from form or query
 	objectKey := c.PostForm("key")
 	if objectKey == "" {
@@ -1162,7 +1207,7 @@ func (h *BucketHandler) UploadObject(c *gin.Context) {
 	}
 
 	// Validate object key to prevent path traversal and other attacks
-	if err := validation.ValidateObjectKey(objectKey); err != nil {
+	if err := validateKeyForBucket(&bucket, objectKey); err != nil {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error:   "Invalid object key",
 			Message: err.Error(),
@@ -1272,46 +1317,41 @@ func (h *BucketHandler) UploadObject(c *gin.Context) {
 		return
 	}
 
-	// Save object using storage backend with timeout (prevents indefinite blocking on large uploads)
-	// Use 10 minute timeout for uploads (configurable based on max file size)
+	// Store with a timeout (prevents indefinite blocking on large uploads).
+	// The whole lock → quota → archive → write → metadata sequence runs in
+	// the goroutine, so a timed-out request never leaves half-committed
+	// state: the write either completes fully in the background or (when the
+	// deferred file.Close interrupts its read) rolls back.
 	uploadTimeout := 10 * time.Minute
 	ctx, cancel := context.WithTimeout(c.Request.Context(), uploadTimeout)
 	defer cancel()
 
-	// Run upload in goroutine to support timeout
 	type uploadResult struct {
-		err error
+		obj    *models.Object
+		status int
+		err    error
 	}
 	resultChan := make(chan uploadResult, 1)
-
-	if qerr := checkBucketQuota(&bucket, fileHeader.Size); qerr != nil {
-		c.JSON(http.StatusForbidden, models.ErrorResponse{Error: "Quota exceeded", Message: qerr.Error()})
-		return
-	}
-
 	go func() {
-		archivedVID, verr := prepareVersionedWrite(storageBackend, &bucket, objectKey)
-		if verr != nil {
-			resultChan <- uploadResult{err: verr}
-			return
-		}
-		err := storageBackend.PutObject(bucketName, objectKey, combinedReader, fileHeader.Size, contentType, nil)
-		if err != nil {
-			rollbackVersionedWrite(storageBackend, &bucket, objectKey, archivedVID)
-		}
-		resultChan <- uploadResult{err: err}
+		obj, status, err := h.storeObject(storageBackend, &bucket, objectKey, combinedReader, fileHeader.Size, contentType, "")
+		resultChan <- uploadResult{obj: obj, status: status, err: err}
 	}()
 
-	// Wait for upload or timeout
+	var object *models.Object
 	select {
 	case result := <-resultChan:
 		if result.err != nil {
-			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-				Error:   "Failed to save object",
+			title := "Failed to save object"
+			if result.status == http.StatusForbidden {
+				title = "Quota exceeded"
+			}
+			c.JSON(result.status, models.ErrorResponse{
+				Error:   title,
 				Message: result.err.Error(),
 			})
 			return
 		}
+		object = result.obj
 	case <-ctx.Done():
 		c.JSON(http.StatusRequestTimeout, models.ErrorResponse{
 			Error:   "Upload timeout",
@@ -1320,76 +1360,131 @@ func (h *BucketHandler) UploadObject(c *gin.Context) {
 		return
 	}
 
-	// Get object info (including ETag) from storage
-	objectInfo, err := storageBackend.GetObjectInfo(bucketName, objectKey)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Failed to get object info",
-			Message: err.Error(),
-		})
-		return
-	}
-
-	// Use UPSERT to create or update object metadata in single query (performance optimization)
-	now := time.Now()
-	newVersionID := ""
-	if bucket.Versioning == models.VersioningEnabled {
-		newVersionID = uuid.New().String()
-	}
-	object := models.Object{
-		BucketID:    bucket.ID,
-		Key:         objectKey,
-		Size:        objectInfo.Size,
-		ContentType: objectInfo.ContentType,
-		ETag:        objectInfo.ETag,
-		StoragePath: objectKey,
-		SHA256:      "",
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}
-
-	// PostgreSQL UPSERT: INSERT with ON CONFLICT UPDATE
-	// This reduces 2 queries (SELECT + INSERT/UPDATE) to 1 query
-	err = database.DB.Exec(`
-		INSERT INTO objects (id, bucket_id, key, size, content_type, e_tag, storage_path, sha256, version_id, created_at, updated_at)
-		VALUES (gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT (bucket_id, key)
-		DO UPDATE SET
-			size = EXCLUDED.size,
-			content_type = EXCLUDED.content_type,
-			e_tag = EXCLUDED.e_tag,
-			storage_path = EXCLUDED.storage_path,
-			sha256 = EXCLUDED.sha256,
-			version_id = EXCLUDED.version_id,
-			updated_at = EXCLUDED.updated_at
-	`, object.BucketID, object.Key, object.Size, object.ContentType, object.ETag,
-		object.StoragePath, object.SHA256, newVersionID, object.CreatedAt, object.UpdatedAt).Error
-
-	if err != nil {
-		// Clean up file if database operation fails
-		_ = storageBackend.DeleteObject(bucketName, objectKey)
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Failed to save object metadata",
-			Message: err.Error(),
-		})
-		return
-	}
-
-	// Retrieve the object to get the ID and timestamps for response.
-	// Best effort: if the object was created but couldn't be retrieved, the file
-	// is successfully stored, just return success without full details.
-	_ = database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, objectKey).First(&object).Error
-
-	notifyObjectEvent(&bucket, services.EventObjectCreated, objectKey, objectInfo.Size, objectInfo.ETag, newVersionID)
+	notifyObjectEvent(&bucket, services.EventObjectCreated, objectKey, object.Size, object.ETag, object.VersionID)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":      "Object uploaded successfully",
 		"bucket":       bucketName,
 		"key":          objectKey,
-		"size":         objectInfo.Size,
-		"etag":         objectInfo.ETag,
-		"content_type": objectInfo.ContentType,
+		"size":         object.Size,
+		"etag":         object.ETag,
+		"content_type": object.ContentType,
 	})
+}
+
+// multipartBodyOverhead is the allowance on top of MaxFileSize for multipart
+// framing and the small form fields that accompany a console upload.
+const multipartBodyOverhead = 1 << 20
+
+// limitMultipartBody bounds a console (multipart/form-data) upload request to
+// MaxFileSize plus framing overhead and parses the form under that bound. It
+// writes the error response and returns false when the body is too large or
+// not a valid multipart form.
+func (h *BucketHandler) limitMultipartBody(c *gin.Context) bool {
+	if max := h.config.Storage.MaxFileSize; max > 0 {
+		limit := max + multipartBodyOverhead
+		if c.Request.ContentLength > limit {
+			c.JSON(http.StatusRequestEntityTooLarge, models.ErrorResponse{
+				Error:   "File too large",
+				Message: fmt.Sprintf("Maximum file size is %d bytes", max),
+			})
+			return false
+		}
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, limit)
+	}
+	if _, err := c.MultipartForm(); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) || strings.Contains(err.Error(), "request body too large") {
+			c.JSON(http.StatusRequestEntityTooLarge, models.ErrorResponse{
+				Error:   "File too large",
+				Message: fmt.Sprintf("Maximum file size is %d bytes", h.config.Storage.MaxFileSize),
+			})
+			return false
+		}
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Invalid upload",
+			Message: "Request must be a multipart/form-data upload with a 'file' field",
+		})
+		return false
+	}
+	return true
+}
+
+// storeObject writes a console upload (sync or async) as the new current
+// version of key: per-key lock, quota reservation, versioned archive, byte
+// write (length/quota verified before commit), then an atomic metadata
+// upsert — rolling everything back if any step fails. It returns the stored
+// row, or an HTTP status and error.
+func (h *BucketHandler) storeObject(backend storage.StorageBackend, bucket *models.Bucket, key string, data io.Reader, size int64, contentType, sha256Hex string) (*models.Object, int, error) {
+	unlock := lockObjectKeys(bucket.Name, key)
+	defer unlock()
+
+	reservation, qerr := reserveBucketQuota(bucket, size)
+	if qerr != nil {
+		return nil, http.StatusForbidden, qerr
+	}
+	defer reservation.release()
+
+	hadPrior := currentObjectExists(bucket.ID, key)
+
+	// Stream sources are verified (exact length, size cap, quota) before the
+	// backend sees their last byte. A seekable source is a server-side temp
+	// file of known size (async uploads); it is passed through as-is so the
+	// S3 SDK can rewind it on retries.
+	var body *guardedBody
+	src := data
+	if _, seekable := data.(io.ReadSeeker); !seekable {
+		body = newGuardedBody(data, size, h.config.Storage.MaxFileSize, reservation)
+		src = body
+	}
+
+	archivedVID, err := prepareVersionedWrite(backend, bucket, key)
+	if err != nil {
+		return nil, http.StatusInternalServerError, err
+	}
+	putErr := backend.PutObject(bucket.Name, key, src, size, contentType, nil)
+	if putErr != nil || (body != nil && !body.Complete()) {
+		if putErr == nil {
+			// The backend reported success without consuming the verified
+			// body: treat the bytes as uncommitted.
+			discardFailedWrite(backend, bucket, key, archivedVID, hadPrior)
+			return nil, http.StatusInternalServerError, fmt.Errorf("storage backend did not consume the full upload")
+		}
+		rollbackVersionedWrite(backend, bucket, key, archivedVID)
+		if berr := body.Err(); berr != nil {
+			var qe *quotaExceededError
+			switch {
+			case errors.As(berr, &qe):
+				return nil, http.StatusForbidden, qe
+			case errors.Is(berr, errBodyTooLarge):
+				return nil, http.StatusRequestEntityTooLarge, berr
+			default:
+				return nil, http.StatusBadRequest, berr
+			}
+		}
+		return nil, http.StatusInternalServerError, putErr
+	}
+
+	info, err := backend.GetObjectInfo(bucket.Name, key)
+	if err != nil {
+		discardFailedWrite(backend, bucket, key, archivedVID, hadPrior)
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to get object info: %w", err)
+	}
+	obj := &models.Object{
+		BucketID:    bucket.ID,
+		Key:         key,
+		Size:        info.Size,
+		ContentType: contentType,
+		ETag:        info.ETag,
+		SHA256:      sha256Hex,
+		StoragePath: key,
+		VersionID:   newCurrentVersionID(bucket),
+	}
+	if err := upsertCurrentObject(obj); err != nil {
+		discardFailedWrite(backend, bucket, key, archivedVID, hadPrior)
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to save object metadata: %w", err)
+	}
+	return obj, http.StatusOK, nil
 }
 
 // DownloadObject downloads an object from a bucket
@@ -1409,6 +1504,12 @@ func (h *BucketHandler) UploadObject(c *gin.Context) {
 func (h *BucketHandler) DownloadObject(c *gin.Context) {
 	bucketName := c.Param("name")
 	objectKey := strings.TrimPrefix(c.Param("key"), "/")
+	if validation.IsReservedObjectKey(objectKey) {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{
+			Error: "Object not found",
+		})
+		return
+	}
 	userID, _ := c.Get("user_id")
 	userUUID := userID.(uuid.UUID)
 
@@ -1457,17 +1558,6 @@ func (h *BucketHandler) DownloadObject(c *gin.Context) {
 		return
 	}
 
-	// Get object from storage backend
-	file, err := storageBackend.GetObject(bucketName, objectKey)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Failed to retrieve object",
-			Message: err.Error(),
-		})
-		return
-	}
-	defer file.Close() //nolint:errcheck // best-effort close of read-only file
-
 	// Set response headers
 	c.Header("Content-Type", object.ContentType)
 	c.Header("ETag", fmt.Sprintf("\"%s\"", object.ETag))
@@ -1491,19 +1581,29 @@ func (h *BucketHandler) DownloadObject(c *gin.Context) {
 			c.Status(http.StatusRequestedRangeNotSatisfiable)
 			return
 		}
-		if seeker, isSeeker := file.(io.Seeker); isSeeker {
-			if _, err := seeker.Seek(start, io.SeekStart); err != nil {
-				c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to seek object", Message: err.Error()})
-				return
-			}
-		} else if _, err := io.CopyN(io.Discard, file, start); err != nil {
+		// Native ranged read (S3 Range GET / file seek) — no streaming and
+		// discarding of the bytes before the range start.
+		rangeReader, err := storage.GetObjectRange(storageBackend, bucketName, objectKey, start, length)
+		if err != nil {
 			c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to read object range", Message: err.Error()})
 			return
 		}
+		defer rangeReader.Close() //nolint:errcheck // best-effort close of read stream
 		c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+length-1, object.Size))
-		c.DataFromReader(http.StatusPartialContent, length, object.ContentType, io.LimitReader(file, length), nil)
+		c.DataFromReader(http.StatusPartialContent, length, object.ContentType, rangeReader, nil)
 		return
 	}
+
+	// Get object from storage backend
+	file, err := storageBackend.GetObject(bucketName, objectKey)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to retrieve object",
+			Message: err.Error(),
+		})
+		return
+	}
+	defer file.Close() //nolint:errcheck // best-effort close of read-only file
 
 	// Stream file to response — cap at object.Size so the body never exceeds the
 	// declared Content-Length (multipart-assembled files may have trailing bytes).
@@ -1527,6 +1627,12 @@ func (h *BucketHandler) DownloadObject(c *gin.Context) {
 func (h *BucketHandler) DeleteObject(c *gin.Context) {
 	bucketName := c.Param("name")
 	objectKey := strings.TrimPrefix(c.Param("key"), "/")
+	if validation.IsReservedObjectKey(objectKey) {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{
+			Error: "Object not found",
+		})
+		return
+	}
 	userID, _ := c.Get("user_id")
 	userUUID := userID.(uuid.UUID)
 
@@ -1555,6 +1661,11 @@ func (h *BucketHandler) DeleteObject(c *gin.Context) {
 		})
 		return
 	}
+
+	// Serialize with other writers of this key (archive/delete must not
+	// interleave with an overwrite).
+	unlock := lockObjectKeys(bucketName, objectKey)
+	defer unlock()
 
 	// Get object metadata from database
 	var object models.Object
@@ -1591,6 +1702,15 @@ func (h *BucketHandler) DeleteObject(c *gin.Context) {
 		return
 	}
 
+	// WORM: an unversioned delete is permanent, so retention forbids it.
+	if retentionBlocks(&bucket, object.UpdatedAt) {
+		c.JSON(http.StatusConflict, models.ErrorResponse{
+			Error:   "Object under retention",
+			Message: fmt.Sprintf("Object is under retention for %d days and cannot be deleted yet", bucket.RetentionDays),
+		})
+		return
+	}
+
 	// Delete file from storage backend
 	if err := storageBackend.DeleteObject(bucketName, objectKey); err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
@@ -1609,6 +1729,7 @@ func (h *BucketHandler) DeleteObject(c *gin.Context) {
 		return
 	}
 
+	notifyObjectEvent(&bucket, services.EventObjectRemoved, objectKey, 0, "", "")
 	c.JSON(http.StatusOK, models.SuccessResponse{
 		Message: "Object deleted successfully",
 	})
@@ -1628,6 +1749,10 @@ func (h *BucketHandler) DeleteObject(c *gin.Context) {
 func (h *BucketHandler) HeadObject(c *gin.Context) {
 	bucketName := c.Param("name")
 	objectKey := strings.TrimPrefix(c.Param("key"), "/")
+	if validation.IsReservedObjectKey(objectKey) {
+		c.Status(http.StatusNotFound)
+		return
+	}
 	userID, _ := c.Get("user_id")
 	userUUID := userID.(uuid.UUID)
 
@@ -1691,10 +1816,6 @@ type RenameObjectRequest struct {
 // @Security BearerAuth
 // @Router /api/buckets/{name}/objects/move [post]
 func (h *BucketHandler) MoveObject(c *gin.Context) {
-	bucketName := c.Param("name")
-	userID, _ := c.Get("user_id")
-	userUUID := userID.(uuid.UUID)
-
 	var req MoveObjectRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{
@@ -1712,6 +1833,33 @@ func (h *BucketHandler) MoveObject(c *gin.Context) {
 		return
 	}
 
+	h.moveSingleObject(c, req.SourceKey, req.DestinationKey, "Object moved successfully", "Destination object already exists")
+}
+
+// moveSingleObject is the shared implementation of MoveObject and
+// RenameObject: validate the destination key, require GetObject + DeleteObject
+// on the source and PutObject on the destination, refuse to overwrite an
+// existing destination or to permanently remove retained data, then move
+// through the versioning-aware helper under per-key locks.
+func (h *BucketHandler) moveSingleObject(c *gin.Context, srcKey, dstKey, successMsg, conflictMsg string) {
+	bucketName := c.Param("name")
+	userID, _ := c.Get("user_id")
+	userUUID := userID.(uuid.UUID)
+
+	if err := validation.ValidateObjectKey(dstKey); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Invalid destination key",
+			Message: err.Error(),
+		})
+		return
+	}
+	if validation.IsReservedObjectKey(srcKey) {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{
+			Error: "Source object not found",
+		})
+		return
+	}
+
 	// Get bucket from database
 	var bucket models.Bucket
 	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
@@ -1720,74 +1868,37 @@ func (h *BucketHandler) MoveObject(c *gin.Context) {
 		})
 		return
 	}
-
-	// Check permission to read source object
-	allowed, err := h.policyService.CheckObjectAccess(userUUID, bucketName, req.SourceKey, services.ActionGetObject)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Policy check failed",
+	if err := validateKeyForBucket(&bucket, dstKey); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Invalid destination key",
 			Message: err.Error(),
 		})
 		return
 	}
-	if !allowed {
-		c.JSON(http.StatusForbidden, models.ErrorResponse{
-			Error:   "Permission denied",
-			Message: "You don't have permission to read the source object",
-		})
-		return
-	}
 
-	// Check permission to write destination object
-	allowed, err = h.policyService.CheckObjectAccess(userUUID, bucketName, req.DestinationKey, services.ActionPutObject)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Policy check failed",
-			Message: err.Error(),
-		})
-		return
+	checks := []struct {
+		key, action, denied string
+	}{
+		{srcKey, services.ActionGetObject, "You don't have permission to read the source object"},
+		{dstKey, services.ActionPutObject, "You don't have permission to write to the destination"},
+		{srcKey, services.ActionDeleteObject, "You don't have permission to delete the source object"},
 	}
-	if !allowed {
-		c.JSON(http.StatusForbidden, models.ErrorResponse{
-			Error:   "Permission denied",
-			Message: "You don't have permission to write to the destination",
-		})
-		return
-	}
-
-	// Check permission to delete source object
-	allowed, err = h.policyService.CheckObjectAccess(userUUID, bucketName, req.SourceKey, services.ActionDeleteObject)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Policy check failed",
-			Message: err.Error(),
-		})
-		return
-	}
-	if !allowed {
-		c.JSON(http.StatusForbidden, models.ErrorResponse{
-			Error:   "Permission denied",
-			Message: "You don't have permission to delete the source object",
-		})
-		return
-	}
-
-	// Get source object from database
-	var sourceObject models.Object
-	if err := database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, req.SourceKey).First(&sourceObject).Error; err != nil {
-		c.JSON(http.StatusNotFound, models.ErrorResponse{
-			Error: "Source object not found",
-		})
-		return
-	}
-
-	// Check if destination already exists
-	var existingObject models.Object
-	if err := database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, req.DestinationKey).First(&existingObject).Error; err == nil {
-		c.JSON(http.StatusConflict, models.ErrorResponse{
-			Error: "Destination object already exists",
-		})
-		return
+	for _, chk := range checks {
+		allowed, err := h.policyService.CheckObjectAccess(userUUID, bucketName, chk.key, chk.action)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+				Error:   "Policy check failed",
+				Message: err.Error(),
+			})
+			return
+		}
+		if !allowed {
+			c.JSON(http.StatusForbidden, models.ErrorResponse{
+				Error:   "Permission denied",
+				Message: chk.denied,
+			})
+			return
+		}
 	}
 
 	// Get storage backend
@@ -1800,40 +1911,51 @@ func (h *BucketHandler) MoveObject(c *gin.Context) {
 		return
 	}
 
-	// Copy object in storage backend
-	if err := storageBackend.CopyObject(bucketName, req.SourceKey, req.DestinationKey); err != nil {
+	unlock := lockObjectKeys(bucketName, srcKey, dstKey)
+	defer unlock()
+
+	// Get source object from database
+	var sourceObject models.Object
+	if err := database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, srcKey).First(&sourceObject).Error; err != nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{
+			Error: "Source object not found",
+		})
+		return
+	}
+
+	// Never overwrite: the caller has not been authorized to replace (or
+	// version) whatever lives at the destination.
+	if currentObjectExists(bucket.ID, dstKey) {
+		c.JSON(http.StatusConflict, models.ErrorResponse{
+			Error: conflictMsg,
+		})
+		return
+	}
+
+	// WORM: outside versioning the source bytes are removed permanently.
+	if bucket.Versioning != models.VersioningEnabled && retentionBlocks(&bucket, sourceObject.UpdatedAt) {
+		c.JSON(http.StatusConflict, models.ErrorResponse{
+			Error:   "Object under retention",
+			Message: fmt.Sprintf("Object is under retention for %d days and cannot be moved yet", bucket.RetentionDays),
+		})
+		return
+	}
+
+	moved, err := moveObjectWithinBucket(storageBackend, &bucket, &sourceObject, dstKey)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Failed to copy object",
+			Error:   "Failed to move object",
 			Message: err.Error(),
 		})
 		return
 	}
 
-	// Delete source from storage backend
-	if err := storageBackend.DeleteObject(bucketName, req.SourceKey); err != nil {
-		// Try to rollback - delete the copy
-		_ = storageBackend.DeleteObject(bucketName, req.DestinationKey)
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Failed to delete source object",
-			Message: err.Error(),
-		})
-		return
-	}
-
-	// Update database record with new key
-	sourceObject.Key = req.DestinationKey
-	sourceObject.UpdatedAt = time.Now()
-	if err := database.DB.Save(&sourceObject).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Failed to update object metadata",
-			Message: err.Error(),
-		})
-		return
-	}
+	notifyObjectEvent(&bucket, services.EventObjectCreated, moved.Key, moved.Size, moved.ETag, moved.VersionID)
+	notifyObjectEvent(&bucket, services.EventObjectRemoved, srcKey, 0, "", "")
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Object moved successfully",
-		"object":  sourceObject,
+		"message": successMsg,
+		"object":  moved,
 	})
 }
 
@@ -1854,10 +1976,6 @@ func (h *BucketHandler) MoveObject(c *gin.Context) {
 // @Security BearerAuth
 // @Router /api/buckets/{name}/objects/rename [post]
 func (h *BucketHandler) RenameObject(c *gin.Context) {
-	bucketName := c.Param("name")
-	userID, _ := c.Get("user_id")
-	userUUID := userID.(uuid.UUID)
-
 	var req RenameObjectRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{
@@ -1891,129 +2009,7 @@ func (h *BucketHandler) RenameObject(c *gin.Context) {
 		return
 	}
 
-	// Get bucket from database
-	var bucket models.Bucket
-	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
-		c.JSON(http.StatusNotFound, models.ErrorResponse{
-			Error: "Bucket not found",
-		})
-		return
-	}
-
-	// Check permission to read source object
-	allowed, err := h.policyService.CheckObjectAccess(userUUID, bucketName, req.SourceKey, services.ActionGetObject)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Policy check failed",
-			Message: err.Error(),
-		})
-		return
-	}
-	if !allowed {
-		c.JSON(http.StatusForbidden, models.ErrorResponse{
-			Error:   "Permission denied",
-			Message: "You don't have permission to read the source object",
-		})
-		return
-	}
-
-	// Check permission to write destination
-	allowed, err = h.policyService.CheckObjectAccess(userUUID, bucketName, destinationKey, services.ActionPutObject)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Policy check failed",
-			Message: err.Error(),
-		})
-		return
-	}
-	if !allowed {
-		c.JSON(http.StatusForbidden, models.ErrorResponse{
-			Error:   "Permission denied",
-			Message: "You don't have permission to write to the destination",
-		})
-		return
-	}
-
-	// Check permission to delete source
-	allowed, err = h.policyService.CheckObjectAccess(userUUID, bucketName, req.SourceKey, services.ActionDeleteObject)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Policy check failed",
-			Message: err.Error(),
-		})
-		return
-	}
-	if !allowed {
-		c.JSON(http.StatusForbidden, models.ErrorResponse{
-			Error:   "Permission denied",
-			Message: "You don't have permission to delete the source object",
-		})
-		return
-	}
-
-	// Get source object from database
-	var sourceObject models.Object
-	if err := database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, req.SourceKey).First(&sourceObject).Error; err != nil {
-		c.JSON(http.StatusNotFound, models.ErrorResponse{
-			Error: "Source object not found",
-		})
-		return
-	}
-
-	// Check if destination already exists
-	var existingObject models.Object
-	if err := database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, destinationKey).First(&existingObject).Error; err == nil {
-		c.JSON(http.StatusConflict, models.ErrorResponse{
-			Error: "An object with that name already exists",
-		})
-		return
-	}
-
-	// Get storage backend
-	storageBackend, err := h.getStorageBackend(&bucket)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Failed to initialize storage backend",
-			Message: err.Error(),
-		})
-		return
-	}
-
-	// Copy object in storage backend
-	if err := storageBackend.CopyObject(bucketName, req.SourceKey, destinationKey); err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Failed to copy object",
-			Message: err.Error(),
-		})
-		return
-	}
-
-	// Delete source from storage backend
-	if err := storageBackend.DeleteObject(bucketName, req.SourceKey); err != nil {
-		// Try to rollback - delete the copy
-		_ = storageBackend.DeleteObject(bucketName, destinationKey)
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Failed to delete source object",
-			Message: err.Error(),
-		})
-		return
-	}
-
-	// Update database record with new key
-	sourceObject.Key = destinationKey
-	sourceObject.UpdatedAt = time.Now()
-	if err := database.DB.Save(&sourceObject).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Failed to update object metadata",
-			Message: err.Error(),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Object renamed successfully",
-		"object":  sourceObject,
-	})
+	h.moveSingleObject(c, req.SourceKey, destinationKey, "Object renamed successfully", "An object with that name already exists")
 }
 
 // MoveFolderRequest represents the request body for moving a folder
@@ -2022,9 +2018,13 @@ type MoveFolderRequest struct {
 	DestinationPrefix string `json:"destination_prefix" binding:"required"`
 }
 
+// maxFolderMoveObjects bounds a single folder move (every object is copied,
+// permission-checked and locked individually).
+const maxFolderMoveObjects = storage.MaxListObjects
+
 // MoveFolder moves all objects under a folder prefix to a new prefix
 // @Summary Move a folder
-// @Description Moves all objects under the specified source prefix to a new destination prefix within the same bucket. Cannot move a folder into itself.
+// @Description Moves all objects under the specified source prefix to a new destination prefix within the same bucket. Both prefixes must end with '/'. Requires GetObject and DeleteObject on every source object and PutObject on every destination key; refuses to overwrite existing destination objects. Cannot move a folder into itself.
 // @Tags buckets
 // @Accept json
 // @Produce json
@@ -2034,6 +2034,7 @@ type MoveFolderRequest struct {
 // @Failure 400 {object} models.ErrorResponse
 // @Failure 403 {object} models.ErrorResponse
 // @Failure 404 {object} models.ErrorResponse
+// @Failure 409 {object} models.ErrorResponse
 // @Failure 500 {object} models.ErrorResponse
 // @Security BearerAuth
 // @Router /api/buckets/{name}/folders/move [post]
@@ -2050,9 +2051,28 @@ func (h *BucketHandler) MoveFolder(c *gin.Context) {
 		})
 		return
 	}
+	srcPrefix, dstPrefix := req.SourcePrefix, req.DestinationPrefix
+
+	// Folder prefixes must be canonical "a/b/" forms: without the trailing
+	// slash "foo" would also match "foobar/...".
+	for _, p := range []string{srcPrefix, dstPrefix} {
+		if !strings.HasSuffix(p, "/") {
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{
+				Error: "Folder prefixes must end with '/'",
+			})
+			return
+		}
+		if err := validation.ValidateObjectKey(p); err != nil {
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{
+				Error:   "Invalid folder prefix",
+				Message: err.Error(),
+			})
+			return
+		}
+	}
 
 	// Validate prefixes
-	if req.SourcePrefix == req.DestinationPrefix {
+	if srcPrefix == dstPrefix {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error: "Source and destination prefixes cannot be the same",
 		})
@@ -2060,7 +2080,7 @@ func (h *BucketHandler) MoveFolder(c *gin.Context) {
 	}
 
 	// Don't allow moving a folder into itself
-	if strings.HasPrefix(req.DestinationPrefix, req.SourcePrefix) {
+	if strings.HasPrefix(dstPrefix, srcPrefix) {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error: "Cannot move a folder into itself",
 		})
@@ -2076,27 +2096,22 @@ func (h *BucketHandler) MoveFolder(c *gin.Context) {
 		return
 	}
 
-	// Check bucket ownership or admin status
-	isAdmin, _ := c.Get("is_admin")
-	if bucket.OwnerID != userUUID && isAdmin != true {
-		// Check policy for source folder access
-		allowed, err := h.policyService.CheckObjectAccess(userUUID, bucketName, req.SourcePrefix+"*", services.ActionGetObject)
-		if err != nil || !allowed {
-			c.JSON(http.StatusForbidden, models.ErrorResponse{
-				Error: "Permission denied",
-			})
-			return
-		}
-	}
-
-	// Get all objects with the source prefix from database
-	var sourceObjects []models.Object
-	if err := database.DB.Where("bucket_id = ? AND key LIKE ?", bucket.ID, req.SourcePrefix+"%").Find(&sourceObjects).Error; err != nil {
+	// Get all objects with the source prefix (LIKE wildcards escaped: a
+	// prefix containing '%' or '_' must not match unrelated keys).
+	var candidates []models.Object
+	if err := database.DB.Where("bucket_id = ? AND key LIKE ?", bucket.ID, validation.EscapeLikeWildcards(srcPrefix)+"%").
+		Order("key ASC").Limit(maxFolderMoveObjects + 1).Find(&candidates).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to list source objects",
 			Message: err.Error(),
 		})
 		return
+	}
+	sourceObjects := make([]models.Object, 0, len(candidates))
+	for _, obj := range candidates {
+		if strings.HasPrefix(obj.Key, srcPrefix) {
+			sourceObjects = append(sourceObjects, obj)
+		}
 	}
 
 	if len(sourceObjects) == 0 {
@@ -2104,6 +2119,53 @@ func (h *BucketHandler) MoveFolder(c *gin.Context) {
 			Error: "No objects found in source folder",
 		})
 		return
+	}
+	if len(sourceObjects) > maxFolderMoveObjects {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Folder too large",
+			Message: fmt.Sprintf("A folder move is limited to %d objects", maxFolderMoveObjects),
+		})
+		return
+	}
+
+	// Pre-validate every object before mutating any: destination key
+	// validity, per-object permissions (ownership of the bucket does not
+	// bypass policy), and retention.
+	newKeys := make([]string, len(sourceObjects))
+	lockKeys := make([]string, 0, 2*len(sourceObjects))
+	for i, obj := range sourceObjects {
+		newKey := dstPrefix + strings.TrimPrefix(obj.Key, srcPrefix)
+		if err := validateKeyForBucket(&bucket, newKey); err != nil {
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{
+				Error:   "Invalid destination key",
+				Message: fmt.Sprintf("%s: %v", newKey, err),
+			})
+			return
+		}
+		checks := []struct{ key, action string }{
+			{obj.Key, services.ActionGetObject},
+			{obj.Key, services.ActionDeleteObject},
+			{newKey, services.ActionPutObject},
+		}
+		for _, chk := range checks {
+			allowed, err := h.policyService.CheckObjectAccess(userUUID, bucketName, chk.key, chk.action)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+					Error:   "Policy check failed",
+					Message: err.Error(),
+				})
+				return
+			}
+			if !allowed {
+				c.JSON(http.StatusForbidden, models.ErrorResponse{
+					Error:   "Permission denied",
+					Message: fmt.Sprintf("Missing %s permission on %s", chk.action, chk.key),
+				})
+				return
+			}
+		}
+		newKeys[i] = newKey
+		lockKeys = append(lockKeys, obj.Key, newKey)
 	}
 
 	// Get storage backend
@@ -2116,43 +2178,77 @@ func (h *BucketHandler) MoveFolder(c *gin.Context) {
 		return
 	}
 
-	// Move each object
+	unlock := lockObjectKeys(bucketName, lockKeys...)
+	defer unlock()
+
+	// Re-read the source rows under the lock and re-check the destinations
+	// and retention, so nothing changed between validation and mutation.
+	ids := make([]uuid.UUID, len(sourceObjects))
+	for i, obj := range sourceObjects {
+		ids[i] = obj.ID
+	}
+	current := make(map[uuid.UUID]models.Object, len(ids))
+	for i := 0; i < len(ids); i += 500 {
+		end := min(i+500, len(ids))
+		var rows []models.Object
+		if err := database.DB.Where("id IN ?", ids[i:end]).Find(&rows).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to re-read source objects", Message: err.Error()})
+			return
+		}
+		for _, r := range rows {
+			current[r.ID] = r
+		}
+	}
+	for i := 0; i < len(newKeys); i += 500 {
+		end := min(i+500, len(newKeys))
+		var existing []string
+		if err := database.DB.Model(&models.Object{}).Where("bucket_id = ? AND key IN ?", bucket.ID, newKeys[i:end]).
+			Limit(1).Pluck("key", &existing).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to check destination", Message: err.Error()})
+			return
+		}
+		if len(existing) > 0 {
+			c.JSON(http.StatusConflict, models.ErrorResponse{
+				Error:   "Destination object already exists",
+				Message: existing[0],
+			})
+			return
+		}
+	}
+	for i, obj := range sourceObjects {
+		cur, ok := current[obj.ID]
+		if !ok || cur.Key != obj.Key {
+			c.JSON(http.StatusConflict, models.ErrorResponse{
+				Error:   "Source folder changed during the move; please retry",
+				Message: obj.Key,
+			})
+			return
+		}
+		if bucket.Versioning != models.VersioningEnabled && retentionBlocks(&bucket, cur.UpdatedAt) {
+			c.JSON(http.StatusConflict, models.ErrorResponse{
+				Error:   "Object under retention",
+				Message: fmt.Sprintf("%s is under retention for %d days and cannot be moved yet", obj.Key, bucket.RetentionDays),
+			})
+			return
+		}
+		sourceObjects[i] = cur
+	}
+
+	// Move each object through the versioning-aware helper.
 	movedCount := 0
-	for _, obj := range sourceObjects {
-		// Calculate new key by replacing source prefix with destination prefix
-		newKey := req.DestinationPrefix + strings.TrimPrefix(obj.Key, req.SourcePrefix)
-
-		// Copy object in storage backend
-		if err := storageBackend.CopyObject(bucketName, obj.Key, newKey); err != nil {
-			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-				Error:   "Failed to copy object",
-				Message: fmt.Sprintf("Failed to copy %s: %v", obj.Key, err),
+	for i := range sourceObjects {
+		obj := sourceObjects[i]
+		moved, err := moveObjectWithinBucket(storageBackend, &bucket, &obj, newKeys[i])
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":       "Failed to move folder",
+				"message":     err.Error(),
+				"moved_count": movedCount,
 			})
 			return
 		}
-
-		// Delete source from storage backend
-		if err := storageBackend.DeleteObject(bucketName, obj.Key); err != nil {
-			// Try to rollback - delete the copy
-			_ = storageBackend.DeleteObject(bucketName, newKey)
-			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-				Error:   "Failed to delete source object",
-				Message: fmt.Sprintf("Failed to delete %s: %v", obj.Key, err),
-			})
-			return
-		}
-
-		// Update database record with new key
-		obj.Key = newKey
-		obj.UpdatedAt = time.Now()
-		if err := database.DB.Save(&obj).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-				Error:   "Failed to update object metadata",
-				Message: err.Error(),
-			})
-			return
-		}
-
+		notifyObjectEvent(&bucket, services.EventObjectCreated, moved.Key, moved.Size, moved.ETag, moved.VersionID)
+		notifyObjectEvent(&bucket, services.EventObjectRemoved, obj.Key, 0, "", "")
 		movedCount++
 	}
 

@@ -103,8 +103,13 @@ OIDC_GROUPS_CLAIM=groups      # claim carrying group names
 OIDC_ADMIN_GROUP=bkt-admins   # members are bkt admins; re-evaluated every login. Empty = SSO never grants admin
 OIDC_USER_GROUP=bkt-users     # if set, non-admins must be members or login is denied
 OIDC_POLICIES_CLAIM=policies  # claim listing bkt policy names to sync on every login
+OIDC_POLICIES_AUTHORITATIVE=  # true: a *missing* policies claim also clears policies (default: true iff OIDC_POLICIES_CLAIM is set)
 OIDC_LINK_BY_EMAIL=false      # link a new subject to an existing OIDC account with the same *verified* email
 ```
+
+The discovery document's `issuer` must equal `OIDC_ISSUER_URL` (a trailing
+slash is ignored); otherwise login fails. UserInfo responses are only used
+when they carry a `sub` equal to the ID token's subject.
 
 `OIDC_ENABLED` is implied when the issuer and client ID are both set; set
 `OIDC_ENABLED=false` to keep a configured provider switched off.
@@ -131,11 +136,24 @@ OIDC_LINK_BY_EMAIL=false      # link a new subject to an existing OIDC account w
   (a mapper is missing) or *not a member* — and the denial is audit-logged.
 - **Policies**: the `OIDC_POLICIES_CLAIM` claim (JSON array, or a space/comma
   separated string) is synced to the user's bkt policies on every login; the
-  IdP is the source of truth. Names must match bkt policies exactly.
+  IdP is the source of truth. Names must match bkt policies exactly. Whenever
+  the claim is present its contents *replace* the user's direct policies —
+  an empty claim (or one naming no existing policy) removes them all, so
+  offboarding in the IdP takes effect at the next login. If your IdP omits
+  the claim entirely when a user has no policies, set
+  `OIDC_POLICIES_AUTHORITATIVE=true` (the default when `OIDC_POLICIES_CLAIM`
+  is set explicitly) so a missing claim also clears them. With neither, a
+  missing claim leaves admin-assigned policies untouched.
 - **Account linking** (`OIDC_LINK_BY_EMAIL=true`) is for IdP migrations where
   every user receives a new `sub`: an unknown subject whose `email_verified`
-  address matches an existing **OIDC** account of this provider is attached to
-  that account. Local password accounts are never linked automatically.
+  address matches the **IdP-asserted** address (`sso_email`, never the
+  user-editable email) of exactly one existing **OIDC** account of this
+  provider is attached to that account. Linking ends the account's existing
+  sessions and temporary credentials and deactivates its long-lived access
+  keys (the new identity must mint its own). If more than one account matches,
+  login is refused. Local password accounts are never linked automatically.
+- SSO accounts cannot change their email or set a local password in bkt;
+  both are managed by the identity provider.
 
 ### Example: Keycloak
 
@@ -228,9 +246,16 @@ VAULT_JWT_PATH=jwt
 # Role name for authentication
 VAULT_JWT_ROLE=objectstore
 
-# Expected audience claim (optional)
+# Expected audience claim (required; tokens without it are rejected)
 VAULT_JWT_AUDIENCE=objectstore
+
+# Expected issuer claim (optional; enforced when set)
+VAULT_JWT_ISSUER=https://vault.company.com:8200/v1/identity/oidc
 ```
+
+When the token carries a `policies` claim it replaces the user's policies on
+every login — an empty list removes them all. A token without the claim leaves
+the user's policies as an administrator assigned them.
 
 ### Vault JWT Auth Method Setup
 
@@ -365,6 +390,21 @@ GOOGLE_CLIENT_SECRET=your-client-secret
 GOOGLE_REDIRECT_URL=https://your-domain.com/api/auth/google/callback
 ```
 
+### Restricting who can sign in
+
+```bash
+# Comma-separated Google Workspace domain(s) allowed to sign in.
+GOOGLE_ALLOWED_DOMAINS=example.com,example.org
+```
+
+Both the account's Workspace hosted domain (`hd`) and its email domain must be
+in the list, and the email must be verified; consumer (`@gmail.com`) accounts
+have no `hd` and are rejected. **If `GOOGLE_ALLOWED_DOMAINS` is unset, new
+Google users are only auto-provisioned when `ALLOW_REGISTRATION=true`**
+(otherwise only already-linked accounts can sign in); bkt logs a warning at
+startup either way. Usernames are derived from the email local part,
+sanitized, and suffixed with a number on collision.
+
 ### Google Cloud Console Setup
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
@@ -415,6 +455,10 @@ GOOGLE_POLICY_SYNC_MODE=direct
 # Optional: Only sync groups starting with this prefix
 GOOGLE_POLICY_GROUP_PREFIX=bkt-
 ```
+
+Workspace is the source of truth once enabled: the mapped policies replace the
+user's policies on every login (an empty result removes them all), and if the
+group lookup fails the login is refused rather than keeping stale policies.
 
 ### Step 1: Create Service Account
 

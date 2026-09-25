@@ -7,6 +7,7 @@ import (
 	"bkt/internal/database"
 	"bkt/internal/models"
 	"bkt/internal/services"
+	"bkt/internal/validation"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -30,6 +31,11 @@ func (h *BucketHandler) loadBucketForVersioning(c *gin.Context, action string) (
 	key := c.Query("key")
 	if key == "" {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "key query parameter is required"})
+		return nil, "", uuid.Nil, false
+	}
+	// bkt's internal version keyspace is never an object.
+	if validation.IsReservedObjectKey(key) {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "Invalid object key"})
 		return nil, "", uuid.Nil, false
 	}
 	userID, _ := c.Get("user_id")
@@ -121,6 +127,10 @@ func (h *BucketHandler) RestoreObjectVersion(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "Invalid request", Message: err.Error()})
 		return
 	}
+	if validation.IsReservedObjectKey(req.Key) {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "Invalid object key"})
+		return
+	}
 	userID, _ := c.Get("user_id")
 	userUUID := userID.(uuid.UUID)
 	if allowed, err := h.policyService.CheckObjectAccess(userUUID, bucketName, req.Key, services.ActionPutObject); err != nil || !allowed {
@@ -132,6 +142,16 @@ func (h *BucketHandler) RestoreObjectVersion(c *gin.Context) {
 		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "Bucket not found"})
 		return
 	}
+	if err := validateKeyForBucket(&bucket, req.Key); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "Invalid object key", Message: err.Error()})
+		return
+	}
+
+	// Serialize with every other mutation of this key (archive + write +
+	// commit must not interleave). The versioning helpers do not lock.
+	unlock := lockObjectKeys(bucket.Name, req.Key)
+	defer unlock()
+
 	var ver models.ObjectVersion
 	if err := database.DB.Where("bucket_id = ? AND key = ? AND version_id = ?", bucket.ID, req.Key, req.VersionID).
 		First(&ver).Error; err != nil {
@@ -148,6 +168,16 @@ func (h *BucketHandler) RestoreObjectVersion(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to initialize storage"})
 		return
 	}
+
+	// The restored bytes become current and count against the quota.
+	reservation, qerr := reserveBucketQuota(&bucket, ver.Size)
+	if qerr != nil {
+		c.JSON(http.StatusForbidden, models.ErrorResponse{Error: "Quota exceeded", Message: qerr.Error()})
+		return
+	}
+	defer reservation.release()
+
+	hadPrior := currentObjectExists(bucket.ID, req.Key)
 
 	// Archive the current version (if any), then copy the requested version's
 	// bytes forward: stream version -> PutObject keeps the history row intact.
@@ -169,24 +199,13 @@ func (h *BucketHandler) RestoreObjectVersion(c *gin.Context) {
 		return
 	}
 
-	newVID := ""
-	if bucket.Versioning == models.VersioningEnabled {
-		newVID = uuid.New().String()
-	}
-	now := time.Now()
 	obj := models.Object{
 		BucketID: bucket.ID, Key: req.Key, Size: ver.Size,
 		ContentType: ver.ContentType, ETag: ver.ETag, StoragePath: req.Key,
-		Metadata: ver.Metadata, Tags: ver.Tags, VersionID: newVID,
-		CreatedAt: now, UpdatedAt: now,
+		Metadata: ver.Metadata, Tags: ver.Tags, VersionID: newCurrentVersionID(&bucket),
 	}
-	var existing models.Object
-	if database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, req.Key).First(&existing).Error == nil {
-		existing.Size, existing.ContentType, existing.ETag = obj.Size, obj.ContentType, obj.ETag
-		existing.Metadata, existing.Tags, existing.VersionID = obj.Metadata, obj.Tags, obj.VersionID
-		existing.UpdatedAt = now
-		database.DB.Save(&existing)
-	} else if err := database.DB.Create(&obj).Error; err != nil {
+	if err := upsertCurrentObject(&obj); err != nil {
+		discardFailedWrite(backend, &bucket, req.Key, archivedVID, hadPrior)
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to record restored object"})
 		return
 	}
@@ -220,6 +239,8 @@ func (h *BucketHandler) DeleteObjectVersionREST(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to initialize storage"})
 		return
 	}
+	unlock := lockObjectKeys(bucket.Name, key)
+	defer unlock()
 	if err := deleteSpecificVersion(backend, bucket, key, versionID); err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to delete version", Message: err.Error()})
 		return
@@ -228,9 +249,9 @@ func (h *BucketHandler) DeleteObjectVersionREST(c *gin.Context) {
 }
 
 // SetBucketVersioning handles PUT /api/buckets/:name/versioning {"versioning": "enabled"|"suspended"}
-// (bucket owner or admin).
+// (admin, or s3:PutBucketVersioning on the bucket).
 // @Summary Set bucket versioning
-// @Description Enables or suspends versioning on a bucket. Bucket owner or admin only.
+// @Description Enables or suspends versioning on a bucket. Requires admin or s3:PutBucketVersioning on the bucket.
 // @Tags buckets
 // @Accept json
 // @Produce json
@@ -242,8 +263,6 @@ func (h *BucketHandler) SetBucketVersioning(c *gin.Context) {
 	bucketName := c.Param("name")
 	userID, _ := c.Get("user_id")
 	userUUID := userID.(uuid.UUID)
-	isAdminVal, _ := c.Get("is_admin")
-	admin, _ := isAdminVal.(bool)
 
 	var req struct {
 		Versioning string `json:"versioning" binding:"required"`
@@ -261,14 +280,14 @@ func (h *BucketHandler) SetBucketVersioning(c *gin.Context) {
 		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "Bucket not found"})
 		return
 	}
-	if !admin && bucket.OwnerID != userUUID {
-		c.JSON(http.StatusForbidden, models.ErrorResponse{Error: "Only the bucket owner can change versioning"})
+	if !authorizeBucketConfig(h.policyService, userUUID, bucket.Name, services.ActionPutBucketVersioning) {
+		c.JSON(http.StatusForbidden, models.ErrorResponse{Error: "Permission denied", Message: "Changing versioning requires admin or " + services.ActionPutBucketVersioning + " on the bucket"})
 		return
 	}
 	if req.Versioning == models.VersioningSuspended && bucket.RetentionDays > 0 {
 		c.JSON(http.StatusConflict, models.ErrorResponse{
 			Error:   "Retention active",
-			Message: "Versioning cannot be suspended while a retention period is set — clear retention first",
+			Message: "Versioning cannot be suspended while a retention period is set — clear retention first (possible only once no data is still under retention)",
 		})
 		return
 	}

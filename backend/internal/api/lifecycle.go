@@ -3,7 +3,7 @@ package api
 import (
 	"encoding/json"
 	"encoding/xml"
-	"io"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -12,6 +12,8 @@ import (
 	"bkt/internal/database"
 	"bkt/internal/logger"
 	"bkt/internal/models"
+	"bkt/internal/services"
+	"bkt/internal/storage"
 	"bkt/internal/validation"
 
 	"github.com/gin-gonic/gin"
@@ -29,10 +31,10 @@ type lifecycleXML struct {
 }
 
 type lifecycleRuleXML struct {
-	ID         string `xml:"ID,omitempty"`
-	Status     string `xml:"Status"`
-	Prefix     string `xml:"Prefix,omitempty"`
-	Filter     struct {
+	ID     string `xml:"ID,omitempty"`
+	Status string `xml:"Status"`
+	Prefix string `xml:"Prefix,omitempty"`
+	Filter struct {
 		Prefix string `xml:"Prefix,omitempty"`
 	} `xml:"Filter,omitempty"`
 	Expiration struct {
@@ -69,21 +71,20 @@ func storeLifecycleConfig(b *models.Bucket, cfg *models.LifecycleConfig) error {
 	return database.DB.Model(b).Update("lifecycle", &s).Error
 }
 
-// bucketOwnerOrAdmin loads the bucket and enforces owner/admin.
-func (h *S3APIHandler) bucketOwnerOrAdmin(c *gin.Context) (*models.Bucket, bool) {
+// bucketForConfigAction loads the bucket and requires admin or the given
+// bucket-configuration policy action (ownership alone grants nothing).
+func (h *S3APIHandler) bucketForConfigAction(c *gin.Context, action string) (*models.Bucket, bool) {
 	bucketName := c.Param("bucket")
 	userID, _ := c.Get("user_id")
 	userUUID := userID.(uuid.UUID)
-	isAdminVal, _ := c.Get("is_admin")
-	admin, _ := isAdminVal.(bool)
 
 	var bucket models.Bucket
 	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
 		h.s3Error(c, "NoSuchBucket", "The specified bucket does not exist", bucketName, http.StatusNotFound)
 		return nil, false
 	}
-	if !admin && bucket.OwnerID != userUUID {
-		h.s3Error(c, "AccessDenied", "Only the bucket owner can manage lifecycle", bucketName, http.StatusForbidden)
+	if !authorizeBucketConfig(h.policyService, userUUID, bucket.Name, action) {
+		h.s3Error(c, "AccessDenied", "Access Denied", bucketName, http.StatusForbidden)
 		return nil, false
 	}
 	return &bucket, true
@@ -91,7 +92,7 @@ func (h *S3APIHandler) bucketOwnerOrAdmin(c *gin.Context) (*models.Bucket, bool)
 
 // GetBucketLifecycle handles GET /{bucket}?lifecycle.
 func (h *S3APIHandler) GetBucketLifecycle(c *gin.Context) {
-	bucket, ok := h.bucketOwnerOrAdmin(c)
+	bucket, ok := h.bucketForConfigAction(c, services.ActionGetLifecycleConfiguration)
 	if !ok {
 		return
 	}
@@ -111,12 +112,16 @@ func (h *S3APIHandler) GetBucketLifecycle(c *gin.Context) {
 
 // PutBucketLifecycle handles PUT /{bucket}?lifecycle (single-rule subset).
 func (h *S3APIHandler) PutBucketLifecycle(c *gin.Context) {
-	bucket, ok := h.bucketOwnerOrAdmin(c)
+	bucket, ok := h.bucketForConfigAction(c, services.ActionPutLifecycleConfiguration)
 	if !ok {
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(c.Request.Body, 256*1024))
+	body, err := readBoundedBody(c.Request.Body, 256*1024)
 	if err != nil {
+		if errors.Is(err, errRequestBodyTooLarge) {
+			h.s3Error(c, "MaxMessageLengthExceeded", "Your request was too big", "", http.StatusBadRequest)
+			return
+		}
 		h.s3Error(c, "InvalidRequest", "Failed to read request body", "", http.StatusBadRequest)
 		return
 	}
@@ -167,7 +172,7 @@ func (h *S3APIHandler) PutBucketLifecycle(c *gin.Context) {
 
 // DeleteBucketLifecycle handles DELETE /{bucket}?lifecycle.
 func (h *S3APIHandler) DeleteBucketLifecycle(c *gin.Context) {
-	bucket, ok := h.bucketOwnerOrAdmin(c)
+	bucket, ok := h.bucketForConfigAction(c, services.ActionPutLifecycleConfiguration)
 	if !ok {
 		return
 	}
@@ -182,7 +187,7 @@ func (h *S3APIHandler) DeleteBucketLifecycle(c *gin.Context) {
 // console: {"expire_days": N, "prefix": "p/", "noncurrent_expire_days": M}.
 // Zero/omitted for both disables lifecycle.
 // @Summary Set bucket lifecycle
-// @Description Configures age-based expiry for a bucket (single rule): current objects after expire_days, noncurrent versions after noncurrent_expire_days. Both zero clears the configuration. Bucket owner or admin only.
+// @Description Configures age-based expiry for a bucket (single rule): current objects after expire_days, noncurrent versions after noncurrent_expire_days. Both zero clears the configuration. Requires admin or s3:PutLifecycleConfiguration on the bucket.
 // @Tags buckets
 // @Accept json
 // @Produce json
@@ -194,8 +199,6 @@ func (h *BucketHandler) SetBucketLifecycleREST(c *gin.Context) {
 	bucketName := c.Param("name")
 	userID, _ := c.Get("user_id")
 	userUUID := userID.(uuid.UUID)
-	isAdminVal, _ := c.Get("is_admin")
-	admin, _ := isAdminVal.(bool)
 
 	var req models.LifecycleConfig
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -211,8 +214,8 @@ func (h *BucketHandler) SetBucketLifecycleREST(c *gin.Context) {
 		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "Bucket not found"})
 		return
 	}
-	if !admin && bucket.OwnerID != userUUID {
-		c.JSON(http.StatusForbidden, models.ErrorResponse{Error: "Only the bucket owner can manage lifecycle"})
+	if !authorizeBucketConfig(h.policyService, userUUID, bucket.Name, services.ActionPutLifecycleConfiguration) {
+		c.JSON(http.StatusForbidden, models.ErrorResponse{Error: "Permission denied", Message: "Managing lifecycle requires admin or " + services.ActionPutLifecycleConfiguration + " on the bucket"})
 		return
 	}
 	var cfg *models.LifecycleConfig
@@ -259,18 +262,7 @@ func RunLifecycleSweep(cfg *config.Config) {
 			}
 			if err := q.Limit(1000).Find(&expired).Error; err == nil {
 				for i := range expired {
-					obj := &expired[i]
-					if _, handled, derr := versionedDeleteCurrent(backend, b, obj); handled {
-						if derr != nil {
-							logger.Warn("Lifecycle: versioned expiry failed", map[string]interface{}{"bucket": b.Name, "key": obj.Key, "error": derr.Error()})
-						}
-						continue
-					}
-					if derr := backend.DeleteObject(b.Name, obj.Key); derr != nil {
-						logger.Warn("Lifecycle: expiry failed", map[string]interface{}{"bucket": b.Name, "key": obj.Key, "error": derr.Error()})
-						continue
-					}
-					database.DB.Delete(&models.Object{}, "id = ?", obj.ID)
+					expireCurrentObject(backend, b, expired[i].Key, cutoff)
 				}
 				if len(expired) > 0 {
 					logger.Info("Lifecycle: expired current objects", map[string]interface{}{"bucket": b.Name, "count": len(expired)})
@@ -280,6 +272,10 @@ func RunLifecycleSweep(cfg *config.Config) {
 
 		// Expire noncurrent versions permanently (oldest first, so a marker
 		// delete cannot resurrect content that is itself due for expiry).
+		// Each candidate is re-checked against the key's state at the time
+		// it is processed (earlier deletions in this pass change it); see
+		// noncurrentExpiryAllowed for the rules — notably a key's LATEST
+		// delete marker is only removed once it is the sole version left.
 		if lc.NoncurrentExpireDays > 0 {
 			cutoff := time.Now().AddDate(0, 0, -lc.NoncurrentExpireDays)
 			var vers []models.ObjectVersion
@@ -288,18 +284,95 @@ func RunLifecycleSweep(cfg *config.Config) {
 				vq = vq.Where("key LIKE ?", validation.EscapeLikeWildcards(lc.Prefix)+"%")
 			}
 			if err := vq.Order("versioned_at ASC").Limit(1000).Find(&vers).Error; err == nil {
-				for _, v := range vers {
-					if !v.IsDeleteMarker && retentionBlocks(b, v.ContentModifiedAt) {
-						continue // WORM retention outranks lifecycle expiry
-					}
-					if err := deleteSpecificVersion(backend, b, v.Key, v.VersionID); err != nil {
-						logger.Warn("Lifecycle: version expiry failed", map[string]interface{}{"bucket": b.Name, "key": v.Key, "version": v.VersionID, "error": err.Error()})
+				expiredCount := 0
+				for i := range vers {
+					if expireNoncurrentVersion(backend, b, &vers[i]) {
+						expiredCount++
 					}
 				}
-				if len(vers) > 0 {
-					logger.Info("Lifecycle: expired noncurrent versions", map[string]interface{}{"bucket": b.Name, "count": len(vers)})
+				if expiredCount > 0 {
+					logger.Info("Lifecycle: expired noncurrent versions", map[string]interface{}{"bucket": b.Name, "count": expiredCount})
 				}
 			}
 		}
 	}
+}
+
+// expireCurrentObject expires one current object under the key's write lock.
+// The row is re-read under the lock: a concurrent overwrite or delete since
+// the candidate query must not be undone by a stale expiry.
+func expireCurrentObject(backend storage.StorageBackend, b *models.Bucket, key string, cutoff time.Time) {
+	unlock := lockObjectKeys(b.Name, key)
+	defer unlock()
+
+	var obj models.Object
+	if err := database.DB.Where("bucket_id = ? AND key = ?", b.ID, key).First(&obj).Error; err != nil {
+		return // already gone
+	}
+	if !obj.UpdatedAt.Before(cutoff) {
+		return // rewritten since the candidate query
+	}
+	if _, handled, derr := versionedDeleteCurrent(backend, b, &obj); handled {
+		if derr != nil {
+			logger.Warn("Lifecycle: versioned expiry failed", map[string]interface{}{"bucket": b.Name, "key": key, "error": derr.Error()})
+		}
+		return
+	}
+	if retentionBlocks(b, obj.UpdatedAt) {
+		return // defensive: retention requires versioning, so not normally reachable
+	}
+	if derr := backend.DeleteObject(b.Name, key); derr != nil {
+		logger.Warn("Lifecycle: expiry failed", map[string]interface{}{"bucket": b.Name, "key": key, "error": derr.Error()})
+		return
+	}
+	database.DB.Delete(&models.Object{}, "id = ?", obj.ID)
+}
+
+// expireNoncurrentVersion permanently removes one noncurrent version under
+// the key's write lock when noncurrentVersionExpirable allows it (evaluated
+// under the lock). Reports whether the version was removed.
+func expireNoncurrentVersion(backend storage.StorageBackend, b *models.Bucket, v *models.ObjectVersion) bool {
+	unlock := lockObjectKeys(b.Name, v.Key)
+	defer unlock()
+
+	var fresh models.ObjectVersion
+	if err := database.DB.Where("id = ?", v.ID).First(&fresh).Error; err != nil {
+		return false // already removed
+	}
+	if !noncurrentVersionExpirable(b, &fresh) {
+		return false // retained content, or a latest delete marker that still hides versions
+	}
+	if err := deleteSpecificVersion(backend, b, fresh.Key, fresh.VersionID); err != nil {
+		logger.Warn("Lifecycle: version expiry failed", map[string]interface{}{"bucket": b.Name, "key": fresh.Key, "version": fresh.VersionID, "error": err.Error()})
+		return false
+	}
+	return true
+}
+
+// noncurrentVersionExpirable gathers the key's current state from the DB and
+// applies noncurrentExpiryAllowed to one object_versions entry.
+func noncurrentVersionExpirable(b *models.Bucket, v *models.ObjectVersion) bool {
+	retained := !v.IsDeleteMarker && retentionBlocks(b, v.ContentModifiedAt)
+	isLatestMarker, otherVersionsRemain := false, false
+	if v.IsDeleteMarker {
+		var current int64
+		if err := database.DB.Model(&models.Object{}).
+			Where("bucket_id = ? AND key = ?", b.ID, v.Key).Count(&current).Error; err != nil {
+			return false // fail safe: keep the marker
+		}
+		var newer int64
+		if err := database.DB.Model(&models.ObjectVersion{}).
+			Where("bucket_id = ? AND key = ? AND versioned_at > ? AND id <> ?", b.ID, v.Key, v.VersionedAt, v.ID).
+			Count(&newer).Error; err != nil {
+			return false
+		}
+		isLatestMarker = current == 0 && newer == 0
+		var others int64
+		if err := database.DB.Model(&models.ObjectVersion{}).
+			Where("bucket_id = ? AND key = ? AND id <> ?", b.ID, v.Key, v.ID).Count(&others).Error; err != nil {
+			return false
+		}
+		otherVersionsRemain = others > 0 || current > 0
+	}
+	return noncurrentExpiryAllowed(v.IsDeleteMarker, retained, isLatestMarker, otherVersionsRemain)
 }

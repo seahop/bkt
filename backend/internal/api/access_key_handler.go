@@ -8,6 +8,7 @@ import (
 
 	"bkt/internal/config"
 	"bkt/internal/database"
+	"bkt/internal/middleware"
 	"bkt/internal/models"
 	"bkt/internal/security"
 	"time"
@@ -48,9 +49,9 @@ func (h *AccessKeyHandler) GenerateAccessKey(c *gin.Context) {
 
 	// Optional scoping: a human-readable name, an expiry, and a read-only flag.
 	var req struct {
-		Name         string `json:"name"`
-		ReadOnly     bool   `json:"read_only"`
-		ExpiresInDays int   `json:"expires_in_days"`
+		Name          string `json:"name"`
+		ReadOnly      bool   `json:"read_only"`
+		ExpiresInDays int    `json:"expires_in_days"`
 	}
 	// The body is optional (no body → unscoped key), but a body that is present
 	// and malformed must be rejected — silently ignoring it would issue a
@@ -73,6 +74,23 @@ func (h *AccessKeyHandler) GenerateAccessKey(c *gin.Context) {
 	if req.ExpiresInDays > 0 {
 		t := time.Now().AddDate(0, 0, req.ExpiresInDays)
 		expiresAt = &t
+	}
+
+	// The response carries the secret: never persist it in the idempotency cache.
+	c.Set(middleware.CtxNoIdempotencyStore, true)
+
+	// Cheap limit pre-check before the bcrypt work below (the authoritative
+	// check runs again inside the transaction).
+	var existing int64
+	database.DB.Model(&models.AccessKey{}).
+		Where("user_id = ? AND is_active = ? AND temporary = ?", userID, true, false).
+		Count(&existing)
+	if existing >= 5 {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Maximum access keys reached",
+			Message: "You can have a maximum of 5 active access keys. Please revoke an existing key first.",
+		})
+		return
 	}
 
 	// Generate cryptographically secure access key and secret key BEFORE transaction

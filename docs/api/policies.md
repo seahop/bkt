@@ -40,7 +40,20 @@ Policies use AWS IAM-compatible JSON format:
 - **Principal:** Optional. `"*"` or an array of usernames. Used in **bucket policies** to scope a statement to specific users. **If omitted, the statement applies to all authenticated users** — so an Allow with no Principal grants everyone. (Ignored on user/identity policies, which are already scoped to the user they're attached to.)
 - **Action:** Array of actions (`service:action` format)
 - **Resource:** Array of resource patterns
-- **Condition:** (Future) Conditional logic
+- **Id:** Optional document identifier (informational only)
+
+**Not supported (rejected):** `Condition`, `NotPrincipal`, `NotAction`,
+`NotResource`, and any other unknown element. bkt does not evaluate them, so
+accepting them would silently grant *more* than the document says (e.g. an
+AWS "home folder" policy whose `s3:prefix` Condition would be dropped,
+granting the whole bucket). A document containing a non-empty `Condition`
+fails with `Condition is not supported yet`. Element names match
+case-insensitively. This applies to user, group, and bucket policies.
+
+Documents stored before this check are still evaluated, fail-safe: an `Allow`
+statement that carries one of these elements never grants, and a `Deny`
+statement that carries one is applied as if the element were absent (so it
+denies at least as much as written).
 
 ### Matching
 
@@ -55,6 +68,7 @@ Policies use AWS IAM-compatible JSON format:
 - Resources cannot contain `..` (path traversal prevention)
 - Statement must have at least one action and resource
 - Principal (if present) must be a string or an array of strings
+- No `Condition` / `NotPrincipal` / `NotAction` / `NotResource` / unknown elements
 
 ## Endpoints
 
@@ -505,6 +519,27 @@ Actions support wildcards:
 - `s3:*` - All S3 actions
 - `s3:GetObject` - Specific action
 
+### Bucket-configuration actions
+
+Bucket settings are authorized by policy, not by bucket ownership (the
+creator of a bucket gets no implicit rights on it). Non-admins need the
+action below on the bucket resource (`arn:aws:s3:::bucket`):
+
+| Action | Gates |
+|---|---|
+| `s3:PutBucketVersioning` | enable/suspend versioning (console and S3 `?versioning`) |
+| `s3:GetLifecycleConfiguration` | read the lifecycle rule (S3 `GET ?lifecycle`) |
+| `s3:PutLifecycleConfiguration` | set or delete the lifecycle rule |
+| `s3:PutReplicationConfiguration` | set/clear `replicate_to` |
+| `s3:PutBucketNotification` | webhook URL, secret, and events |
+| `s3:PutBucketObjectLockConfiguration` | WORM `retention_days` |
+| `s3:PutBucketQuota` | `quota_bytes` (bkt extension) |
+
+`s3:*` covers all of them. Setting `replicate_to` additionally requires
+`s3:GetObject` on every object of the source (`arn:aws:s3:::source/*`) and
+`s3:PutObject` + `s3:DeleteObject` on every object of the target
+(`arn:aws:s3:::target/*`); prefix-scoped grants are not sufficient.
+
 ### Resource Matching
 
 Resources support wildcards:
@@ -634,6 +669,14 @@ All policies are validated before storage:
 }
 ```
 **Error:** `action must be in format 'service:action'`
+
+### Unsupported Condition
+```json
+{
+  "Condition": {"StringLike": {"s3:prefix": ["home/alice/*"]}}
+}
+```
+**Error:** `Condition is not supported yet: remove the Condition block ...`
 
 ---
 

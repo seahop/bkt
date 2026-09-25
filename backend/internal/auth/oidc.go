@@ -50,7 +50,12 @@ type OIDCProviderSettings struct {
 	AdminGroup    string
 	UserGroup     string
 	PoliciesClaim string
-	LinkByEmail   bool
+	// PoliciesAuthoritative makes the IdP the source of truth for policy
+	// membership even when the policies claim is absent (treated as "none").
+	// Without it, an absent claim leaves policies untouched; a present claim
+	// (including an empty one) always replaces them.
+	PoliciesAuthoritative bool
+	LinkByEmail           bool
 
 	// VaultLegacyURLs enables the Vault UI-URL fallback for providers whose
 	// discovery document omits endpoints (older Vault releases).
@@ -112,6 +117,7 @@ type oidcIdentity struct {
 	Groups        []string
 	HasGroups     bool // the groups claim was present at all
 	Policies      []string
+	HasPolicies   bool // the policies claim was present at all
 }
 
 // roleDecision is the outcome of group→role resolution.
@@ -130,22 +136,23 @@ func NewOIDCHandler(cfg *config.Config) *OIDCHandler {
 		o.IssuerURL = "" // explicit OIDC_ENABLED=false keeps a configured provider off
 	}
 	return newOIDCHandler(cfg, OIDCProviderSettings{
-		Key:                  "oidc",
-		DisplayName:          o.ProviderName,
-		AuditName:            "oidc",
-		IssuerURL:            o.IssuerURL,
-		ClientID:             o.ClientID,
-		ClientSecret:         o.ClientSecret,
-		RedirectURL:          o.RedirectURL,
-		Scopes:               o.Scopes,
-		FrontendCallbackPath: "/auth/oidc/callback",
-		CookiePrefix:         "oidc_",
-		UsernameClaim:        o.UsernameClaim,
-		GroupsClaim:          o.GroupsClaim,
-		AdminGroup:           o.AdminGroup,
-		UserGroup:            o.UserGroup,
-		PoliciesClaim:        o.PoliciesClaim,
-		LinkByEmail:          o.LinkByEmail,
+		Key:                   "oidc",
+		DisplayName:           o.ProviderName,
+		AuditName:             "oidc",
+		IssuerURL:             o.IssuerURL,
+		ClientID:              o.ClientID,
+		ClientSecret:          o.ClientSecret,
+		RedirectURL:           o.RedirectURL,
+		Scopes:                o.Scopes,
+		FrontendCallbackPath:  "/auth/oidc/callback",
+		CookiePrefix:          "oidc_",
+		UsernameClaim:         o.UsernameClaim,
+		GroupsClaim:           o.GroupsClaim,
+		AdminGroup:            o.AdminGroup,
+		UserGroup:             o.UserGroup,
+		PoliciesClaim:         o.PoliciesClaim,
+		PoliciesAuthoritative: o.PoliciesAuthoritative,
+		LinkByEmail:           o.LinkByEmail,
 	})
 }
 
@@ -202,6 +209,12 @@ func (h *OIDCHandler) discover() (*oidcDiscovery, error) {
 	}
 	if d.JWKSURI == "" {
 		return nil, fmt.Errorf("OIDC discovery missing jwks_uri")
+	}
+	// OIDC Discovery §4.3: the advertised issuer MUST be identical to the
+	// configured issuer URL — otherwise a document served for one issuer could
+	// vouch for tokens minted by another. It also pins ID-token "iss".
+	if !issuerMatches(d.Issuer, h.s.IssuerURL) {
+		return nil, fmt.Errorf("OIDC discovery issuer %q does not match the configured issuer URL %q", d.Issuer, h.s.IssuerURL)
 	}
 	h.disc, h.discAt = &d, time.Now()
 	return h.disc, nil
@@ -368,8 +381,15 @@ func (h *OIDCHandler) Callback(c *gin.Context) {
 		}
 	}
 
-	if len(identity.Policies) > 0 {
-		h.syncUserPolicies(user, identity.Policies)
+	// Policies: when the IdP is the source of truth, replace — including with
+	// the empty set, so removing someone from every group in the IdP actually
+	// revokes their access at next login (offboarding must not fail open).
+	if identity.HasPolicies || h.s.PoliciesAuthoritative {
+		if err := syncUserPoliciesByName(user, identity.Policies); err != nil {
+			_ = audit.LogFailure(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, "policy sync failed: "+err.Error(), h.auditMeta(identity))
+			h.redirectWithError(c, "policy_sync_failed", "Could not apply your access policies; please try again or contact an administrator.")
+			return
+		}
 		database.DB.Preload("Policies").First(user, user.ID)
 	}
 
@@ -405,8 +425,9 @@ func (h *OIDCHandler) authenticate(ctx context.Context, code, codeVerifier, nonc
 	var userInfo map[string]interface{}
 	if tokenResp.AccessToken != "" {
 		if ui, uerr := h.fetchUserInfo(ctx, tokenResp.AccessToken); uerr == nil {
-			// A UserInfo response for a different subject must be ignored (OIDC Core 5.3.2).
-			if sub, _ := ui["sub"].(string); sub == "" || sub == idClaims["sub"] {
+			// UserInfo MUST carry "sub" and it MUST equal the ID token's
+			// subject; otherwise the response is not used (OIDC Core 5.3.2).
+			if sub, _ := ui["sub"].(string); sub != "" && sub == idClaims["sub"] {
 				userInfo = ui
 			}
 		}
@@ -504,10 +525,10 @@ func (h *OIDCHandler) verifyIDToken(idToken, expectedNonce string) (jwt.MapClaim
 	if err != nil {
 		return nil, err
 	}
-	opts := []jwt.ParserOption{jwt.WithExpirationRequired(), jwt.WithLeeway(2 * time.Minute)}
-	if disc.Issuer != "" {
-		opts = append(opts, jwt.WithIssuer(disc.Issuer))
+	if disc.Issuer == "" {
+		return nil, fmt.Errorf("OIDC discovery did not advertise an issuer")
 	}
+	opts := []jwt.ParserOption{jwt.WithExpirationRequired(), jwt.WithLeeway(2 * time.Minute), jwt.WithIssuer(disc.Issuer)}
 	if h.s.ClientID != "" {
 		opts = append(opts, jwt.WithAudience(h.s.ClientID))
 	}
@@ -603,6 +624,7 @@ func (h *OIDCHandler) buildIdentity(id jwt.MapClaims, ui map[string]interface{})
 		identity.Groups = claimToStringSlice(v)
 	}
 	if v, ok := get(h.s.PoliciesClaim); ok {
+		identity.HasPolicies = true
 		identity.Policies = claimToStringSlice(v)
 	}
 	identity.Username = deriveUsername(h.s.UsernameClaim, str, email, sub)
@@ -693,6 +715,13 @@ func (h *OIDCHandler) findOrCreateUser(identity *oidcIdentity, isAdmin bool) (*m
 	var user models.User
 	err := database.DB.Preload("Policies").Where("sso_provider = ? AND sso_id = ?", h.s.Key, identity.Subject).First(&user).Error
 	if err == nil {
+		// Keep the IdP-asserted address current: it (not the user-editable
+		// email column) is what link-by-email matches on.
+		if identity.Email != "" && identity.EmailVerified && user.SSOEmail != identity.Email {
+			if database.DB.Model(&user).Update("sso_email", identity.Email).Error == nil {
+				user.SSOEmail = identity.Email
+			}
+		}
 		return &user, nil
 	}
 	if err != gorm.ErrRecordNotFound {
@@ -700,15 +729,12 @@ func (h *OIDCHandler) findOrCreateUser(identity *oidcIdentity, isAdmin bool) (*m
 	}
 
 	if h.s.LinkByEmail && identity.EmailVerified && identity.Email != "" {
-		err := database.DB.Preload("Policies").
-			Where("sso_provider = ? AND LOWER(email) = LOWER(?)", h.s.Key, identity.Email).
-			Order("created_at ASC").First(&user).Error
-		if err == nil {
-			if uerr := database.DB.Model(&user).Updates(map[string]interface{}{"sso_id": identity.Subject, "sso_email": identity.Email}).Error; uerr != nil {
-				return nil, fmt.Errorf("failed to link account: %w", uerr)
-			}
-			user.SSOID = identity.Subject
-			return &user, nil
+		linked, lerr := linkSSOAccountByEmail(h.s.Key, identity.Subject, identity.Email)
+		if lerr != nil {
+			return nil, lerr
+		}
+		if linked != nil {
+			return linked, nil
 		}
 	}
 
@@ -724,7 +750,13 @@ func (h *OIDCHandler) findOrCreateUser(identity *oidcIdentity, isAdmin bool) (*m
 		return nil, fmt.Errorf("an account with email %s already exists; an administrator must link it or use a different address", email)
 	}
 
-	username := h.uniqueUsername(identity.Username)
+	username := uniqueUsername(identity.Username)
+	// sso_email is what link-by-email trusts later, so only record an
+	// address the IdP actually verified.
+	ssoEmail := ""
+	if identity.EmailVerified {
+		ssoEmail = identity.Email
+	}
 	user = models.User{
 		ID:          uuid.New(),
 		Username:    username,
@@ -733,7 +765,7 @@ func (h *OIDCHandler) findOrCreateUser(identity *oidcIdentity, isAdmin bool) (*m
 		IsAdmin:     isAdmin && h.s.AdminGroup != "",
 		SSOProvider: h.s.Key,
 		SSOID:       identity.Subject,
-		SSOEmail:    identity.Email,
+		SSOEmail:    ssoEmail,
 	}
 	if err := database.DB.Create(&user).Error; err != nil {
 		return nil, fmt.Errorf("failed to create user: %w", err)
@@ -742,17 +774,65 @@ func (h *OIDCHandler) findOrCreateUser(identity *oidcIdentity, isAdmin bool) (*m
 	return &user, nil
 }
 
+// linkSSOAccountByEmail links an unknown subject to an existing account of the
+// same provider whose *IdP-asserted* address (sso_email) matches. The
+// user-editable email column is never consulted (a user could otherwise set
+// their email to a victim's and be linked to — or have the victim linked to —
+// the wrong account). Exactly one match is required. Re-linking bumps the
+// account's TokenVersion (ending existing sessions and STS credentials) and
+// deactivates its long-lived access keys, since a different IdP identity now
+// controls the account. Returns (nil, nil) when there is no match.
+func linkSSOAccountByEmail(provider, subject, email string) (*models.User, error) {
+	var matches []models.User
+	if err := database.DB.Where("sso_provider = ? AND sso_email <> '' AND LOWER(sso_email) = LOWER(?)", provider, email).
+		Limit(2).Find(&matches).Error; err != nil {
+		return nil, fmt.Errorf("failed to look up user: %w", err)
+	}
+	switch len(matches) {
+	case 0:
+		return nil, nil
+	case 1:
+	default:
+		return nil, fmt.Errorf("more than one account matches %s; an administrator must link it manually", email)
+	}
+	user := matches[0]
+	err := database.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.User{}).Where("id = ?", user.ID).Updates(map[string]interface{}{
+			"sso_id":        subject,
+			"sso_email":     email,
+			"token_version": gorm.Expr("token_version + 1"),
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&models.AccessKey{}).Where("user_id = ? AND is_active = ?", user.ID, true).
+			Update("is_active", false).Error
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to link account: %w", err)
+	}
+	if err := database.DB.Preload("Policies").First(&user, "id = ?", user.ID).Error; err != nil {
+		return nil, fmt.Errorf("failed to reload linked account: %w", err)
+	}
+	return &user, nil
+}
+
 // uniqueUsername appends a numeric suffix when the sanitized base collides with
-// any existing account (local or SSO), so an IdP can never shadow a local user.
-func (h *OIDCHandler) uniqueUsername(base string) string {
+// any existing account (local or SSO), so an IdP can never shadow a local user,
+// or with a username still named as a principal in a bucket policy (so a new
+// account never inherits a deleted user's bucket grants).
+func uniqueUsername(base string) string {
+	base = sanitizeUsername(base)
 	if base == "" {
 		base = "user"
 	}
+	taken := func(candidate string) bool {
+		var n int64
+		database.DB.Model(&models.User{}).Where("LOWER(username) = LOWER(?)", candidate).Count(&n)
+		return n > 0 || UsernameReferencedByBucketPolicy(candidate)
+	}
 	candidate := base
 	for i := 1; i < 1000; i++ {
-		var n int64
-		database.DB.Model(&models.User{}).Where("username = ?", candidate).Count(&n)
-		if n == 0 {
+		if !taken(candidate) {
 			return candidate
 		}
 		candidate = fmt.Sprintf("%s%d", base, i)
@@ -760,17 +840,30 @@ func (h *OIDCHandler) uniqueUsername(base string) string {
 	return base + "-" + uuid.New().String()[:8]
 }
 
-// syncUserPolicies makes the IdP the source of truth for policy membership on
-// every login; names that don't match a bkt policy are ignored.
-func (h *OIDCHandler) syncUserPolicies(user *models.User, policyNames []string) {
-	if len(policyNames) == 0 {
-		return
+// syncUserPoliciesByName makes the IdP the source of truth for policy
+// membership: the user's direct policies are replaced by the bkt policies
+// named in policyNames — an empty list (or one with no matching names)
+// removes them all. Unknown names are ignored.
+func syncUserPoliciesByName(user *models.User, policyNames []string) error {
+	policies := []models.Policy{}
+	if len(policyNames) > 0 {
+		if err := database.DB.Where("name IN ?", policyNames).Find(&policies).Error; err != nil {
+			return fmt.Errorf("failed to look up policies: %w", err)
+		}
 	}
-	var policies []models.Policy
-	database.DB.Where("name IN ?", policyNames).Find(&policies)
-	if len(policies) > 0 {
-		_ = database.DB.Model(user).Association("Policies").Replace(policies)
+	if len(policies) == 0 {
+		return database.DB.Model(user).Association("Policies").Clear()
 	}
+	return database.DB.Model(user).Association("Policies").Replace(policies)
+}
+
+// issuerMatches compares an advertised issuer to the configured one, ignoring
+// a trailing slash only.
+func issuerMatches(advertised, configured string) bool {
+	if advertised == "" || configured == "" {
+		return false
+	}
+	return strings.TrimSuffix(advertised, "/") == strings.TrimSuffix(configured, "/")
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

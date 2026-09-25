@@ -38,8 +38,14 @@ backend:
   tls:
     enabled: true
     # Name of an existing TLS secret with keys tls.crt and tls.key
-    # Leave empty to auto-generate a self-signed cert via an init container
+    # Leave empty to auto-generate a self-signed cert (stable across upgrades)
     existingSecret: ""
+    # Set to true together with enabled=false when an ingress / reverse proxy
+    # terminates TLS in front of bkt. Production mode (GO_ENV=production)
+    # refuses plain HTTP otherwise — the chart fails at render time instead of
+    # letting the pod crash-loop. Only do this when the backend Service is not
+    # reachable except through that TLS-terminating proxy.
+    terminatedUpstream: false
 
   env:
     # REQUIRED — must be set before deploying
@@ -77,21 +83,36 @@ backend:
 
     # CORS — set to your frontend domain
     CORS_ALLOWED_ORIGINS: ""
-    # Login attempts per minute per IP (default 5; raise for shared egress IPs).
-    AUTH_RATE_LIMIT: "5"
+    # Login/register attempts per minute per client IP. Per-account lockout
+    # (login guard) still applies. Raise further for large shared egress IPs.
+    AUTH_RATE_LIMIT: "20"
+    # Token refreshes per minute per client IP (separate budget from logins).
+    AUTH_REFRESH_RATE_LIMIT: "30"
+    # Serve the Swagger UI at /api/docs. Empty = backend default (off in
+    # production). "true" publishes the full API description.
+    SWAGGER_ENABLED: ""
     # Detect content types from magic bytes and reject unsafe ones (off by
     # default — S3's contract is client-declared Content-Type).
     CONTENT_TYPE_ENFORCEMENT: "false"
 
     # Comma-separated CIDRs/IPs of reverse proxies whose X-Forwarded-For is
-    # trusted for rate limiting. Empty (default) = trust none.
+    # trusted for per-IP rate limiting.
+    #   - Empty + ingress.enabled: the chart trusts the private ranges
+    #     (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, fc00::/7)
+    #     so each user gets their own rate-limit bucket behind the ingress
+    #     controller. Narrow this to your ingress controller's pod CIDR: any
+    #     client in a trusted range can claim an arbitrary X-Forwarded-For.
+    #   - Empty + no ingress: trust none (the socket address is used).
+    # Without a correct value, every user behind the ingress shares ONE
+    # bucket and a few failed logins lock everyone out for a minute.
     TRUSTED_PROXIES: ""
     # Per-IP requests/minute on the S3 API listener. "0" (default) disables.
     S3_RATE_LIMIT: "0"
     # Days to keep audit log rows (default 90); "-1" (or any <= 0) disables pruning.
     AUDIT_RETENTION_DAYS: "90"
     # When set, GET /metrics requires "Authorization: Bearer <token>".
-    # Empty (default) leaves the endpoint open. Stored as a Secret.
+    # Empty (default) leaves the endpoint open (a warning is logged in
+    # production). Stored as a Secret.
     METRICS_TOKEN: ""
 
     # Generic OIDC SSO (any OpenID Connect IdP; authorization code + PKCE).
@@ -107,14 +128,17 @@ backend:
     OIDC_GROUPS_CLAIM: "groups"
     OIDC_ADMIN_GROUP: ""
     OIDC_USER_GROUP: ""
-    OIDC_POLICIES_CLAIM: "policies"
+    OIDC_POLICIES_CLAIM: ""      # empty = backend default "policies"; setting it makes the claim authoritative by default
     OIDC_LINK_BY_EMAIL: "false"
+    # Empty = backend default (true when OIDC_POLICIES_CLAIM is set).
+    OIDC_POLICIES_AUTHORITATIVE: ""
 
     # Google OIDC SSO
     GOOGLE_OIDC_ENABLED: "false"
     GOOGLE_CLIENT_ID: ""
     GOOGLE_CLIENT_SECRET: ""
     GOOGLE_REDIRECT_URL: ""
+    GOOGLE_ALLOWED_DOMAINS: ""
 
     # Vault OIDC SSO
     VAULT_OIDC_ENABLED: "false"
@@ -122,7 +146,13 @@ backend:
     VAULT_OIDC_PROVIDER_URL: ""
     VAULT_OIDC_REDIRECT_URL: ""
     VAULT_OIDC_SCOPES: "openid profile"
+    # Legacy Vault JWT login
+    VAULT_SSO_ENABLED: "false"
+    VAULT_JWT_AUDIENCE: ""
+    VAULT_JWT_ISSUER: ""
 
+    # Public console URL SSO flows redirect back to (e.g. https://bkt.example.com).
+    # Empty = https://localhost:9443 (only right for port-forwarding).
     FRONTEND_URL: ""
 
   # Persistent storage for local object storage. Holds object bytes, archived
@@ -144,13 +174,30 @@ backend:
   tolerations: []
   affinity: {}
 
-  # The published image currently runs as root (needed for /data ownership on
-  # first boot). Tighten here if your PSP/PSA policy requires it — e.g.
-  # podSecurityContext: {fsGroup: 1000} + containerSecurityContext:
-  # {runAsUser: 1000, runAsNonRoot: true} with a pre-chowned volume.
-  podSecurityContext: {}
+  # The backend image runs as the unprivileged uid/gid 10001. fsGroup makes
+  # the bucket PVC writable by it; OnRootMismatch re-owns volumes created by
+  # older (root-run) releases once, then skips the recursive walk. Volume
+  # types without fsGroup support (NFS, hostPath) must be chowned to
+  # 10001:10001 by hand. Satisfies the "restricted" Pod Security Standard.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
   containerSecurityContext:
     allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+
+  # Scratch space mounted at /tmp (the root filesystem is read-only). Async
+  # and multipart uploads are staged here, so size it for your largest
+  # in-flight uploads. Empty sizeLimit = node-default (unbounded).
+  tmpDir:
+    sizeLimit: ""
 
   # Which env vars should be treated as Secrets (stored in K8s Secret, not ConfigMap)
   secretEnvKeys:
@@ -222,6 +269,9 @@ postgresql:
     repository: postgres
     tag: "16-alpine"
     pullPolicy: IfNotPresent
+  # NOTE: traffic to the in-chart Postgres is NOT encrypted (sslmode=disable);
+  # it stays on the cluster network. Use NetworkPolicies, or an external
+  # database with externalDatabase.sslMode=verify-full, if that matters.
   auth:
     database: objectstore
     username: objectstore
@@ -245,4 +295,7 @@ externalDatabase:
   database: objectstore
   username: objectstore
   password: ""
+  # libpq sslmode for the backend -> external Postgres connection:
+  # disable | require | verify-ca | verify-full. (verify-* need the CA in the
+  # image trust store.) The in-chart Postgres always uses "disable" — see README.
   sslMode: require

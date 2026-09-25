@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"fmt"
 	"io"
 	"time"
 )
@@ -102,4 +103,68 @@ func NewStorageBackend(backend string, rootPath string, s3Endpoint, s3Region, s3
 	default:
 		return NewLocalStorage(rootPath), nil
 	}
+}
+
+// RangeReader is implemented by backends that can serve a byte range natively
+// (an S3 ranged GET, a file seek) instead of streaming and discarding the
+// bytes before the range start.
+type RangeReader interface {
+	// GetObjectRange returns exactly length bytes starting at offset start.
+	GetObjectRange(bucketName, objectKey string, start, length int64) (io.ReadCloser, error)
+}
+
+type limitedReadCloser struct {
+	io.Reader
+	io.Closer
+}
+
+// GetObjectRange reads [start, start+length) of an object, using the
+// backend's native ranged read when it has one and falling back to
+// GetObject + skip otherwise. The returned reader yields at most length bytes.
+func GetObjectRange(b StorageBackend, bucketName, objectKey string, start, length int64) (io.ReadCloser, error) {
+	if start < 0 || length < 0 {
+		return nil, fmt.Errorf("invalid range")
+	}
+	if rr, ok := b.(RangeReader); ok {
+		return rr.GetObjectRange(bucketName, objectKey, start, length)
+	}
+	rc, err := b.GetObject(bucketName, objectKey)
+	if err != nil {
+		return nil, err
+	}
+	if start > 0 {
+		if seeker, ok := rc.(io.Seeker); ok {
+			_, err = seeker.Seek(start, io.SeekStart)
+		} else {
+			_, err = io.CopyN(io.Discard, rc, start)
+		}
+		if err != nil {
+			_ = rc.Close()
+			return nil, fmt.Errorf("failed to reach range start: %w", err)
+		}
+	}
+	return limitedReadCloser{Reader: io.LimitReader(rc, length), Closer: rc}, nil
+}
+
+// PartSizer is implemented by backends that can report the sizes of an
+// in-progress multipart upload's parts cheaply (without hashing part data)
+// and completely (across every ListParts page).
+type PartSizer interface {
+	PartSizes(bucketName, objectKey, uploadID string) (map[int]int64, error)
+}
+
+// PartSizes returns partNumber -> size for an in-progress multipart upload.
+func PartSizes(b StorageBackend, bucketName, objectKey, uploadID string) (map[int]int64, error) {
+	if ps, ok := b.(PartSizer); ok {
+		return ps.PartSizes(bucketName, objectKey, uploadID)
+	}
+	parts, err := b.ListParts(bucketName, objectKey, uploadID)
+	if err != nil {
+		return nil, err
+	}
+	sizes := make(map[int]int64, len(parts))
+	for _, p := range parts {
+		sizes[p.PartNumber] = p.Size
+	}
+	return sizes, nil
 }

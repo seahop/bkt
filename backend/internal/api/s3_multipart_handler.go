@@ -8,7 +8,6 @@ import (
 	"bkt/internal/validation"
 	"encoding/xml"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -49,14 +48,14 @@ type CompleteMultipartUploadResult struct {
 }
 
 type ListPartsResult struct {
-	XMLName              xml.Name        `xml:"ListPartsResult"`
-	Xmlns                string          `xml:"xmlns,attr"`
-	Bucket               string          `xml:"Bucket"`
-	Key                  string          `xml:"Key"`
-	UploadId             string          `xml:"UploadId"`
-	StorageClass         string          `xml:"StorageClass"`
-	IsTruncated          bool            `xml:"IsTruncated"`
-	Parts                []ListPartEntry `xml:"Part"`
+	XMLName      xml.Name        `xml:"ListPartsResult"`
+	Xmlns        string          `xml:"xmlns,attr"`
+	Bucket       string          `xml:"Bucket"`
+	Key          string          `xml:"Key"`
+	UploadId     string          `xml:"UploadId"`
+	StorageClass string          `xml:"StorageClass"`
+	IsTruncated  bool            `xml:"IsTruncated"`
+	Parts        []ListPartEntry `xml:"Part"`
 }
 
 type ListMultipartUploadsResult struct {
@@ -129,6 +128,10 @@ func (h *S3APIHandler) CreateMultipartUpload(c *gin.Context) {
 		h.s3Error(c, "NoSuchBucket", "The specified bucket does not exist", bucketName, http.StatusNotFound)
 		return
 	}
+	if err := validateKeyForBucket(&bucket, objectKey); err != nil {
+		h.s3Error(c, "InvalidArgument", err.Error(), objectKey, http.StatusBadRequest)
+		return
+	}
 
 	contentType := c.GetHeader("Content-Type")
 	if contentType == "" {
@@ -181,28 +184,6 @@ func (h *S3APIHandler) CreateMultipartUpload(c *gin.Context) {
 		Key:      objectKey,
 		UploadId: uploadID,
 	})
-}
-
-// maxBytesReader wraps a reader and returns an error once more than `remaining`
-// bytes have been read, so an object/part body cannot exceed the configured
-// maximum even when the client understates its size (e.g. via chunked encoding
-// or a spoofed X-Amz-Decoded-Content-Length). Unlike io.LimitReader it fails
-// loudly rather than silently truncating.
-type maxBytesReader struct {
-	r         io.Reader
-	remaining int64
-}
-
-func (m *maxBytesReader) Read(p []byte) (int, error) {
-	if m.remaining < 0 {
-		return 0, fmt.Errorf("request body exceeds maximum allowed size")
-	}
-	n, err := m.r.Read(p)
-	m.remaining -= int64(n)
-	if m.remaining < 0 {
-		return n, fmt.Errorf("request body exceeds maximum allowed size")
-	}
-	return n, err
 }
 
 // authorizeMultipartUpload loads the tracked multipart upload, verifies it
@@ -286,22 +267,23 @@ func (h *S3APIHandler) UploadPart(c *gin.Context) {
 		return
 	}
 
-	size := c.Request.ContentLength
-	if size < 0 {
-		if v := c.GetHeader("X-Amz-Decoded-Content-Length"); v != "" {
-			size, _ = strconv.ParseInt(v, 10, 64)
-		}
+	// Same body pipeline as PutObject: aws-chunked decoding with chunk
+	// signature verification, the decoded (not encoded) length as the part
+	// size, and a guarded body that enforces that length and the size cap
+	// and withholds the final byte until everything verified.
+	upload, berr := prepareUploadBody(c, h.config.Storage.MaxFileSize)
+	if berr != nil {
+		h.s3Error(c, berr.code, berr.msg, objectKey, berr.status)
+		return
 	}
-	bodyReader := io.Reader(c.Request.Body)
-	if c.GetHeader("Content-Encoding") == "aws-chunked" {
-		bodyReader = newAWSChunkedReader(c.Request.Body)
-	}
-	// Bound the part body so a client can't stream past the configured max by
-	// understating its declared size.
-	bodyReader = &maxBytesReader{r: bodyReader, remaining: h.config.Storage.MaxFileSize}
+	body := newGuardedBody(upload.reader, upload.declared, h.config.Storage.MaxFileSize, nil)
 
-	etag, err := storageBackend.UploadPart(mpu.BucketName, mpu.ObjectKey, uploadID, partNumber, bodyReader, size)
-	if err != nil {
+	etag, err := storageBackend.UploadPart(mpu.BucketName, mpu.ObjectKey, uploadID, partNumber, body, upload.declared)
+	if err != nil || !body.Complete() {
+		if code, msg, status, ok := bodyFailure(body); ok {
+			h.s3Error(c, code, msg, objectKey, status)
+			return
+		}
 		h.s3Error(c, "InternalError", "Failed to upload part", objectKey, http.StatusInternalServerError)
 		return
 	}
@@ -317,7 +299,7 @@ func (h *S3APIHandler) CompleteMultipartUpload(c *gin.Context) {
 	objectKey := strings.TrimPrefix(c.Param("key"), "/")
 	uploadID := c.Query("uploadId")
 
-	body, err := io.ReadAll(io.LimitReader(c.Request.Body, 4<<20))
+	body, err := readBoundedBody(c.Request.Body, 4<<20)
 	if err != nil {
 		h.s3Error(c, "MalformedXML", "Failed to read request body", "", http.StatusBadRequest)
 		return
@@ -344,13 +326,42 @@ func (h *S3APIHandler) CompleteMultipartUpload(c *gin.Context) {
 	for i, p := range req.Parts {
 		parts[i] = storage.CompletedPart{PartNumber: p.PartNumber, ETag: strings.Trim(p.ETag, `"`)}
 	}
+	if len(parts) == 0 {
+		h.s3Error(c, "MalformedXML", "The XML you provided did not include any parts", objectKey, http.StatusBadRequest)
+		return
+	}
 
-	// Quota: assembled size is only known post-assembly, so enforce that the
-	// bucket isn't already at/over quota before assembling.
-	if qerr := checkBucketQuota(bucket, 0); qerr != nil {
+	// Serialize with other writers of the target key.
+	unlock := lockObjectKeys(mpu.BucketName, mpu.ObjectKey)
+	defer unlock()
+
+	// Quota: the assembled object's size is the sum of the listed parts.
+	partSizes, err := storage.PartSizes(storageBackend, mpu.BucketName, mpu.ObjectKey, uploadID)
+	if err != nil {
+		h.s3Error(c, "NoSuchUpload", "The specified upload does not exist", uploadID, http.StatusNotFound)
+		return
+	}
+	var assembledSize int64
+	seenParts := make(map[int]bool, len(parts))
+	for _, p := range parts {
+		sz, ok := partSizes[p.PartNumber]
+		if !ok {
+			h.s3Error(c, "InvalidPart", fmt.Sprintf("Part %d has not been uploaded", p.PartNumber), objectKey, http.StatusBadRequest)
+			return
+		}
+		if !seenParts[p.PartNumber] {
+			seenParts[p.PartNumber] = true
+			assembledSize += sz
+		}
+	}
+	reservation, qerr := reserveBucketQuota(bucket, assembledSize)
+	if qerr != nil {
 		h.s3Error(c, "QuotaExceeded", qerr.Error(), objectKey, http.StatusForbidden)
 		return
 	}
+	defer reservation.release()
+
+	hadPrior := currentObjectExists(bucket.ID, mpu.ObjectKey)
 
 	// Versioning: archive the current version before the assembled object
 	// replaces it.
@@ -365,45 +376,39 @@ func (h *S3APIHandler) CompleteMultipartUpload(c *gin.Context) {
 		h.s3Error(c, "InternalError", "Failed to complete multipart upload", objectKey, http.StatusInternalServerError)
 		return
 	}
-	newVersionID := ""
-	if bucket.Versioning == models.VersioningEnabled {
-		newVersionID = uuid.New().String()
-		c.Header("x-amz-version-id", newVersionID)
-	}
 
 	// Update DB metadata. If we can't read back the assembled object, that's a
-	// real failure — return an error rather than dereferencing a nil result.
+	// real failure — undo the write rather than leaving bytes without a row.
 	objInfo, err := storageBackend.GetObjectInfo(mpu.BucketName, mpu.ObjectKey)
 	if err != nil || objInfo == nil {
+		discardFailedWrite(storageBackend, bucket, mpu.ObjectKey, archivedVID, hadPrior)
 		h.s3Error(c, "InternalError", "Failed to finalize multipart upload", objectKey, http.StatusInternalServerError)
 		return
 	}
 
-	var existing models.Object
-	if database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, mpu.ObjectKey).First(&existing).Error == nil {
-		existing.Size = objInfo.Size
-		existing.ETag = objInfo.ETag
-		existing.ContentType = mpu.ContentType
-		existing.Metadata = mpu.Metadata
-		existing.VersionID = newVersionID
-		database.DB.Save(&existing)
-	} else {
-		database.DB.Create(&models.Object{
-			BucketID:    bucket.ID,
-			Key:         mpu.ObjectKey,
-			Size:        objInfo.Size,
-			ContentType: mpu.ContentType,
-			ETag:        objInfo.ETag,
-			StoragePath: mpu.ObjectKey,
-			Metadata:    mpu.Metadata,
-			VersionID:   newVersionID,
-		})
+	obj := models.Object{
+		BucketID:    bucket.ID,
+		Key:         mpu.ObjectKey,
+		Size:        objInfo.Size,
+		ContentType: mpu.ContentType,
+		ETag:        objInfo.ETag,
+		StoragePath: mpu.ObjectKey,
+		Metadata:    mpu.Metadata,
+		VersionID:   newCurrentVersionID(bucket),
+	}
+	if err := upsertCurrentObject(&obj); err != nil {
+		discardFailedWrite(storageBackend, bucket, mpu.ObjectKey, archivedVID, hadPrior)
+		h.s3Error(c, "InternalError", "Failed to save object metadata", objectKey, http.StatusInternalServerError)
+		return
+	}
+	if obj.VersionID != "" {
+		c.Header("x-amz-version-id", obj.VersionID)
 	}
 
 	// Mark multipart upload completed
 	database.DB.Model(&models.MultipartUpload{}).Where("upload_id = ?", uploadID).Update("status", "completed")
 
-	notifyObjectEvent(bucket, services.EventObjectCreated, mpu.ObjectKey, objInfo.Size, objInfo.ETag, newVersionID)
+	notifyObjectEvent(bucket, services.EventObjectCreated, mpu.ObjectKey, objInfo.Size, objInfo.ETag, obj.VersionID)
 
 	c.Header("x-amz-request-id", uuid.New().String())
 	c.XML(http.StatusOK, CompleteMultipartUploadResult{
@@ -615,6 +620,10 @@ func (h *S3APIHandler) UploadPartCopy(c *gin.Context) {
 	}
 	srcBucket := decoded[:slashIdx]
 	srcKey := decoded[slashIdx+1:]
+	if validation.IsReservedObjectKey(srcKey) {
+		h.s3Error(c, "NoSuchKey", "Source key does not exist", srcKey, http.StatusNotFound)
+		return
+	}
 
 	// Permission: GetObject on source
 	if allowed, _ := h.policyService.CheckObjectAccess(userUUID, srcBucket, srcKey, services.ActionGetObject); !allowed {
@@ -657,20 +666,23 @@ func (h *S3APIHandler) UploadPartCopy(c *gin.Context) {
 		return
 	}
 
-	reader, err := srcStorage.GetObject(srcBucket, srcKey)
+	// Early quota check: the part will count towards the destination bucket
+	// once the upload completes (Complete enforces it authoritatively).
+	qres, qerr := reserveBucketQuota(bucket, length)
+	if qerr != nil {
+		h.s3Error(c, "QuotaExceeded", qerr.Error(), objectKey, http.StatusForbidden)
+		return
+	}
+	qres.release()
+
+	// Native ranged read of the source (no streaming-and-discarding up to the
+	// range start on the S3 backend).
+	partReader, err := storage.GetObjectRange(srcStorage, srcBucket, srcKey, offset, length)
 	if err != nil {
 		h.s3Error(c, "InternalError", "Failed to read source object", srcKey, http.StatusInternalServerError)
 		return
 	}
-	defer reader.Close() //nolint:errcheck // best-effort close of read stream
-
-	if offset > 0 {
-		if _, err := io.CopyN(io.Discard, reader, offset); err != nil {
-			h.s3Error(c, "InternalError", "Failed to read source object", srcKey, http.StatusInternalServerError)
-			return
-		}
-	}
-	partReader := io.LimitReader(reader, length)
+	defer partReader.Close() //nolint:errcheck // best-effort close of read stream
 
 	etag, err := destStorage.UploadPart(mpu.BucketName, mpu.ObjectKey, uploadID, partNumber, partReader, length)
 	if err != nil {

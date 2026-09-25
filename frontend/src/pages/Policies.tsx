@@ -247,9 +247,27 @@ const S3_ACTIONS = {
     { action: 's3:PutBucketPolicy', label: 'Put Bucket Policy', description: 'Set bucket policies' },
     { action: 's3:GetBucketPolicy', label: 'Get Bucket Policy', description: 'Get bucket policies' },
   ],
+  // Bucket configuration changes (each is also covered by s3:*).
+  config: [
+    { action: 's3:PutBucketVersioning', label: 'Put Bucket Versioning', description: 'Enable or suspend versioning' },
+    { action: 's3:GetLifecycleConfiguration', label: 'Get Lifecycle Config', description: 'Read lifecycle (expiry) rules' },
+    { action: 's3:PutLifecycleConfiguration', label: 'Put Lifecycle Config', description: 'Change lifecycle (expiry) rules' },
+    { action: 's3:PutReplicationConfiguration', label: 'Put Replication Config', description: 'Configure bucket replication' },
+    { action: 's3:PutBucketNotification', label: 'Put Bucket Notification', description: 'Configure event notifications' },
+    { action: 's3:PutBucketObjectLockConfiguration', label: 'Put Object Lock Config', description: 'Configure object lock / retention' },
+    { action: 's3:PutBucketQuota', label: 'Put Bucket Quota', description: 'Set bucket size / object quotas' },
+  ],
 };
 
-const ALL_ACTIONS = [...S3_ACTIONS.read, ...S3_ACTIONS.write, ...S3_ACTIONS.bucket].map(a => a.action);
+type ActionCategory = keyof typeof S3_ACTIONS;
+const ACTION_CATEGORIES: { key: ActionCategory; title: string }[] = [
+  { key: 'read', title: 'read' },
+  { key: 'write', title: 'write' },
+  { key: 'bucket', title: 'bucket' },
+  { key: 'config', title: 'bucket config' },
+];
+const ACTION_INFO = ACTION_CATEGORIES.flatMap(c => S3_ACTIONS[c.key]);
+const ALL_ACTIONS = ACTION_INFO.map(a => a.action);
 
 // Type for per-bucket permissions in advanced mode
 type BucketPermissions = {
@@ -622,7 +640,7 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
     setSelectedActions(ALL_ACTIONS);
   };
 
-  const handleSelectCategoryActions = (category: 'read' | 'write' | 'bucket') => {
+  const handleSelectCategoryActions = (category: ActionCategory) => {
     const categoryActions = S3_ACTIONS[category].map(a => a.action);
     const allSelected = categoryActions.every(action => selectedActions.includes(action));
 
@@ -938,11 +956,11 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                {(['read', 'write', 'bucket'] as const).map((category) => (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+                {ACTION_CATEGORIES.map(({ key: category, title }) => (
                   <div key={category} className="space-y-2">
                     <div className="flex items-center justify-between mb-2">
-                      <h4 className="text-xs font-medium uppercase tracking-wider text-dark-textSecondary">{category}</h4>
+                      <h4 className="text-xs font-medium uppercase tracking-wider text-dark-textSecondary">{title}</h4>
                       <button
                         type="button"
                         onClick={() => handleSelectCategoryActions(category)}
@@ -1055,7 +1073,7 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
 
                           <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
                             {ALL_ACTIONS.map((action) => {
-                              const actionInfo = [...S3_ACTIONS.read, ...S3_ACTIONS.write, ...S3_ACTIONS.bucket].find(a => a.action === action);
+                              const actionInfo = ACTION_INFO.find(a => a.action === action);
                               return (
                                 <label key={action} className="flex items-center gap-2 cursor-pointer text-sm">
                                   <input

@@ -1,13 +1,13 @@
 package main
 
 import (
-	"context"
-	"log"
-	"net/http"
 	"bkt/internal/api"
 	"bkt/internal/config"
 	"bkt/internal/database"
 	"bkt/internal/metrics"
+	"context"
+	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -105,9 +105,14 @@ func main() {
 	if cfg.TLS.Enabled {
 		log.Printf("TLS enabled (cert=%s key=%s)", cfg.TLS.CertFile, cfg.TLS.KeyFile)
 	} else {
-		// Production config validation already rejects TLS_ENABLED=false, so this
-		// only happens in dev / behind a TLS-terminating proxy.
-		log.Println("TLS disabled — serving plain HTTP")
+		// Production config validation rejects TLS_ENABLED=false unless
+		// TLS_TERMINATED_UPSTREAM=true, so this only happens in dev or behind a
+		// TLS-terminating proxy.
+		if cfg.TLS.TerminatedUpstream {
+			log.Println("TLS disabled on the listeners — serving plain HTTP behind a TLS-terminating proxy (TLS_TERMINATED_UPSTREAM=true)")
+		} else {
+			log.Println("TLS disabled — serving plain HTTP")
+		}
 	}
 
 	consoleServer := startServer("console", consoleAddr, consoleRouter, cfg)

@@ -15,11 +15,11 @@ const maxRateLimiterClients = 50000
 
 // RateLimiter implements a simple token bucket rate limiter
 type RateLimiter struct {
-	mu       sync.RWMutex
-	clients  map[string]*bucket
-	rate     int           // requests per window
-	window   time.Duration // time window
-	cleanup  time.Duration // cleanup interval
+	mu      sync.RWMutex
+	clients map[string]*bucket
+	rate    int           // requests per window
+	window  time.Duration // time window
+	cleanup time.Duration // cleanup interval
 }
 
 type bucket struct {

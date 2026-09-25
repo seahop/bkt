@@ -50,11 +50,11 @@ func UserAgentValidationMiddleware() gin.HandlerFunc {
 
 		// Check for suspicious patterns that indicate malformed/malicious requests
 		suspiciousPatterns := []string{
-			"<script",  // XSS attempt
-			"javascript:", // XSS attempt
-			"${",       // Template injection
-			"../../",   // Path traversal attempt
-			"DROP TABLE", // SQL injection
+			"<script",      // XSS attempt
+			"javascript:",  // XSS attempt
+			"${",           // Template injection
+			"../../",       // Path traversal attempt
+			"DROP TABLE",   // SQL injection
 			"UNION SELECT", // SQL injection
 		}
 

@@ -4,41 +4,52 @@ RUN apk add --no-cache git
 
 WORKDIR /app
 
-COPY go.mod ./
+COPY go.mod go.sum ./
+RUN go mod download
 COPY . .
 
-RUN go mod tidy && go install github.com/swaggo/swag/cmd/swag@latest
+RUN go install github.com/swaggo/swag/cmd/swag@v1.16.3
 
-EXPOSE 9000
+EXPOSE 9000 9443
 
-CMD ["sh", "-c", "go mod tidy && swag init -g cmd/server/main.go -o docs/swagger --quiet 2>/dev/null || true && go run ./cmd/server"]
+# Dev (source bind-mounted at /app): never rewrite go.mod/go.sum on start —
+# run `go mod tidy` yourself when changing dependencies.
+CMD ["sh", "-c", "go mod download && (swag init -g cmd/server/main.go -o docs/swagger --quiet || echo 'WARNING: swag init failed; using committed docs') && go run ./cmd/server"]
 
-# Production builder stage
+# Production builder stage (API only — the published image is built from the
+# repository-root Dockerfile, which also embeds the UI).
 FROM golang:1.27-alpine AS builder
 
 RUN apk add --no-cache git
 
 WORKDIR /app
 
-COPY go.mod ./
+# Reproducible: download exactly what go.mod/go.sum pin (no `go mod tidy`).
+COPY go.mod go.sum ./
+RUN go mod download
 COPY . .
 
-RUN go mod tidy
+# Regenerate Swagger docs with the pinned swag version; the generated docs are
+# committed, so a failure falls back to them but is reported, not hidden.
+RUN go install github.com/swaggo/swag/cmd/swag@v1.16.3 && \
+    (swag init -g cmd/server/main.go -o docs/swagger --quiet || \
+     echo "WARNING: swag init failed — building with the committed docs/swagger")
 
-# Generate Swagger docs before compiling
-RUN go install github.com/swaggo/swag/cmd/swag@latest && \
-    swag init -g cmd/server/main.go -o docs/swagger --quiet 2>/dev/null || true
-
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o main ./cmd/server
 
 FROM alpine:latest AS production
 
-RUN apk --no-cache add ca-certificates wget
+RUN apk --no-cache upgrade && apk --no-cache add ca-certificates wget && \
+    addgroup -S -g 10001 bkt && adduser -S -D -H -u 10001 -G bkt -h /app -s /sbin/nologin bkt && \
+    mkdir -p /data/buckets && chown -R 10001:10001 /data
 
-WORKDIR /root/
+WORKDIR /app
 
 COPY --from=builder /app/main .
 
-EXPOSE 9000
+# 9443 = console, 9000 = S3 API (both unprivileged ports)
+EXPOSE 9000 9443
+
+USER 10001:10001
 
 CMD ["./main"]

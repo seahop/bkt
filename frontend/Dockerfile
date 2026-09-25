@@ -5,8 +5,8 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies (generate package-lock.json if needed)
-RUN npm install --package-lock-only && npm install
+# Install exactly the committed lockfile (package-lock.json is in git)
+RUN npm ci
 
 # Copy source code
 COPY . .
@@ -23,7 +23,7 @@ FROM node:26-alpine AS builder
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm install
+RUN npm ci
 
 COPY . .
 RUN npm run build

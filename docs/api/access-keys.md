@@ -198,6 +198,8 @@ bkt can mint **short-lived S3 access key pairs** for the authenticated user — 
 - Automatically **hard-deleted** after expiry
 - Optionally read-only
 - Issuance is recorded in the audit log as `sts.issue`
+- At most **10** active temporary credentials per user (`409` beyond that) and issuance is rate limited per user (`429`)
+- Bound to your session generation: a password change, account lock, or refresh-token reuse detection revokes all temporary credentials issued before it
 
 ### Issue Temporary Credentials
 

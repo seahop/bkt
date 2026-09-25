@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Database, AlertCircle } from 'lucide-react';
 import { useAuthStore } from '../store/authStore';
 import { userApi } from '../services/api';
+import { consumeSSOPending } from '../services/sso';
 
 // Friendlier copy for the denial codes the backend's OIDC flow can emit.
 const ERROR_HINTS: Record<string, string> = {
@@ -24,12 +25,25 @@ export default function SSOCallback({ provider }: { provider: string }) {
   const { setAuth } = useAuthStore();
   const [error, setError] = useState('');
   const [processing, setProcessing] = useState(true);
+  const handled = useRef(false);
 
   useEffect(() => {
+    // Run once per page load: the fragment and the SSO marker are single-use.
+    if (handled.current) return;
+    handled.current = true;
+
     const handleCallback = async () => {
       // Get data from URL fragment (hash)
       const hash = window.location.hash.substring(1); // Remove the #
       const params = new URLSearchParams(hash);
+
+      // Remove tokens from the address bar / history right away, whatever
+      // happens next.
+      window.history.replaceState(null, '', window.location.pathname);
+
+      // Login-CSRF guard: only accept a callback for an SSO login that THIS
+      // tab started (see consumeSSOPending). Consumed on every path.
+      const startedHere = consumeSSOPending();
 
       // Check for error from backend
       const errorCode = params.get('error');
@@ -49,8 +63,12 @@ export default function SSOCallback({ provider }: { provider: string }) {
         return;
       }
 
-      // Clear the hash from URL for security
-      window.history.replaceState(null, '', window.location.pathname);
+      if (!startedHere) {
+        // Tokens we did not ask for (e.g. a crafted link): discard them.
+        setError('This sign-in was not started from this browser tab, or it took longer than 10 minutes. For your safety it was ignored — please sign in again.');
+        setProcessing(false);
+        return;
+      }
 
       try {
         // Temporarily store token so we can make authenticated API call.

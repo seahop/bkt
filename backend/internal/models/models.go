@@ -49,6 +49,7 @@ type AccessKey struct {
 	SecretKeyEncrypted string    `gorm:"not null" json:"-"` // Never serialize secret (AES-encrypted for S3 auth)
 	Name               string    `gorm:"" json:"name,omitempty"`                // Human label to tell keys apart
 	Temporary          bool      `gorm:"default:false;index" json:"temporary,omitempty"` // bkt-STS short-lived credential: excluded from the key limit, hard-deleted after expiry
+	IssuerTokenVersion *int      `json:"-"`                                             // STS only: user's TokenVersion at issuance; a later bump (password change, lock, reuse detection) revokes it
 	IsActive           bool      `gorm:"default:true" json:"is_active"`
 	ReadOnly           bool      `gorm:"default:false" json:"read_only"`        // Deny mutating S3 operations
 	ExpiresAt          *time.Time `gorm:"index" json:"expires_at,omitempty"`    // nil = never expires

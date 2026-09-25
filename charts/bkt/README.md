@@ -43,9 +43,32 @@ chart's database, storing metadata ephemerally.
     `replicaCount` can be raised freely — migrations are advisory-locked.
 - **TLS**: enabled by default with a chart-generated self-signed cert (stable
   across upgrades). For real certificates set `backend.tls.existingSecret` to
-  a `kubernetes.io/tls` secret (e.g. from cert-manager), or set
-  `backend.tls.enabled=false` and terminate TLS at the ingress
-  (then also set `TRUSTED_PROXIES` so per-IP rate limiting sees real client IPs).
+  a `kubernetes.io/tls` secret (e.g. from cert-manager), or terminate TLS at
+  the ingress with **both** `backend.tls.enabled=false` and
+  `backend.tls.terminatedUpstream=true` (sets `TLS_TERMINATED_UPSTREAM=true`;
+  production mode refuses plain HTTP without it, and the chart fails to render
+  rather than letting the pod crash-loop). Only do this when the backend
+  Service is reachable solely through the ingress.
+- **Client IPs / rate limiting**: behind an ingress every request comes from
+  the ingress controller. When `ingress.enabled=true` and
+  `backend.env.TRUSTED_PROXIES` is empty, the chart trusts the private ranges
+  (`10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,fc00::/7`) so each
+  user gets their own bucket — narrow it to your ingress controller's pod CIDR
+  (anything inside a trusted range can spoof `X-Forwarded-For`). Login is
+  limited to `AUTH_RATE_LIMIT` (default 20/min per IP here) and token refresh
+  has its own budget (`AUTH_REFRESH_RATE_LIMIT`, default 30/min).
+- **Pod security**: the backend runs as uid/gid 10001 with a read-only root
+  filesystem, all capabilities dropped and `RuntimeDefault` seccomp (PSS
+  "restricted"). `fsGroup: 10001` with `fsGroupChangePolicy: OnRootMismatch`
+  re-owns a PVC written by an older root-run release once. Volume types that
+  ignore `fsGroup` (NFS, hostPath) must be chowned to `10001:10001` by hand.
+  `/tmp` is an `emptyDir` (upload staging) — size it with
+  `backend.tmpDir.sizeLimit`.
+- **Database TLS**: `externalDatabase.sslMode` (default `require`; use
+  `verify-full` where the CA is trusted) is passed as `DB_SSL_MODE`. The
+  **in-chart Postgres is not TLS-enabled** — the backend connects with
+  `sslmode=disable` over the cluster network. Protect it with a
+  NetworkPolicy, or use an external database for encrypted DB traffic.
 
 ## Ingress
 
@@ -77,23 +100,34 @@ backend:
     S3_PUBLIC_ENDPOINT: https://s3.bkt.example.com   # presigned URLs embed this
     FRONTEND_URL: https://bkt.example.com            # SSO redirects
     CORS_ALLOWED_ORIGINS: https://bkt.example.com
-    TRUSTED_PROXIES: 10.0.0.0/8                      # your ingress pod CIDR
+    TRUSTED_PROXIES: 10.42.0.0/16                    # your ingress controller pod CIDR
 ```
 
 When `backend.tls.enabled=true` (default) the upstream speaks HTTPS — add
 `nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"` to both ingresses.
+To terminate TLS at the ingress instead, set `backend.tls.enabled=false` and
+`backend.tls.terminatedUpstream=true`.
 
 ## Monitoring
 
 `serviceMonitor.enabled=true` creates a Prometheus Operator ServiceMonitor for
-`/metrics`. If you set `backend.env.METRICS_TOKEN`, give the scraper the same
-token via `serviceMonitor.bearerTokenSecret`.
+`/metrics`. Set `backend.env.METRICS_TOKEN` (the backend logs a warning in
+production when it is unset — the endpoint exposes bucket/object/user counts)
+and give the scraper the same token via `serviceMonitor.bearerTokenSecret`.
+
+The Swagger UI (`/api/docs/`) is off in production; set
+`backend.env.SWAGGER_ENABLED=true` to serve it.
 
 ## Values worth knowing
 
 | Value | Default | Meaning |
 |---|---|---|
-| `backend.env.JWT_SECRET` / `ENCRYPTION_KEY` / `ADMIN_PASSWORD` | — | **Required.** Stored in a Secret. |
+| `backend.env.JWT_SECRET` / `ENCRYPTION_KEY` / `ADMIN_PASSWORD` | — | **Required.** Stored in a Secret. `JWT_SECRET`/`ENCRYPTION_KEY` must be ≥ 32 chars (`openssl rand -hex 32`) |
+| `backend.tls.enabled` / `backend.tls.terminatedUpstream` | `true` / `false` | Backend TLS; set `false`/`true` to terminate TLS at the ingress |
+| `backend.env.TRUSTED_PROXIES` | auto with ingress | CIDRs whose `X-Forwarded-For` is trusted (see above) |
+| `backend.env.AUTH_RATE_LIMIT` / `AUTH_REFRESH_RATE_LIMIT` | `20` / `30` | Per-IP per-minute login / token-refresh budgets |
+| `backend.env.SWAGGER_ENABLED` | `""` (off in production) | Serve Swagger UI at `/api/docs/` |
+| `externalDatabase.sslMode` | `require` | `DB_SSL_MODE` for an external database |
 | `postgresql.auth.password` | — | **Required** with the in-chart DB. |
 | `backend.env.STORAGE_BACKEND` | `local` | `local` (PVC) or `s3` (external S3, stateless pods) |
 | `backend.env.S3_SSE` | `false` | Request SSE-S3 (AES256) on writes through the S3 backend |

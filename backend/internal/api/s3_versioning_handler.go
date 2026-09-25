@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/xml"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -26,14 +27,14 @@ type versioningConfigXML struct {
 }
 
 type listVersionsResult struct {
-	XMLName         xml.Name           `xml:"ListVersionsResult"`
-	Xmlns           string             `xml:"xmlns,attr"`
-	Name            string             `xml:"Name"`
-	Prefix          string             `xml:"Prefix"`
-	MaxKeys         int                `xml:"MaxKeys"`
-	IsTruncated     bool               `xml:"IsTruncated"`
-	Versions        []versionEntryXML  `xml:"Version"`
-	DeleteMarkers   []deleteMarkerXML  `xml:"DeleteMarker"`
+	XMLName       xml.Name          `xml:"ListVersionsResult"`
+	Xmlns         string            `xml:"xmlns,attr"`
+	Name          string            `xml:"Name"`
+	Prefix        string            `xml:"Prefix"`
+	MaxKeys       int               `xml:"MaxKeys"`
+	IsTruncated   bool              `xml:"IsTruncated"`
+	Versions      []versionEntryXML `xml:"Version"`
+	DeleteMarkers []deleteMarkerXML `xml:"DeleteMarker"`
 }
 
 type versionEntryXML struct {
@@ -53,26 +54,29 @@ type deleteMarkerXML struct {
 	LastModified string `xml:"LastModified"`
 }
 
-// PutBucketVersioning handles PUT /{bucket}?versioning (owner or admin).
+// PutBucketVersioning handles PUT /{bucket}?versioning (admin, or
+// s3:PutBucketVersioning on the bucket).
 func (h *S3APIHandler) PutBucketVersioning(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	userID, _ := c.Get("user_id")
 	userUUID := userID.(uuid.UUID)
-	isAdminVal, _ := c.Get("is_admin")
-	admin, _ := isAdminVal.(bool)
 
 	var bucket models.Bucket
 	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
 		h.s3Error(c, "NoSuchBucket", "The specified bucket does not exist", bucketName, http.StatusNotFound)
 		return
 	}
-	if !admin && bucket.OwnerID != userUUID {
-		h.s3Error(c, "AccessDenied", "Only the bucket owner can change versioning", bucketName, http.StatusForbidden)
+	if !authorizeBucketConfig(h.policyService, userUUID, bucket.Name, services.ActionPutBucketVersioning) {
+		h.s3Error(c, "AccessDenied", "Access Denied", bucketName, http.StatusForbidden)
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(c.Request.Body, 64*1024))
+	body, err := readBoundedBody(c.Request.Body, 64*1024)
 	if err != nil {
+		if errors.Is(err, errRequestBodyTooLarge) {
+			h.s3Error(c, "MaxMessageLengthExceeded", "Your request was too big", "", http.StatusBadRequest)
+			return
+		}
 		h.s3Error(c, "InvalidRequest", "Failed to read request body", "", http.StatusBadRequest)
 		return
 	}

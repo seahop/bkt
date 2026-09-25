@@ -14,6 +14,7 @@ import (
 
 	"bkt/internal/config"
 	"bkt/internal/database"
+	"bkt/internal/logger"
 	"bkt/internal/models"
 	"bkt/internal/services"
 
@@ -34,6 +35,14 @@ func NewGoogleOAuthHandler(cfg *config.Config) *GoogleOAuthHandler {
 		handler.workspaceService = NewGoogleWorkspaceService(cfg)
 	}
 
+	if cfg.GoogleSSO.OIDCEnabled && len(cfg.GoogleSSO.AllowedDomains) == 0 {
+		if cfg.Auth.AllowRegistration {
+			logger.Warn("Google SSO: GOOGLE_ALLOWED_DOMAINS is not set and ALLOW_REGISTRATION=true — ANY Google account can sign in and will be auto-provisioned. Set GOOGLE_ALLOWED_DOMAINS to your Workspace domain(s).", nil)
+		} else {
+			logger.Warn("Google SSO: GOOGLE_ALLOWED_DOMAINS is not set — new Google users will NOT be auto-provisioned (only already-linked accounts can sign in). Set GOOGLE_ALLOWED_DOMAINS to your Workspace domain(s).", nil)
+		}
+	}
+
 	return handler
 }
 
@@ -42,6 +51,7 @@ type GoogleUserInfo struct {
 	ID            string `json:"id"`
 	Email         string `json:"email"`
 	VerifiedEmail bool   `json:"verified_email"`
+	HostedDomain  string `json:"hd"` // Google Workspace domain; empty for consumer accounts
 	Name          string `json:"name"`
 	GivenName     string `json:"given_name"`
 	FamilyName    string `json:"family_name"`
@@ -140,8 +150,15 @@ func (h *GoogleOAuthHandler) HandleGoogleCallback(c *gin.Context) {
 	}
 
 	// Verify email is verified
-	if !userInfo.VerifiedEmail {
+	if !userInfo.VerifiedEmail || userInfo.ID == "" || userInfo.Email == "" {
 		h.redirectWithError(c, "email_not_verified", "Your Google email must be verified to use SSO")
+		return
+	}
+
+	// Restrict to the configured Workspace domain(s).
+	if !googleDomainAllowed(h.config.GoogleSSO.AllowedDomains, userInfo) {
+		_ = services.NewAuditService().LogFailure(c, uuid.Nil, userInfo.Email, "auth.login", "user", "", userInfo.Email, "google sso denied: domain not allowed", map[string]interface{}{"provider": "google", "hd": userInfo.HostedDomain})
+		h.redirectWithError(c, "domain_not_allowed", "This Google account's domain is not allowed to sign in to bkt.")
 		return
 	}
 
@@ -158,26 +175,26 @@ func (h *GoogleOAuthHandler) HandleGoogleCallback(c *gin.Context) {
 		return
 	}
 
-	// Sync policies from Google Workspace groups (if enabled)
+	// Sync policies from Google Workspace groups (if enabled). Workspace is
+	// then the source of truth: the mapped set always replaces the user's
+	// policies — even when empty, so removing someone from their groups
+	// revokes access — and a failed lookup fails the login rather than
+	// silently keeping stale (possibly revoked) policies.
 	if h.workspaceService != nil {
 		ctx := c.Request.Context()
 
-		// Fetch user's groups from Google Workspace
 		groups, err := h.workspaceService.GetUserGroups(ctx, userInfo.Email)
-		if err == nil && len(groups) > 0 {
-			// Map groups to policy names
-			policyNames := h.workspaceService.GetPolicyNamesFromGroups(groups)
-
-			// Sync policies
-			if len(policyNames) > 0 {
-				if err := h.workspaceService.SyncUserPoliciesFromGroups(user, policyNames); err != nil {
-					h.redirectWithError(c, "policy_sync_failed", err.Error())
-					return
-				}
-				// Reload user with updated policies
-				database.DB.Preload("Policies").First(user, user.ID)
-			}
+		if err != nil {
+			logger.Warn("Google Workspace group lookup failed; refusing login", map[string]interface{}{"email": userInfo.Email, "error": err.Error()})
+			h.redirectWithError(c, "policy_sync_failed", "Could not verify your Google Workspace group membership; please try again later.")
+			return
 		}
+		policyNames := h.workspaceService.GetPolicyNamesFromGroups(groups)
+		if err := h.workspaceService.SyncUserPoliciesFromGroups(user, policyNames); err != nil {
+			h.redirectWithError(c, "policy_sync_failed", err.Error())
+			return
+		}
+		database.DB.Preload("Policies").First(user, user.ID)
 	}
 
 	_ = services.NewAuditService().LogSuccess(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, map[string]interface{}{"provider": "google"})
@@ -208,6 +225,33 @@ func (h *GoogleOAuthHandler) redirectWithError(c *gin.Context, errCode, errDesc 
 	c.Redirect(http.StatusTemporaryRedirect, redirectURL)
 }
 
+// googleDomainAllowed enforces GOOGLE_ALLOWED_DOMAINS: both the Workspace
+// hosted-domain ("hd") and the email's domain must be in the list. With no
+// list configured every domain passes here (provisioning is then gated by
+// ALLOW_REGISTRATION in findOrCreateUser).
+func googleDomainAllowed(allowed []string, ui *GoogleUserInfo) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	in := func(d string) bool {
+		d = strings.ToLower(strings.TrimSpace(d))
+		if d == "" {
+			return false
+		}
+		for _, a := range allowed {
+			if d == a {
+				return true
+			}
+		}
+		return false
+	}
+	at := strings.LastIndex(ui.Email, "@")
+	if at < 0 {
+		return false
+	}
+	return in(ui.HostedDomain) && in(ui.Email[at+1:])
+}
+
 // findOrCreateUser finds an existing SSO user or creates a new one
 func (h *GoogleOAuthHandler) findOrCreateUser(userInfo *GoogleUserInfo) (*models.User, bool, error) {
 	var user models.User
@@ -219,10 +263,24 @@ func (h *GoogleOAuthHandler) findOrCreateUser(userInfo *GoogleUserInfo) (*models
 		return &user, false, nil
 	}
 
+	// Without a domain allow-list, any Google account on the internet could
+	// otherwise self-provision; only do so when registration is open.
+	if len(h.config.GoogleSSO.AllowedDomains) == 0 && !h.config.Auth.AllowRegistration {
+		return nil, false, fmt.Errorf("no bkt account is linked to this Google account and self-registration is disabled; ask an administrator")
+	}
+
+	// The email column is unique: refuse clearly rather than failing on the
+	// constraint (or silently shadowing a local account).
+	var clash int64
+	database.DB.Model(&models.User{}).Where("LOWER(email) = LOWER(?)", userInfo.Email).Count(&clash)
+	if clash > 0 {
+		return nil, false, fmt.Errorf("an account with email %s already exists; an administrator must link it or use a different address", userInfo.Email)
+	}
+
 	// User doesn't exist - create new user (MinIO approach: no policies by default)
 	user = models.User{
 		ID:          uuid.New(),
-		Username:    generateUsernameFromEmail(userInfo.Email),
+		Username:    uniqueUsername(generateUsernameFromEmail(userInfo.Email)),
 		Email:       userInfo.Email,
 		Password:    "", // No password for SSO users
 		IsAdmin:     false,
@@ -232,7 +290,7 @@ func (h *GoogleOAuthHandler) findOrCreateUser(userInfo *GoogleUserInfo) (*models
 	}
 
 	if err := database.DB.Create(&user).Error; err != nil {
-		return nil, false, fmt.Errorf("failed to create user: %w", err)
+		return nil, false, fmt.Errorf("failed to create user account")
 	}
 
 	// Reload user with policies (will be empty)

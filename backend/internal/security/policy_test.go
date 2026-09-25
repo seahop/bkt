@@ -1,6 +1,9 @@
 package security
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestGlobMatch(t *testing.T) {
 	cases := []struct {
@@ -153,5 +156,117 @@ func TestValidatePrincipal(t *testing.T) {
 	bad := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"x"},"Action":["s3:GetObject"],"Resource":["*"]}]}`
 	if _, err := ValidatePolicyDocument(bad); err == nil {
 		t.Errorf("expected error for object-form principal")
+	}
+}
+
+func TestValidatePolicyDocumentRejectsUnsupportedElements(t *testing.T) {
+	bad := map[string]string{
+		"condition":               `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:ListBucket"],"Resource":["arn:aws:s3:::b"],"Condition":{"StringLike":{"s3:prefix":["home/alice/*"]}}}]}`,
+		"condition lowercase key": `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:ListBucket"],"Resource":["*"],"condition":{"Bool":{"aws:SecureTransport":"true"}}}]}`,
+		"NotAction":               `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","NotAction":["s3:DeleteObject"],"Action":["s3:GetObject"],"Resource":["*"]}]}`,
+		"NotResource":             `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject"],"Resource":["*"],"NotResource":["arn:aws:s3:::secret/*"]}]}`,
+		"NotPrincipal":            `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","NotPrincipal":"bob","Action":["s3:GetObject"],"Resource":["*"]}]}`,
+		"unknown statement field": `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject"],"Resource":["*"],"Foo":1}]}`,
+		"unknown top-level field": `{"Version":"2012-10-17","Bar":true,"Statement":[{"Effect":"Allow","Action":["s3:GetObject"],"Resource":["*"]}]}`,
+		"trailing data":           `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject"],"Resource":["*"]}]} {}`,
+	}
+	for name, doc := range bad {
+		if _, err := ValidatePolicyDocument(doc); err == nil {
+			t.Errorf("%s: expected validation error", name)
+		}
+	}
+	_, err := ValidatePolicyDocument(bad["condition"])
+	if err == nil || !strings.Contains(err.Error(), "Condition is not supported yet") {
+		t.Errorf("expected a clear Condition error, got %v", err)
+	}
+}
+
+func TestValidatePolicyDocumentAcceptsSupportedForms(t *testing.T) {
+	good := []string{
+		// Frontend policy editor / template shapes.
+		`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject","s3:ListBucket"],"Resource":["arn:aws:s3:::*","arn:aws:s3:::*/*"]}]}`,
+		`{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Action":["s3:*"],"Resource":["arn:aws:s3:::b","arn:aws:s3:::b/*"]}]}`,
+		// Optional AWS elements that bkt accepts.
+		`{"Version":"2012-10-17","Id":"doc-1","Statement":[{"Sid":"S1","Effect":"Allow","Principal":["alice"],"Action":["s3:GetObject"],"Resource":["*"]}]}`,
+		// An empty Condition block constrains nothing and is harmless.
+		`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject"],"Resource":["*"],"Condition":{}}]}`,
+		// Field names match case-insensitively (encoding/json semantics).
+		`{"version":"2012-10-17","statement":[{"effect":"Allow","action":["s3:GetObject"],"resource":["*"]}]}`,
+	}
+	for _, g := range good {
+		if _, err := ValidatePolicyDocument(g); err != nil {
+			t.Errorf("expected valid, got %v (%s)", err, g)
+		}
+	}
+}
+
+func TestParseStoredPolicyDocumentIsLenient(t *testing.T) {
+	docs := []string{
+		`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:ListBucket"],"Resource":["*"],"Condition":{"StringLike":{"s3:prefix":["a/*"]}}}]}`,
+		`{"Version":"2012-10-17","Statement":[{"Effect":"Deny","NotAction":["s3:GetObject"],"Resource":["*"]}]}`,
+		`{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Action":["s3:*"],"NotResource":["arn:aws:s3:::public/*"]}]}`,
+	}
+	for _, d := range docs {
+		if _, err := ParseStoredPolicyDocument(d); err != nil {
+			t.Errorf("stored document should parse: %v (%s)", err, d)
+		}
+	}
+}
+
+func mustParseStored(t *testing.T, doc string) *PolicyDocument {
+	t.Helper()
+	p, err := ParseStoredPolicyDocument(doc)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	return p
+}
+
+func TestEvaluatePolicyFailSafeOnUnsupportedElements(t *testing.T) {
+	ctx := func(action, resource string) *PolicyEvaluationContext {
+		return &PolicyEvaluationContext{Username: "alice", Action: action, Resource: resource}
+	}
+
+	// Allow + Condition must NOT grant (the condition might have narrowed it).
+	allowCond := mustParseStored(t, `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:*"],"Resource":["*"],"Condition":{"StringLike":{"s3:prefix":["home/alice/*"]}}}]}`)
+	if got := EvaluatePolicy(allowCond, ctx("s3:GetObject", "arn:aws:s3:::b/other/k")); got != PolicyNoMatch {
+		t.Errorf("Allow with Condition must not grant, got %v", got)
+	}
+
+	// Deny + Condition still denies (conservatively, as if unconditional).
+	denyCond := mustParseStored(t, `{"Version":"2012-10-17","Statement":[
+		{"Effect":"Allow","Action":["s3:*"],"Resource":["*"]},
+		{"Effect":"Deny","Action":["s3:DeleteObject"],"Resource":["*"],"Condition":{"Bool":{"aws:MultiFactorAuthPresent":"false"}}}]}`)
+	if got := EvaluatePolicy(denyCond, ctx("s3:DeleteObject", "arn:aws:s3:::b/k")); got != PolicyDeny {
+		t.Errorf("Deny with Condition must deny, got %v", got)
+	}
+	if got := EvaluatePolicy(denyCond, ctx("s3:GetObject", "arn:aws:s3:::b/k")); got != PolicyAllow {
+		t.Errorf("unrelated action should still be allowed, got %v", got)
+	}
+
+	// Allow + NotResource must not grant.
+	allowNotRes := mustParseStored(t, `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject"],"NotResource":["arn:aws:s3:::secret/*"]}]}`)
+	if got := EvaluatePolicy(allowNotRes, ctx("s3:GetObject", "arn:aws:s3:::public/k")); got != PolicyNoMatch {
+		t.Errorf("Allow with NotResource must not grant, got %v", got)
+	}
+
+	// Deny + NotAction denies everything (including the excepted action).
+	denyNotAction := mustParseStored(t, `{"Version":"2012-10-17","Statement":[
+		{"Effect":"Allow","Action":["s3:*"],"Resource":["*"]},
+		{"Effect":"Deny","NotAction":["s3:GetObject"],"Resource":["arn:aws:s3:::b/*"]}]}`)
+	for _, a := range []string{"s3:PutObject", "s3:GetObject"} {
+		if got := EvaluatePolicy(denyNotAction, ctx(a, "arn:aws:s3:::b/k")); got != PolicyDeny {
+			t.Errorf("Deny with NotAction should deny %s conservatively, got %v", a, got)
+		}
+	}
+	// ...but its Resource still scopes it.
+	if got := EvaluatePolicy(denyNotAction, ctx("s3:PutObject", "arn:aws:s3:::other/k")); got != PolicyAllow {
+		t.Errorf("Deny scoped to b/* should not affect other bucket, got %v", got)
+	}
+
+	// Deny + NotPrincipal applies to everyone.
+	denyNotPrincipal := mustParseStored(t, `{"Version":"2012-10-17","Statement":[{"Effect":"Deny","NotPrincipal":"alice","Action":["s3:*"],"Resource":["*"]}]}`)
+	if got := EvaluatePolicy(denyNotPrincipal, ctx("s3:GetObject", "arn:aws:s3:::b/k")); got != PolicyDeny {
+		t.Errorf("Deny with NotPrincipal should apply to everyone, got %v", got)
 	}
 }

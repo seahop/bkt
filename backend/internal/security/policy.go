@@ -2,7 +2,9 @@ package security
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 )
@@ -10,6 +12,7 @@ import (
 // PolicyDocument represents an IAM-style policy document
 type PolicyDocument struct {
 	Version   string            `json:"Version"`
+	Id        string            `json:"Id,omitempty"` // optional AWS policy identifier (informational only)
 	Statement []PolicyStatement `json:"Statement"`
 }
 
@@ -20,7 +23,37 @@ type PolicyStatement struct {
 	Principal interface{}            `json:"Principal,omitempty"` // Optional: "*" or [usernames]. Absent = applies to all. Used by bucket policies to scope a statement to specific users.
 	Action    []string               `json:"Action"`              // Actions this statement applies to
 	Resource  []string               `json:"Resource"`            // Resources this statement applies to
-	Condition map[string]interface{} `json:"Condition,omitempty"` // Conditions for the statement
+	Condition map[string]interface{} `json:"Condition,omitempty"` // NOT evaluated — rejected on create/update (see validateStatement)
+
+	// Unsupported IAM elements. They are declared (rather than left unknown) so
+	// that a document using them is rejected with a clear message on
+	// create/update, and so a legacy stored document that contains them is
+	// evaluated fail-safe instead of having them silently dropped — dropping
+	// NotAction/NotResource/NotPrincipal would make an Allow broader than
+	// written.
+	NotPrincipal interface{} `json:"NotPrincipal,omitempty"`
+	NotAction    interface{} `json:"NotAction,omitempty"`
+	NotResource  interface{} `json:"NotResource,omitempty"`
+}
+
+// unsupportedElements lists the statement elements bkt cannot evaluate
+// faithfully (Condition and the Not* forms). Empty when the statement only
+// uses supported elements.
+func (s *PolicyStatement) unsupportedElements() []string {
+	var out []string
+	if len(s.Condition) > 0 {
+		out = append(out, "Condition")
+	}
+	if s.NotPrincipal != nil {
+		out = append(out, "NotPrincipal")
+	}
+	if s.NotAction != nil {
+		out = append(out, "NotAction")
+	}
+	if s.NotResource != nil {
+		out = append(out, "NotResource")
+	}
+	return out
 }
 
 // PolicyEffect represents the effect of a policy
@@ -52,15 +85,48 @@ type PolicyEvaluationContext struct {
 	Conditions map[string]string
 }
 
-// ValidatePolicyDocument validates a policy document for security and correctness
+// ValidatePolicyDocument strictly validates a policy document submitted for
+// create/update (user, group, and bucket policies). Unknown elements are
+// rejected (field names match case-insensitively, as encoding/json does), and
+// so are elements bkt cannot evaluate faithfully — Condition, NotPrincipal,
+// NotAction, NotResource — because silently ignoring them would grant more
+// than the document says (e.g. an AWS "home folder" policy whose s3:prefix
+// Condition would otherwise be dropped, granting the whole bucket).
 func ValidatePolicyDocument(documentJSON string) (*PolicyDocument, error) {
+	return parsePolicyDocument(documentJSON, true)
+}
+
+// ParseStoredPolicyDocument parses a policy document that is already stored
+// (for evaluation). It is lenient about elements that strict validation
+// rejects so that a legacy document is still evaluated — fail-safe — rather
+// than skipped as a whole (skipping would also drop its Deny statements).
+// EvaluatePolicy never lets an Allow statement with an unsupported element
+// grant, and applies a Deny statement with one conservatively.
+func ParseStoredPolicyDocument(documentJSON string) (*PolicyDocument, error) {
+	return parsePolicyDocument(documentJSON, false)
+}
+
+func parsePolicyDocument(documentJSON string, strict bool) (*PolicyDocument, error) {
 	// Check max size (prevent DoS via large policies)
 	if len(documentJSON) > 10240 { // 10KB max
 		return nil, fmt.Errorf("policy document too large (max 10KB)")
 	}
 
 	var policy PolicyDocument
-	if err := json.Unmarshal([]byte(documentJSON), &policy); err != nil {
+	if strict {
+		dec := json.NewDecoder(strings.NewReader(documentJSON))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&policy); err != nil {
+			if strings.Contains(err.Error(), "unknown field") {
+				return nil, fmt.Errorf("unsupported policy element: %w", err)
+			}
+			return nil, fmt.Errorf("invalid JSON: %w", err)
+		}
+		// Reject trailing data (json.Unmarshal would; a Decoder stops after one value).
+		if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("invalid JSON: unexpected data after the policy document")
+		}
+	} else if err := json.Unmarshal([]byte(documentJSON), &policy); err != nil {
 		return nil, fmt.Errorf("invalid JSON: %w", err)
 	}
 
@@ -83,8 +149,8 @@ func ValidatePolicyDocument(documentJSON string) (*PolicyDocument, error) {
 	}
 
 	// Validate each statement
-	for i, statement := range policy.Statement {
-		if err := validateStatement(&statement, i); err != nil {
+	for i := range policy.Statement {
+		if err := validateStatement(&policy.Statement[i], strict); err != nil {
 			return nil, fmt.Errorf("statement %d: %w", i, err)
 		}
 	}
@@ -92,15 +158,30 @@ func ValidatePolicyDocument(documentJSON string) (*PolicyDocument, error) {
 	return &policy, nil
 }
 
-// validateStatement validates a single policy statement
-func validateStatement(stmt *PolicyStatement, index int) error {
+// validateStatement validates a single policy statement. In strict mode
+// (create/update) statements using unsupported elements are rejected; in
+// lenient mode (stored documents) they are accepted and EvaluatePolicy
+// handles them fail-safe.
+func validateStatement(stmt *PolicyStatement, strict bool) error {
 	// Validate Effect
 	if stmt.Effect != string(EffectAllow) && stmt.Effect != string(EffectDeny) {
 		return fmt.Errorf("effect must be 'Allow' or 'Deny', got: %s", stmt.Effect)
 	}
 
-	// Validate Action (must have at least one)
-	if len(stmt.Action) == 0 {
+	unsupported := stmt.unsupportedElements()
+	if strict && len(unsupported) > 0 {
+		for _, el := range unsupported {
+			if el == "Condition" {
+				//nolint:staticcheck // ST1005: starts with the policy element name "Condition"
+				return fmt.Errorf("Condition is not supported yet: remove the Condition block (bkt does not evaluate conditions, so the statement would apply more broadly than written)")
+			}
+		}
+		return fmt.Errorf("%s is not supported: use Principal/Action/Resource instead", unsupported[0])
+	}
+
+	// Validate Action (must have at least one). A legacy stored statement
+	// using NotAction may have none; it is handled by EvaluatePolicy.
+	if len(stmt.Action) == 0 && (strict || stmt.NotAction == nil) {
 		return fmt.Errorf("statement must have at least one action")
 	}
 
@@ -120,8 +201,8 @@ func validateStatement(stmt *PolicyStatement, index int) error {
 		}
 	}
 
-	// Validate Resource (must have at least one)
-	if len(stmt.Resource) == 0 {
+	// Validate Resource (must have at least one); same NotResource caveat.
+	if len(stmt.Resource) == 0 && (strict || stmt.NotResource == nil) {
 		return fmt.Errorf("statement must have at least one resource")
 	}
 
@@ -309,7 +390,19 @@ func EvaluatePolicy(policy *PolicyDocument, ctx *PolicyEvaluationContext) Policy
 
 	result := PolicyNoMatch
 
-	for _, statement := range policy.Statement {
+	for i := range policy.Statement {
+		statement := &policy.Statement[i]
+		// Fail-safe handling of elements bkt cannot evaluate (only reachable
+		// for legacy stored documents — new ones are rejected on write): an
+		// Allow must never grant, since its Condition/Not* might have narrowed
+		// it; a Deny is applied as if the unsupported element were absent
+		// (i.e. at least as broadly as written).
+		if len(statement.unsupportedElements()) > 0 {
+			if statement.Effect == string(EffectDeny) && matchesDenyConservatively(statement, ctx) {
+				return PolicyDeny
+			}
+			continue
+		}
 		// Principal scopes a statement to specific users (used by bucket policies);
 		// absent Principal applies to everyone.
 		if !matchesPrincipal(statement.Principal, ctx.Username) {
@@ -330,6 +423,23 @@ func EvaluatePolicy(policy *PolicyDocument, ctx *PolicyEvaluationContext) Policy
 	}
 
 	return result
+}
+
+// matchesDenyConservatively decides whether a Deny statement carrying an
+// unsupported element applies. Conditions are treated as always true;
+// NotPrincipal/NotAction/NotResource are treated as matching everything
+// (when the positive form is absent). This can only deny more, never less.
+func matchesDenyConservatively(st *PolicyStatement, ctx *PolicyEvaluationContext) bool {
+	if st.NotPrincipal == nil && !matchesPrincipal(st.Principal, ctx.Username) {
+		return false
+	}
+	if len(st.Action) > 0 && !matchesAction(st.Action, ctx.Action) {
+		return false
+	}
+	if len(st.Resource) > 0 && !matchesResource(st.Resource, ctx.Resource) {
+		return false
+	}
+	return true
 }
 
 // matchesPrincipal reports whether a statement's Principal applies to the given

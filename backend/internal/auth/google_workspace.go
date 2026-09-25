@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"bkt/internal/config"
-	"bkt/internal/database"
 	"bkt/internal/models"
 
 	"golang.org/x/oauth2/google"
@@ -119,35 +118,14 @@ func (s *GoogleWorkspaceService) GetPolicyNamesFromGroups(groups []string) []str
 	return policyNames
 }
 
-// SyncUserPoliciesFromGroups syncs user policies based on their Google Workspace groups
+// SyncUserPoliciesFromGroups replaces the user's policies with those mapped
+// from their Google Workspace groups. An empty list removes all of them:
+// Workspace is the source of truth, so leaving every mapped group must revoke
+// access rather than keep the previous set.
 func (s *GoogleWorkspaceService) SyncUserPoliciesFromGroups(user *models.User, policyNames []string) error {
-	if len(policyNames) == 0 {
-		return nil
-	}
-
-	// Look up policies by name
-	var policies []models.Policy
-	result := database.DB.Where("name IN ?", policyNames).Find(&policies)
-	if result.Error != nil {
-		return fmt.Errorf("failed to look up policies: %w", result.Error)
-	}
-
-	// Log which policies were found vs requested (helpful for debugging)
-	if len(policies) != len(policyNames) {
-		foundNames := make([]string, len(policies))
-		for i, p := range policies {
-			foundNames[i] = p.Name
-		}
-		// Debug logging (uncomment for troubleshooting)
-		// fmt.Printf("[GoogleWorkspace] Policy sync for %s: requested %v, found %v\n",
-		// 	user.Email, policyNames, foundNames)
-	}
-
-	// Replace user's policies with those from Google Workspace groups
-	if err := database.DB.Model(user).Association("Policies").Replace(policies); err != nil {
+	if err := syncUserPoliciesByName(user, policyNames); err != nil {
 		return fmt.Errorf("failed to sync policies: %w", err)
 	}
-
 	return nil
 }
 

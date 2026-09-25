@@ -22,11 +22,19 @@ To access bkt locally, run:
 Then open https://localhost:9443 in your browser.
 {{- end }}
 
+{{- if eq (.Values.backend.env.SWAGGER_ENABLED | default "" | toString) "true" }}
 API Documentation (Swagger UI):
   https://<console-host>/api/docs/
+{{- else }}
+API Documentation: Swagger UI is off in production (set backend.env.SWAGGER_ENABLED=true to serve it at /api/docs/).
+{{- end }}
 
 Prometheus Metrics:
   https://<console-host>/metrics
+{{- if not .Values.backend.env.METRICS_TOKEN }}
+  WARNING: backend.env.METRICS_TOKEN is not set — /metrics is unauthenticated
+  (bucket/object/user counts). Set it and give Prometheus the same bearer token.
+{{- end }}
 
 Default admin credentials (change after first login):
   Username: {{ .Values.backend.env.ADMIN_USERNAME | default "admin" }}
@@ -50,6 +58,27 @@ switch to STORAGE_BACKEND=s3.
 S3 API note: only the console is behind the ingress. Enable ingress.s3 (own
 hostname) or expose the s3 service port via LoadBalancer for aws-cli/SDK
 access, and set backend.env.S3_PUBLIC_ENDPOINT so presigned URLs work.
+{{- end }}
+
+{{- if and .Values.ingress.enabled (not .Values.backend.env.TRUSTED_PROXIES) }}
+
+Rate limiting behind the ingress: TRUSTED_PROXIES defaulted to the private
+ranges ({{ include "bkt.trustedProxies" . }})
+so each user gets their own per-IP rate-limit bucket. Narrow it to your
+ingress controller's pod CIDR via backend.env.TRUSTED_PROXIES — any client
+inside a trusted range can spoof X-Forwarded-For.
+{{- end }}
+{{- if and (not .Values.ingress.enabled) (not .Values.backend.env.TRUSTED_PROXIES) }}
+
+Rate limiting: TRUSTED_PROXIES is empty. If you put a proxy/LB in front of
+the console, set backend.env.TRUSTED_PROXIES to its address/CIDR — otherwise
+all users share the proxy's rate-limit bucket.
+{{- end }}
+{{- if .Values.postgresql.enabled }}
+
+Database: the in-chart PostgreSQL connection is unencrypted (sslmode=disable,
+cluster-internal). Restrict it with a NetworkPolicy, or use an external
+database with externalDatabase.sslMode=verify-full.
 {{- end }}
 
 Documentation: https://bkt.tips

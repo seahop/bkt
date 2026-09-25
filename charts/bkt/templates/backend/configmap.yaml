@@ -10,10 +10,12 @@ data:
   DB_PORT: {{ include "bkt.databasePort" . | quote }}
   DB_NAME: {{ include "bkt.databaseName" . | quote }}
   DB_USER: {{ include "bkt.databaseUser" . | quote }}
-  DB_SSL_MODE: {{ if .Values.postgresql.enabled }}"disable"{{ else }}"require"{{ end }}
+  {{- /* In-chart Postgres has no TLS configured (cluster-internal traffic). */}}
+  DB_SSL_MODE: {{ if .Values.postgresql.enabled }}"disable"{{ else }}{{ .Values.externalDatabase.sslMode | default "require" | quote }}{{ end }}
   SERVER_PORT: "9000"
   GO_ENV: {{ .Values.backend.env.GO_ENV | default "production" | quote }}
   TLS_ENABLED: {{ .Values.backend.tls.enabled | toString | quote }}
+  TLS_TERMINATED_UPSTREAM: {{ .Values.backend.tls.terminatedUpstream | default false | toString | quote }}
   ADMIN_USERNAME: {{ .Values.backend.env.ADMIN_USERNAME | default "admin" | quote }}
   ADMIN_EMAIL: {{ .Values.backend.env.ADMIN_EMAIL | default "admin@localhost" | quote }}
   ALLOW_REGISTRATION: {{ .Values.backend.env.ALLOW_REGISTRATION | default "false" | quote }}
@@ -28,10 +30,12 @@ data:
   S3_SSE: {{ .Values.backend.env.S3_SSE | default "false" | quote }}
   S3_BUCKETS: {{ .Values.backend.env.S3_BUCKETS | default "" | quote }}
   S3_PUBLIC_ENDPOINT: {{ .Values.backend.env.S3_PUBLIC_ENDPOINT | default "" | quote }}
-  AUTH_RATE_LIMIT: {{ .Values.backend.env.AUTH_RATE_LIMIT | default "5" | quote }}
+  AUTH_RATE_LIMIT: {{ .Values.backend.env.AUTH_RATE_LIMIT | default "20" | quote }}
+  AUTH_REFRESH_RATE_LIMIT: {{ .Values.backend.env.AUTH_REFRESH_RATE_LIMIT | default "30" | quote }}
+  SWAGGER_ENABLED: {{ .Values.backend.env.SWAGGER_ENABLED | default "" | quote }}
   CONTENT_TYPE_ENFORCEMENT: {{ .Values.backend.env.CONTENT_TYPE_ENFORCEMENT | default "false" | quote }}
   CORS_ALLOWED_ORIGINS: {{ .Values.backend.env.CORS_ALLOWED_ORIGINS | default "" | quote }}
-  TRUSTED_PROXIES: {{ .Values.backend.env.TRUSTED_PROXIES | default "" | quote }}
+  TRUSTED_PROXIES: {{ include "bkt.trustedProxies" . | quote }}
   S3_RATE_LIMIT: {{ .Values.backend.env.S3_RATE_LIMIT | default "0" | quote }}
   AUDIT_RETENTION_DAYS: {{ .Values.backend.env.AUDIT_RETENTION_DAYS | default "90" | quote }}
   OIDC_ENABLED: {{ .Values.backend.env.OIDC_ENABLED | default "" | quote }}
@@ -44,14 +48,22 @@ data:
   OIDC_GROUPS_CLAIM: {{ .Values.backend.env.OIDC_GROUPS_CLAIM | default "groups" | quote }}
   OIDC_ADMIN_GROUP: {{ .Values.backend.env.OIDC_ADMIN_GROUP | default "" | quote }}
   OIDC_USER_GROUP: {{ .Values.backend.env.OIDC_USER_GROUP | default "" | quote }}
-  OIDC_POLICIES_CLAIM: {{ .Values.backend.env.OIDC_POLICIES_CLAIM | default "policies" | quote }}
+  OIDC_POLICIES_CLAIM: {{ .Values.backend.env.OIDC_POLICIES_CLAIM | default "" | quote }}
   OIDC_LINK_BY_EMAIL: {{ .Values.backend.env.OIDC_LINK_BY_EMAIL | default "false" | quote }}
+  OIDC_POLICIES_AUTHORITATIVE: {{ .Values.backend.env.OIDC_POLICIES_AUTHORITATIVE | default "" | quote }}
   GOOGLE_OIDC_ENABLED: {{ .Values.backend.env.GOOGLE_OIDC_ENABLED | default "false" | quote }}
   GOOGLE_CLIENT_ID: {{ .Values.backend.env.GOOGLE_CLIENT_ID | default "" | quote }}
   GOOGLE_REDIRECT_URL: {{ .Values.backend.env.GOOGLE_REDIRECT_URL | default "" | quote }}
+  GOOGLE_ALLOWED_DOMAINS: {{ .Values.backend.env.GOOGLE_ALLOWED_DOMAINS | default "" | quote }}
   VAULT_OIDC_ENABLED: {{ .Values.backend.env.VAULT_OIDC_ENABLED | default "false" | quote }}
   VAULT_OIDC_CLIENT_ID: {{ .Values.backend.env.VAULT_OIDC_CLIENT_ID | default "" | quote }}
   VAULT_OIDC_PROVIDER_URL: {{ .Values.backend.env.VAULT_OIDC_PROVIDER_URL | default "" | quote }}
   VAULT_OIDC_REDIRECT_URL: {{ .Values.backend.env.VAULT_OIDC_REDIRECT_URL | default "" | quote }}
   VAULT_OIDC_SCOPES: {{ .Values.backend.env.VAULT_OIDC_SCOPES | default "openid profile" | quote }}
+  VAULT_SSO_ENABLED: {{ .Values.backend.env.VAULT_SSO_ENABLED | default "false" | quote }}
+  VAULT_JWT_AUDIENCE: {{ .Values.backend.env.VAULT_JWT_AUDIENCE | default "" | quote }}
+  VAULT_JWT_ISSUER: {{ .Values.backend.env.VAULT_JWT_ISSUER | default "" | quote }}
   FRONTEND_URL: {{ .Values.backend.env.FRONTEND_URL | default "" | quote }}
+{{- if and (not .Values.backend.tls.enabled) (not .Values.backend.tls.terminatedUpstream) (has (lower (.Values.backend.env.GO_ENV | default "production")) (list "production" "prod")) }}
+{{- fail "backend.tls.enabled=false in production: the backend refuses to serve plain HTTP. If an ingress/reverse proxy terminates TLS in front of bkt, also set backend.tls.terminatedUpstream=true; otherwise keep backend.tls.enabled=true." }}
+{{- end }}

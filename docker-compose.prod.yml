@@ -23,6 +23,9 @@ services:
       POSTGRES_USER: objectstore
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_DB: objectstore
+      # postgres:18 defaults PGDATA to /var/lib/postgresql/18/docker and refuses
+      # to start when a volume is mounted at the old path; pin the old layout.
+      PGDATA: /var/lib/postgresql/data
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
       - ./docker/postgres-init-ssl.sh:/postgres-init-ssl.sh:ro
@@ -36,6 +39,30 @@ services:
       - bkt-network
     restart: unless-stopped
 
+  # One-shot, runs before the backend on every `up`. The backend image runs as
+  # the unprivileged uid/gid 10001, so:
+  #   - bucket data written by older releases (which ran as root) is re-owned
+  #     once (no-op when already owned), and
+  #   - the TLS cert/key from setup.py (key is 0600, owned by the host user) is
+  #     copied into a volume readable only by uid 10001.
+  init-perms:
+    image: ghcr.io/seahop/bkt-backend:${BKT_VERSION:-latest}
+    user: "0:0"
+    entrypoint:
+      - sh
+      - -ec
+      - |
+        [ "$$(stat -c %u:%g /data/buckets)" = 10001:10001 ] || chown -R 10001:10001 /data/buckets
+        cp -a /certs-src/. /certs/
+        chown -R 10001:10001 /certs
+        chmod 0500 /certs
+        find /certs -type f -name '*.key' -exec chmod 0400 {} +
+    volumes:
+      - ./data/buckets:/data/buckets
+      - ./certs/backend:/certs-src:ro
+      - backend-certs:/certs
+    restart: "no"
+
   backend:
     image: ghcr.io/seahop/bkt-backend:${BKT_VERSION:-latest}
     container_name: bkt-backend
@@ -45,9 +72,10 @@ services:
       DB_USER: objectstore
       DB_PASSWORD: ${DB_PASSWORD}
       DB_NAME: objectstore
-      DB_SSL_MODE: require
-      JWT_SECRET: ${JWT_SECRET}
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      DB_SSL_MODE: ${DB_SSL_MODE:-require}
+      # Required — the backend refuses empty/short/placeholder secrets.
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env (openssl rand -hex 32)}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in .env (openssl rand -hex 32)}
       SERVER_PORT: 9000
       GO_ENV: production
       # TLS Configuration
@@ -60,6 +88,10 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@localhost}
       ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-false}
+      AUTH_RATE_LIMIT: ${AUTH_RATE_LIMIT:-}
+      AUTH_REFRESH_RATE_LIMIT: ${AUTH_REFRESH_RATE_LIMIT:-}
+      # Swagger UI at /api/docs is off in production unless set to "true".
+      SWAGGER_ENABLED: ${SWAGGER_ENABLED:-}
       # Comma-separated proxy CIDRs/IPs whose X-Forwarded-For is trusted for
       # rate limiting; empty (default) = trust none.
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
@@ -68,6 +100,7 @@ services:
       # Days to keep audit log rows (backend default 90; <= 0 disables pruning).
       AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-}
       # When set, GET /metrics requires "Authorization: Bearer <token>".
+      # Strongly recommended in production (a warning is logged when unset).
       METRICS_TOKEN: ${METRICS_TOKEN:-}
       # Base URL embedded in console-generated presigned URLs (empty = derive
       # from the request host + S3 API port, correct when clients reach the
@@ -89,20 +122,34 @@ services:
       OIDC_GROUPS_CLAIM: ${OIDC_GROUPS_CLAIM:-groups}
       OIDC_ADMIN_GROUP: ${OIDC_ADMIN_GROUP:-}
       OIDC_USER_GROUP: ${OIDC_USER_GROUP:-}
-      OIDC_POLICIES_CLAIM: ${OIDC_POLICIES_CLAIM:-policies}
+      OIDC_POLICIES_CLAIM: ${OIDC_POLICIES_CLAIM:-}  # empty = backend default "policies" (non-authoritative)
       OIDC_LINK_BY_EMAIL: ${OIDC_LINK_BY_EMAIL:-false}
+      # Empty = backend default (authoritative when OIDC_POLICIES_CLAIM is set)
+      OIDC_POLICIES_AUTHORITATIVE: ${OIDC_POLICIES_AUTHORITATIVE:-}
       # Google OIDC
       GOOGLE_OIDC_ENABLED: ${GOOGLE_OIDC_ENABLED:-false}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_REDIRECT_URL: ${GOOGLE_REDIRECT_URL:-}
+      GOOGLE_ALLOWED_DOMAINS: ${GOOGLE_ALLOWED_DOMAINS:-}
+      GOOGLE_WORKSPACE_ENABLED: ${GOOGLE_WORKSPACE_ENABLED:-false}
+      GOOGLE_SERVICE_ACCOUNT_KEY_FILE: ${GOOGLE_SERVICE_ACCOUNT_KEY_FILE:-}
+      GOOGLE_WORKSPACE_ADMIN_EMAIL: ${GOOGLE_WORKSPACE_ADMIN_EMAIL:-}
+      GOOGLE_POLICY_SYNC_MODE: ${GOOGLE_POLICY_SYNC_MODE:-direct}
+      GOOGLE_POLICY_GROUP_PREFIX: ${GOOGLE_POLICY_GROUP_PREFIX:-}
       # Vault OIDC
+      VAULT_ADDR: ${VAULT_ADDR:-}
       VAULT_OIDC_ENABLED: ${VAULT_OIDC_ENABLED:-false}
+      # Legacy Vault JWT login (POST /api/auth/vault/login)
+      VAULT_SSO_ENABLED: ${VAULT_SSO_ENABLED:-false}
+      VAULT_JWT_AUDIENCE: ${VAULT_JWT_AUDIENCE:-}
+      VAULT_JWT_ISSUER: ${VAULT_JWT_ISSUER:-}
       VAULT_OIDC_CLIENT_ID: ${VAULT_OIDC_CLIENT_ID:-}
       VAULT_OIDC_PROVIDER_URL: ${VAULT_OIDC_PROVIDER_URL:-}
       VAULT_OIDC_REDIRECT_URL: ${VAULT_OIDC_REDIRECT_URL:-}
       VAULT_OIDC_SCOPES: ${VAULT_OIDC_SCOPES:-openid profile}
-      FRONTEND_URL: ${FRONTEND_URL:-https://localhost}
+      # Where SSO flows land after login: the console origin users browse to.
+      FRONTEND_URL: ${FRONTEND_URL:-https://localhost:9443}
       # Storage
       STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
       STORAGE_ROOT: /data/buckets
@@ -114,15 +161,18 @@ services:
       S3_BUCKET_PREFIX: ${S3_BUCKET_PREFIX:-}
       S3_USE_SSL: ${S3_USE_SSL:-true}
       S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}
+      S3_BUCKETS: ${S3_BUCKETS:-}
     ports:
       - "9443:9443"  # console: web UI + REST API (the backend image serves the UI)
       - "9000:9000"  # S3-compatible API (aws-cli / s3fs)
     volumes:
       - ./data/buckets:/data/buckets
-      - ./certs/backend:/certs:ro
+      - backend-certs:/certs:ro   # populated from ./certs/backend by init-perms
     depends_on:
       postgres:
         condition: service_healthy
+      init-perms:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "-qO-", "--no-check-certificate", "https://localhost:9443/health"]
       interval: 30s
@@ -139,3 +189,6 @@ services:
 networks:
   bkt-network:
     driver: bridge
+
+volumes:
+  backend-certs:

@@ -16,6 +16,7 @@ your bkt access key with `s3.addressing_style = path` (see
 - [Temporary credentials (bkt-STS)](#temporary-credentials-bkt-sts)
 - [Replication (bucket mirroring)](#replication-bucket-mirroring)
 - [Server-side encryption](#server-side-encryption)
+- [Object keys and uploads](#object-keys-and-uploads)
 
 ---
 
@@ -45,6 +46,10 @@ aws s3api delete-object --bucket my-bucket --key doc.txt --endpoint-url $BKT --p
 # Delete a specific version id → permanent removal of that version
 ```
 
+Changing versioning requires admin or the `s3:PutBucketVersioning` policy
+action; bucket settings in general are authorized by policy, not by bucket
+ownership (see [bucket-configuration actions](../api/policies.md#bucket-configuration-actions)).
+
 Semantics match AWS: deleting the current version by id promotes the
 next-newest; deleting the newest delete marker resurrects the object.
 Version ids are UUIDs; objects written before versioning report id `null`.
@@ -71,16 +76,28 @@ removes them). The sweep runs hourly, plus once shortly after startup.
 `get-bucket-lifecycle-configuration` / `delete-bucket-lifecycle` with the AWS
 XML subset (`Expiration.Days`, `Filter.Prefix`,
 `NoncurrentVersionExpiration.NoncurrentDays`). Multiple enabled rules return
-`NotImplemented`.
+`NotImplemented`. Requires admin or `s3:PutLifecycleConfiguration`
+(`s3:GetLifecycleConfiguration` to read it).
+
+Noncurrent expiry never removes a key's *latest* delete marker while older
+versions of that key remain (it would resurrect the object); the marker is
+removed only once it is the key's sole remaining version (AWS
+`ExpiredObjectDeleteMarker` behavior). Retained versions are skipped.
 
 ## Storage quotas
 
 `quota_bytes` caps the total size of a bucket's **current** objects (version
 storage is not counted). Writes that would exceed it are rejected with
-`QuotaExceeded` before any bytes are stored. 0 = unlimited.
+`QuotaExceeded` before any bytes are stored. 0 = unlimited. The quota applies
+to every write path — PUT, copy, multipart completion (sum of the parts),
+console and async uploads — and chunked uploads are measured on the bytes
+actually received, not the declared size. Concurrent writers are accounted
+together within one bkt process; with several replicas the quota can be
+overshot by at most the uploads in flight.
 
 **Console**: bucket Settings → Quota.
-**API**: `PUT /api/buckets/{name}/settings` `{"quota_bytes": 1073741824}`.
+**API**: `PUT /api/buckets/{name}/settings` `{"quota_bytes": 1073741824}`
+(admin or `s3:PutBucketQuota`).
 
 ## Retention (WORM)
 
@@ -88,7 +105,13 @@ storage is not counted). Writes that would exceed it are rejected with
 version is younger than the window, version-addressed deletions are refused,
 lifecycle purges skip it, versioning cannot be suspended, and the bucket
 cannot be deleted. Plain deletes still create markers — data is preserved,
-only hidden. Requires versioning to be enabled first; 0 turns it off.
+only hidden. Requires versioning to be enabled first.
+
+The window can be **raised at any time**, but **lowered or cleared (0) only
+once no object or version is still inside the current window** — otherwise
+the request fails with 409. So retention cannot be switched off to purge
+data it protects; wait until the newest data has aged out. Requires admin or
+`s3:PutBucketObjectLockConfiguration`.
 
 This is a bucket-level setting, not the AWS Object Lock API — S3
 `x-amz-object-lock-*` headers are not implemented.
@@ -133,7 +156,8 @@ With a webhook secret set, the raw body is signed:
 `X-Bkt-Signature: sha256=<hex HMAC-SHA256>`. Delivery is asynchronous
 (queued, 3 retries with backoff) and never blocks uploads; persistent
 failures are logged, not queued forever. Configure in bucket Settings →
-Notifications, or via `PUT /api/buckets/{name}/settings`.
+Notifications, or via `PUT /api/buckets/{name}/settings` (admin or
+`s3:PutBucketNotification`).
 
 ## Groups
 
@@ -157,8 +181,21 @@ are deleted automatically after expiry. The secret is shown once.
 `replicate_to` mirrors a bucket's current objects one-way into another bkt
 bucket: a periodic sync (every 5 minutes) copies new/changed objects and
 mirrors deletions. The target is managed by replication — treat it as
-read-only. Guards prevent self-targets, cycles, and two sources sharing a
-target.
+read-only. Guards prevent self-targets, cycles (including longer chains such
+as A→B→C→A), and two sources sharing a target.
+
+Configuring it requires admin, or `s3:PutReplicationConfiguration` on the
+source **plus** `s3:GetObject` on all source objects and `s3:PutObject` +
+`s3:DeleteObject` on all target objects — you can only mirror data you could
+copy yourself into a bucket you could overwrite yourself.
+
+Safety on the target: when the target has versioning enabled, replication
+archives the target's current version before overwriting it and mirrors
+deletions as delete markers, so target history is never destroyed — a
+retention (WORM) target keeps every retained version (a good pattern for an
+immutable backup copy). The target's quota applies to replicated copies
+(objects that would exceed it are skipped and logged). On an unversioned
+target, overwrites and deletions are permanent, as with any mirror.
 
 For cross-region or cross-provider DR, back the *target* bucket with a
 different S3 configuration — the mirror then lands on that provider.
@@ -174,3 +211,26 @@ Configure in bucket Settings → Replication.
   substantial project and is deliberately not half-implemented.)
 - Stored S3 *credentials* are always encrypted with `ENCRYPTION_KEY`,
   independent of the above.
+
+## Object keys and uploads
+
+- Keys must be canonical paths: empty segments (`a//b`), `.`/`..` segments,
+  a leading `/` and backslashes are rejected, so one object can never be
+  reached under two spellings. The `.bkt-versions/` prefix is reserved for
+  bkt's version storage. On the **local** backend, S3 "folder marker" keys
+  ending in `/` are rejected (folders are implicit; the console creates
+  `<folder>/.keep`).
+- `aws-chunked` uploads must send `X-Amz-Decoded-Content-Length` (as on AWS);
+  the decoded length is enforced exactly. Signed streaming uploads
+  (`STREAMING-AWS4-HMAC-SHA256-PAYLOAD[-TRAILER]`) have every chunk signature
+  verified and are refused on presigned requests; `STREAMING-UNSIGNED-PAYLOAD-TRAILER`
+  (aws-cli v2 over TLS) is supported. A body that fails verification is never
+  stored.
+- Moving or renaming objects and folders requires `s3:GetObject` +
+  `s3:DeleteObject` on every source key and `s3:PutObject` on every
+  destination key (bucket ownership grants nothing), never overwrites an
+  existing destination, and in versioned buckets leaves a delete marker at the
+  source.
+- Non-admin bucket listings omit the owner's account details and the storage
+  configuration; the webhook URL and replication target are shown only to
+  callers allowed to change them.

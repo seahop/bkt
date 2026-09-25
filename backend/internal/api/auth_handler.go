@@ -72,6 +72,15 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		})
 		return
 	}
+	// A username still named in a bucket policy (e.g. left over from a
+	// deleted account) would inherit that policy's grants — don't hand it out.
+	if auth.UsernameReferencedByBucketPolicy(req.Username) {
+		c.JSON(http.StatusConflict, models.ErrorResponse{
+			Error:   "User already exists",
+			Message: "Username or email is already taken",
+		})
+		return
+	}
 
 	// Hash password
 	hashedPassword, err := auth.HashPassword(req.Password, h.config.Auth.BcryptCost)
@@ -143,9 +152,13 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	}
 
 	guardKey := strings.ToLower(strings.TrimSpace(req.Username))
+	// Lockout is keyed on username + source IP (ClientIP honours the trusted
+	// proxy list), so failures from one source can't lock the account for
+	// everyone; a higher per-username ceiling throttles distributed guessing.
+	clientIP := c.ClientIP()
 
-	// Refuse if this account is temporarily locked out due to repeated failures.
-	if h.loginGuard.blocked(guardKey) {
+	// Refuse if this source is temporarily locked out due to repeated failures.
+	if h.loginGuard.blocked(guardKey, clientIP) {
 		metrics.AuthFailuresTotal.WithLabelValues("lockout").Inc()
 		c.JSON(http.StatusTooManyRequests, models.ErrorResponse{
 			Error:   "Too many attempts",
@@ -170,7 +183,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	if !found || !passwordOK {
 		metrics.AuthFailuresTotal.WithLabelValues("invalid_credentials").Inc()
-		if h.loginGuard.fail(guardKey) {
+		if h.loginGuard.fail(guardKey, clientIP) {
 			metrics.AuthFailuresTotal.WithLabelValues("lockout").Inc()
 		}
 		if found {
@@ -202,7 +215,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	}
 
 	// Successful authentication — clear the failure counter and audit it.
-	h.loginGuard.reset(guardKey)
+	h.loginGuard.reset(guardKey, clientIP)
 	_ = h.auditService.LogSuccess(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, nil)
 
 	// Generate the access+refresh pair (access carries the refresh JTI so

@@ -1,10 +1,10 @@
 package middleware
 
 import (
-	"net/http"
 	"bkt/internal/auth"
 	"bkt/internal/database"
 	"bkt/internal/models"
+	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"

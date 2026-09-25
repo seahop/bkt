@@ -421,13 +421,18 @@ All SSO logins (Google and OIDC) are recorded in the audit log with provider met
 **Request Body:**
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| email | string | No | New email address |
-| password | string | No | New password (min 8 chars) |
+| email | string | No | New email address (local accounts only — SSO accounts get `403`; their address is managed by the IdP) |
+| current_password | string | With `password` | Current password (re-authentication) |
+| password | string | No | New password (min 8 chars; local accounts only) |
+| revoke_access_keys | bool | No | With a password change: also deactivate all long-lived access keys (e.g. after a suspected compromise) |
+
+A password change ends all sessions and revokes all temporary (bkt-STS) credentials.
 
 **Response (200 OK):** Updated user object
 
 **Error Codes:**
-- `400` - Invalid email format
+- `400` - Invalid email format, or `revoke_access_keys` without a password change
+- `403` - SSO account tried to change email or password
 
 </details>
 
@@ -483,12 +488,20 @@ All SSO logins (Google and OIDC) are recorded in the audit log with provider met
 |-----------|------|-------------|
 | id | UUID | User ID |
 
+Deleting also removes the user's access keys, policy/group attachments, and
+their username from every bucket-policy `Principal` (statements that named only
+this user are dropped), so a future account with the same username does not
+inherit their bucket access.
+
 **Response (200 OK):**
 ```json
 {
   "message": "User deleted successfully"
 }
 ```
+
+**Error Codes:**
+- `409` - Deleting yourself, deleting the last administrator, or the user still owns buckets (reassign or delete them first; the message lists them)
 
 </details>
 
@@ -1766,7 +1779,9 @@ Uses **AWS Signature V4** with access keys generated from the bkt API.
 - `X-Amz-Date`: Request timestamp
 - `X-Amz-Content-Sha256`: Content hash
 
-**Presigned URLs** (query-string SigV4, e.g. from `aws s3 presign` or `POST /api/buckets/:name/objects/presign`) are also verified and accepted, subject to the signing key's status and expiry.
+**Presigned URLs** (query-string SigV4, e.g. from `aws s3 presign` or `POST /api/buckets/:name/objects/presign`) are also verified and accepted, subject to the signing key's status and expiry. A presigned `X-Amz-Date` more than 15 minutes in the future is rejected.
+
+Canonicalization follows AWS exactly (path segments and query keys/values URI-encoded per RFC 3986, space as `%20`), so keys with spaces, `+`, `%` or non-ASCII characters verify as signed by any AWS SDK. When `X-Amz-Content-Sha256` is a hex digest, the body is hashed as it is received and the request fails with `XAmzContentSHA256Mismatch` if it does not match; `UNSIGNED-PAYLOAD` and the `STREAMING-*` values are accepted (streaming chunks are verified by the chunk decoder). Any other value is rejected. Temporary (bkt-STS) keys stop working as soon as the issuing user's sessions are revoked.
 
 Optional per-IP rate limiting on this listener is available via `S3_RATE_LIMIT` (requests/minute; 0 = disabled).
 

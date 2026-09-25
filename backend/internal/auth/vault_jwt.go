@@ -1,14 +1,14 @@
 package auth
 
 import (
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
 	"bkt/internal/config"
 	"bkt/internal/database"
 	"bkt/internal/models"
 	"bkt/internal/services"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -27,10 +27,13 @@ func NewVaultJWTHandler(cfg *config.Config) *VaultJWTHandler {
 // VaultJWTClaims represents the claims in a Vault JWT
 type VaultJWTClaims struct {
 	jwt.RegisteredClaims
-	Email    string   `json:"email"`
-	Name     string   `json:"name"`
-	Groups   []string `json:"groups"`
-	Policies []string `json:"policies"`
+	Email  string   `json:"email"`
+	Name   string   `json:"name"`
+	Groups []string `json:"groups"`
+	// Policies is a pointer so an absent claim (nil: leave policies as an
+	// administrator set them) is distinguishable from an empty one (the IdP
+	// says "no policies": revoke them all).
+	Policies *[]string `json:"policies"`
 }
 
 // VaultLoginRequest represents the login request with Vault JWT
@@ -103,9 +106,11 @@ func (h *VaultJWTHandler) LoginWithVaultJWT(c *gin.Context) {
 		return
 	}
 
-	// Sync policies from SSO claims (on every login, SSO is source of truth)
-	if len(claims.Policies) > 0 {
-		if err := h.syncUserPoliciesFromClaims(user, claims.Policies); err != nil {
+	// Sync policies from SSO claims (on every login, SSO is source of truth).
+	// A present-but-empty claim clears them, so offboarding in Vault takes
+	// effect instead of failing open with the previous policies.
+	if claims.Policies != nil {
+		if err := h.syncUserPoliciesFromClaims(user, *claims.Policies); err != nil {
 			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 				Error:   "Failed to sync policies",
 				Message: err.Error(),
@@ -177,9 +182,14 @@ func (h *VaultJWTHandler) validateVaultJWT(tokenString string) (*VaultJWTClaims,
 
 	jwksURL := fmt.Sprintf("%s/v1/%s/.well-known/jwks.json", h.config.VaultSSO.Address, h.config.VaultSSO.JWTPath)
 
-	opts := []jwt.ParserOption{jwt.WithExpirationRequired()}
-	if h.config.VaultSSO.Audience != "" {
-		opts = append(opts, jwt.WithAudience(h.config.VaultSSO.Audience))
+	// An audience is mandatory: without it any token signed by this Vault
+	// JWT backend — including ones minted for other services — would log in.
+	if h.config.VaultSSO.Audience == "" {
+		return nil, fmt.Errorf("VAULT_JWT_AUDIENCE is not configured; refusing to accept tokens without an audience check")
+	}
+	opts := []jwt.ParserOption{jwt.WithExpirationRequired(), jwt.WithAudience(h.config.VaultSSO.Audience)}
+	if h.config.VaultSSO.Issuer != "" {
+		opts = append(opts, jwt.WithIssuer(h.config.VaultSSO.Issuer))
 	}
 
 	claims := &VaultJWTClaims{}
@@ -205,11 +215,20 @@ func (h *VaultJWTHandler) findOrCreateVaultUser(vaultID, email, name string) (*m
 		return &user, false, nil
 	}
 
-	// User doesn't exist - create new user (MinIO approach: no policies by default)
-	username := name
-	if username == "" {
-		username = generateUsernameFromEmail(email)
+	// The email column is unique: refuse clearly rather than failing on the
+	// constraint (or shadowing a local account).
+	var clash int64
+	database.DB.Model(&models.User{}).Where("LOWER(email) = LOWER(?)", email).Count(&clash)
+	if clash > 0 {
+		return nil, false, fmt.Errorf("an account with email %s already exists; an administrator must link it", email)
 	}
+
+	// User doesn't exist - create new user (MinIO approach: no policies by default)
+	base := sanitizeUsername(name)
+	if base == "" {
+		base = generateUsernameFromEmail(email)
+	}
+	username := uniqueUsername(base)
 
 	user = models.User{
 		ID:          uuid.New(),
@@ -257,24 +276,11 @@ func (h *VaultJWTHandler) GetVaultJWKS() (*VaultJWKS, error) {
 
 // syncUserPoliciesFromClaims syncs the user's policies based on SSO JWT claims.
 // Policy names in the JWT must match policy names in the database exactly.
-// This replaces the user's current policies with those from SSO (SSO is source of truth).
+// This replaces the user's current policies with those from SSO (SSO is source
+// of truth) — an empty list removes them all.
 func (h *VaultJWTHandler) syncUserPoliciesFromClaims(user *models.User, policyNames []string) error {
-	if len(policyNames) == 0 {
-		return nil
-	}
-
-	// Look up policies by name
-	var policies []models.Policy
-	result := database.DB.Where("name IN ?", policyNames).Find(&policies)
-	if result.Error != nil {
-		return fmt.Errorf("failed to look up policies: %w", result.Error)
-	}
-
-	// Replace user's policies with those from SSO
-	// This uses GORM's Replace association mode which clears existing and sets new
-	if err := database.DB.Model(user).Association("Policies").Replace(policies); err != nil {
+	if err := syncUserPoliciesByName(user, policyNames); err != nil {
 		return fmt.Errorf("failed to sync policies: %w", err)
 	}
-
 	return nil
 }

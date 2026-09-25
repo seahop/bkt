@@ -2,35 +2,110 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
-	"net/url"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/google/uuid"
 )
 
 // s3VersionPrefix is where bkt-managed versions live inside the real bucket.
 // It is excluded from ListObjects so version bytes never appear as objects.
+// Keep in sync with validation.ReservedObjectKeyPrefix (asserted by a test):
+// user object keys under this prefix are rejected at every entry point.
 const s3VersionPrefix = ".bkt-versions/"
+
+// checkS3UserKey rejects keys inside the reserved version keyspace, so no
+// user-facing operation can read, overwrite, or delete archived version bytes
+// by addressing them as ordinary objects.
+func checkS3UserKey(objectKey string) error {
+	if objectKey == "" {
+		return fmt.Errorf("invalid empty object key")
+	}
+	if strings.HasPrefix(objectKey, s3VersionPrefix) {
+		return fmt.Errorf("object keys under %q are reserved", s3VersionPrefix)
+	}
+	return nil
+}
 
 func s3VersionKey(objectKey, versionID string) (string, error) {
 	if _, err := uuid.Parse(versionID); err != nil {
 		return "", fmt.Errorf("invalid version id")
 	}
+	if err := checkS3UserKey(objectKey); err != nil {
+		return "", err
+	}
 	return s3VersionPrefix + objectKey + "/" + versionID, nil
 }
 
+// s3CopySource builds an x-amz-copy-source value ("bucket/key") with the key
+// percent-encoded per the SigV4 URI-encoding rules: every byte except the
+// unreserved set A-Z a-z 0-9 - _ . ~ is escaped, and "/" separators are kept.
+// url.PathEscape is not enough: it leaves "+" (which S3 decodes as a space),
+// and escapes the bucket/key separator.
+func s3CopySource(actualBucket, key string) string {
+	return actualBucket + "/" + awsURIEncode(key, false)
+}
+
+// awsURIEncode percent-encodes s per the AWS SigV4 rules. When encodeSlash is
+// false, "/" is left as-is.
+func awsURIEncode(s string, encodeSlash bool) string {
+	const hexDigits = "0123456789ABCDEF"
+	var b strings.Builder
+	b.Grow(len(s) * 3)
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch {
+		case ch >= 'A' && ch <= 'Z', ch >= 'a' && ch <= 'z', ch >= '0' && ch <= '9',
+			ch == '-', ch == '_', ch == '.', ch == '~':
+			b.WriteByte(ch)
+		case ch == '/' && !encodeSlash:
+			b.WriteByte(ch)
+		default:
+			b.WriteByte('%')
+			b.WriteByte(hexDigits[ch>>4])
+			b.WriteByte(hexDigits[ch&0x0F])
+		}
+	}
+	return b.String()
+}
+
 // serverSideMove copies srcKey to dstKey within the bucket and deletes srcKey.
-func (s3s *S3Storage) serverSideMove(bucketName, srcKey, dstKey string) error {
+// With noReplace it refuses to overwrite an existing dstKey (used when
+// archiving, so an archived version is never silently replaced). The check is
+// a HEAD before the copy — not atomic against other processes, but handlers
+// serialize writes per key in-process.
+func (s3s *S3Storage) serverSideMove(bucketName, srcKey, dstKey string, noReplace bool) error {
 	ctx := context.Background()
 	actual := s3s.getBucketName(bucketName)
-	_, err := s3s.client.CopyObject(ctx, &s3.CopyObjectInput{
+	if noReplace {
+		_, herr := s3s.client.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(actual),
+			Key:    aws.String(dstKey),
+		})
+		if herr == nil {
+			return fmt.Errorf("archived version already exists")
+		}
+		var nf *types.NotFound
+		var nsk *types.NoSuchKey
+		if !errors.As(herr, &nf) && !errors.As(herr, &nsk) &&
+			!strings.Contains(herr.Error(), "NotFound") && !strings.Contains(herr.Error(), "404") {
+			return fmt.Errorf("failed to check archived version: %w", herr)
+		}
+	}
+	input := &s3.CopyObjectInput{
 		Bucket:     aws.String(actual),
 		Key:        aws.String(dstKey),
-		CopySource: aws.String(url.PathEscape(actual + "/" + srcKey)),
-	})
+		CopySource: aws.String(s3CopySource(actual, srcKey)),
+	}
+	if s3s.sse {
+		input.ServerSideEncryption = types.ServerSideEncryptionAes256
+	}
+	_, err := s3s.client.CopyObject(ctx, input)
 	if err != nil {
 		return fmt.Errorf("failed to copy for version move: %w", err)
 	}
@@ -49,7 +124,7 @@ func (s3s *S3Storage) ArchiveObjectVersion(bucketName, objectKey, versionID stri
 	if err != nil {
 		return err
 	}
-	return s3s.serverSideMove(bucketName, objectKey, vk)
+	return s3s.serverSideMove(bucketName, objectKey, vk, true)
 }
 
 func (s3s *S3Storage) PromoteObjectVersion(bucketName, objectKey, versionID string) error {
@@ -57,7 +132,7 @@ func (s3s *S3Storage) PromoteObjectVersion(bucketName, objectKey, versionID stri
 	if err != nil {
 		return err
 	}
-	return s3s.serverSideMove(bucketName, vk, objectKey)
+	return s3s.serverSideMove(bucketName, vk, objectKey, false)
 }
 
 func (s3s *S3Storage) GetObjectVersion(bucketName, objectKey, versionID string) (io.ReadCloser, error) {

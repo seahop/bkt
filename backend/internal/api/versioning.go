@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"bkt/internal/storage"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // Core versioning mechanics. Design: the `objects` table always holds the
@@ -64,7 +66,12 @@ func prepareVersionedWrite(backend storage.StorageBackend, bucket *models.Bucket
 	}
 	var obj models.Object
 	if err := database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, key).First(&obj).Error; err != nil {
-		return "", nil // no current object — nothing to archive
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", nil // no current object — nothing to archive
+		}
+		// Any other error must not be mistaken for "nothing to archive": the
+		// write would then overwrite the current version's bytes unarchived.
+		return "", fmt.Errorf("failed to look up current version: %w", err)
 	}
 	return archiveCurrentVersion(backend, bucket, &obj)
 }
@@ -95,7 +102,8 @@ func versionedDeleteCurrent(backend storage.StorageBackend, bucket *models.Bucke
 	if bucket.Versioning != models.VersioningEnabled {
 		return "", false, nil
 	}
-	if _, err := archiveCurrentVersion(backend, bucket, obj); err != nil {
+	archivedVID, err := archiveCurrentVersion(backend, bucket, obj)
+	if err != nil {
 		return "", true, err
 	}
 	marker := models.ObjectVersion{
@@ -106,9 +114,13 @@ func versionedDeleteCurrent(backend storage.StorageBackend, bucket *models.Bucke
 		VersionedAt:    time.Now(),
 	}
 	if err := database.DB.Create(&marker).Error; err != nil {
+		// Undo the archive so the still-present current row keeps its bytes.
+		rollbackVersionedWrite(backend, bucket, obj.Key, archivedVID)
 		return "", true, fmt.Errorf("failed to record delete marker: %w", err)
 	}
 	if err := database.DB.Delete(&models.Object{}, "id = ?", obj.ID).Error; err != nil {
+		database.DB.Where("version_id = ?", marker.VersionID).Delete(&models.ObjectVersion{})
+		rollbackVersionedWrite(backend, bucket, obj.Key, archivedVID)
 		return "", true, fmt.Errorf("failed to remove current object record: %w", err)
 	}
 	return marker.VersionID, true, nil

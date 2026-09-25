@@ -426,7 +426,7 @@ test_create_bucket() {
   # first allowed bucket (bkt's create API links to an existing S3 bucket of
   # the same name) instead of inventing a name IAM will deny.
   if [[ "$backend" == "s3" ]]; then
-    local allowed; allowed=$(load_env_var "S3_BUCKETS" | cut -d, -f1 | tr -d ' ')
+    local allowed; allowed=$(echo "${S3_BUCKETS:-$(load_env_var "S3_BUCKETS")}" | cut -d, -f1 | tr -d ' ')
     if [[ -n "$allowed" ]]; then
       TEST_BUCKET="$allowed"
       LINKED_BUCKET="$allowed"

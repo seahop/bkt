@@ -1,8 +1,8 @@
 package api
 
 import (
-	"net/http"
 	"bkt/internal/config"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 )

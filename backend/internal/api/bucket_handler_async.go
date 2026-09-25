@@ -21,12 +21,12 @@ import (
 
 // ProgressReader wraps an io.ReadSeeker and tracks upload progress in real-time
 type ProgressReader struct {
-	reader        io.ReadSeeker
-	uploadID      uuid.UUID
-	totalSize     int64
-	bytesRead     int64
-	lastUpdate    time.Time
-	updateMutex   sync.Mutex
+	reader            io.ReadSeeker
+	uploadID          uuid.UUID
+	totalSize         int64
+	bytesRead         int64
+	lastUpdate        time.Time
+	updateMutex       sync.Mutex
 	minUpdateInterval time.Duration
 }
 
@@ -100,6 +100,12 @@ func (h *BucketHandler) UploadObjectAsync(c *gin.Context) {
 		return
 	}
 
+	// Cap the request body before the multipart form is parsed (and spooled
+	// to temp disk) — see limitMultipartBody.
+	if !h.limitMultipartBody(c) {
+		return
+	}
+
 	// Get object key from form or query
 	objectKey := c.PostForm("key")
 	if objectKey == "" {
@@ -113,7 +119,7 @@ func (h *BucketHandler) UploadObjectAsync(c *gin.Context) {
 	}
 
 	// Validate object key
-	if err := validation.ValidateObjectKey(objectKey); err != nil {
+	if err := validateKeyForBucket(&bucket, objectKey); err != nil {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error:   "Invalid object key",
 			Message: err.Error(),
@@ -206,6 +212,15 @@ func (h *BucketHandler) UploadObjectAsync(c *gin.Context) {
 		Status:      models.UploadStatusPending,
 	}
 
+	// Fast-fail when the bucket is already too full for this file; the
+	// authoritative quota check runs again when the write is processed.
+	qres, qerr := reserveBucketQuota(&bucket, fileHeader.Size)
+	if qerr != nil {
+		c.JSON(http.StatusForbidden, models.ErrorResponse{Error: "Quota exceeded", Message: qerr.Error()})
+		return
+	}
+	qres.release()
+
 	if err := database.DB.Create(&upload).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to create upload record",
@@ -214,9 +229,17 @@ func (h *BucketHandler) UploadObjectAsync(c *gin.Context) {
 		return
 	}
 
-	// Save file to temporary location for background processing
+	failUpload := func(msg string) {
+		upload.Status = models.UploadStatusFailed
+		upload.ErrorMessage = msg
+		database.DB.Save(&upload)
+	}
+
+	// Save file to temporary location for background processing. The file
+	// name is fixed (never the client-supplied filename).
 	tempDir := filepath.Join(os.TempDir(), "bkt-uploads", upload.ID.String())
 	if err := os.MkdirAll(tempDir, 0750); err != nil {
+		failUpload("Failed to create temporary directory")
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to create temporary directory",
 			Message: err.Error(),
@@ -224,8 +247,10 @@ func (h *BucketHandler) UploadObjectAsync(c *gin.Context) {
 		return
 	}
 
-	tempFilePath := filepath.Join(tempDir, fileHeader.Filename)
+	tempFilePath := filepath.Join(tempDir, "upload.bin")
 	if err := c.SaveUploadedFile(fileHeader, tempFilePath); err != nil {
+		_ = os.RemoveAll(tempDir)
+		failUpload("Failed to save uploaded file")
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to save uploaded file",
 			Message: err.Error(),
@@ -234,7 +259,7 @@ func (h *BucketHandler) UploadObjectAsync(c *gin.Context) {
 	}
 
 	// Start background upload processing
-	go h.processAsyncUpload(upload.ID, tempFilePath, &bucket)
+	go h.processAsyncUpload(upload.ID, tempFilePath, bucket.ID)
 
 	// Return upload ID immediately
 	c.JSON(http.StatusAccepted, gin.H{
@@ -244,8 +269,11 @@ func (h *BucketHandler) UploadObjectAsync(c *gin.Context) {
 	})
 }
 
-// processAsyncUpload processes the upload in the background
-func (h *BucketHandler) processAsyncUpload(uploadID uuid.UUID, tempFilePath string, bucket *models.Bucket) {
+// processAsyncUpload processes the upload in the background. It uses the
+// same commit path as the synchronous upload (storeObject): per-key lock,
+// quota reservation, versioned archive, write, and an atomic metadata upsert
+// with a fresh version id — rolling back if any step fails.
+func (h *BucketHandler) processAsyncUpload(uploadID uuid.UUID, tempFilePath string, bucketID uuid.UUID) {
 	// Ensure temp file is cleaned up
 	defer func() {
 		_ = os.Remove(tempFilePath)
@@ -262,6 +290,20 @@ func (h *BucketHandler) processAsyncUpload(uploadID uuid.UUID, tempFilePath stri
 		return
 	}
 
+	fail := func(msg string) {
+		upload.Status = models.UploadStatusFailed
+		upload.ErrorMessage = msg
+		database.DB.Save(&upload)
+	}
+
+	// Reload the bucket: its versioning/quota settings may have changed
+	// since the request was accepted.
+	var bucket models.Bucket
+	if err := database.DB.Where("id = ?", bucketID).First(&bucket).Error; err != nil {
+		fail("Bucket no longer exists")
+		return
+	}
+
 	// Update status to processing
 	upload.Status = models.UploadStatusProcessing
 	upload.UploadedSize = 0 // Start at 0%
@@ -270,9 +312,7 @@ func (h *BucketHandler) processAsyncUpload(uploadID uuid.UUID, tempFilePath stri
 	// Open temp file
 	file, err := os.Open(tempFilePath) //nolint:gosec // server-generated temp path (os.TempDir + upload UUID), not user input
 	if err != nil {
-		upload.Status = models.UploadStatusFailed
-		upload.ErrorMessage = fmt.Sprintf("Failed to open temporary file: %v", err)
-		database.DB.Save(&upload)
+		fail(fmt.Sprintf("Failed to open temporary file: %v", err))
 		return
 	}
 	defer file.Close() //nolint:errcheck // best-effort close of read-only temp file
@@ -280,55 +320,16 @@ func (h *BucketHandler) processAsyncUpload(uploadID uuid.UUID, tempFilePath stri
 	// Re-detect content type from file
 	detectedType, _, err := validation.DetectContentType(file)
 	if err != nil {
-		upload.Status = models.UploadStatusFailed
-		upload.ErrorMessage = fmt.Sprintf("Failed to detect content type: %v", err)
-		database.DB.Save(&upload)
+		fail(fmt.Sprintf("Failed to detect content type: %v", err))
 		return
 	}
 
-	// Reset file position after reading (file is seekable so no need for MultiReader)
-	_, _ = file.Seek(0, 0)
-
-	// Get storage backend
-	storageBackend, err := h.getStorageBackend(bucket)
-	if err != nil {
-		upload.Status = models.UploadStatusFailed
-		upload.ErrorMessage = fmt.Sprintf("Failed to initialize storage backend: %v", err)
-		database.DB.Save(&upload)
+	// SHA256 of the content (computed from the local temp file before the
+	// write so the metadata row is complete in one upsert).
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		fail(fmt.Sprintf("Failed to read temporary file: %v", err))
 		return
 	}
-
-	// Upload to storage with real-time progress tracking
-	// ProgressReader will update uploaded_size as bytes are transferred
-	startTime := time.Now()
-
-	// Wrap file with progress tracker for real-time updates
-	// File implements io.ReadSeeker, so ProgressReader will be seekable for AWS SDK retries
-	progressReader := NewProgressReader(file, upload.ID, upload.TotalSize)
-
-	archivedVID, verr := prepareVersionedWrite(storageBackend, bucket, upload.ObjectKey)
-	if verr != nil {
-		upload.Status = models.UploadStatusFailed
-		upload.ErrorMessage = fmt.Sprintf("Failed to version existing object: %v", verr)
-		database.DB.Save(&upload)
-		return
-	}
-	if err := storageBackend.PutObject(bucket.Name, upload.ObjectKey, progressReader, upload.TotalSize, detectedType, nil); err != nil {
-		rollbackVersionedWrite(storageBackend, bucket, upload.ObjectKey, archivedVID)
-		upload.Status = models.UploadStatusFailed
-		upload.ErrorMessage = fmt.Sprintf("Failed to upload to storage: %v", err)
-		database.DB.Save(&upload)
-		return
-	}
-	// Upload complete - set to total size
-	upload.UploadedSize = upload.TotalSize
-	database.DB.Save(&upload)
-
-	uploadDuration := time.Since(startTime)
-
-	// Calculate SHA256 hash of the uploaded file
-	_, _ = file.Seek(0, 0)
-
 	sha256Hash, err := validation.CalculateSHA256(file)
 	if err != nil {
 		logger.Warn("Failed to calculate SHA256 hash", map[string]interface{}{
@@ -337,41 +338,32 @@ func (h *BucketHandler) processAsyncUpload(uploadID uuid.UUID, tempFilePath stri
 		})
 		sha256Hash = "" // Continue without hash
 	}
-
-	// Calculate ETag (MD5)
-	_, _ = file.Seek(0, 0)
-
-	etag, err := validation.CalculateMD5(file)
-	if err != nil {
-		logger.Warn("Failed to calculate ETag", map[string]interface{}{
-			"upload_id": uploadID,
-			"error":     err.Error(),
-		})
-		etag = ""
-	}
-
-	// Create object record in database
-	storagePath := filepath.Join(bucket.Name, upload.ObjectKey)
-	if bucket.StorageBackend == "s3" {
-		storagePath = fmt.Sprintf("s3://%s/%s", bucket.Name, upload.ObjectKey)
-	}
-
-	object := models.Object{
-		BucketID:    bucket.ID,
-		Key:         upload.ObjectKey,
-		Size:        upload.TotalSize,
-		ContentType: detectedType,
-		ETag:        etag,
-		SHA256:      sha256Hash,
-		StoragePath: storagePath,
-	}
-
-	if err := database.DB.Create(&object).Error; err != nil {
-		upload.Status = models.UploadStatusFailed
-		upload.ErrorMessage = fmt.Sprintf("Failed to create object record: %v", err)
-		database.DB.Save(&upload)
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		fail(fmt.Sprintf("Failed to read temporary file: %v", err))
 		return
 	}
+
+	// Get storage backend
+	storageBackend, err := h.getStorageBackend(&bucket)
+	if err != nil {
+		fail(fmt.Sprintf("Failed to initialize storage backend: %v", err))
+		return
+	}
+
+	startTime := time.Now()
+
+	// Wrap file with progress tracker for real-time updates. File implements
+	// io.ReadSeeker, so ProgressReader stays seekable for AWS SDK retries.
+	progressReader := NewProgressReader(file, upload.ID, upload.TotalSize)
+
+	object, _, err := h.storeObject(storageBackend, &bucket, upload.ObjectKey, progressReader, upload.TotalSize, detectedType, sha256Hash)
+	if err != nil {
+		fail(fmt.Sprintf("Failed to store object: %v", err))
+		return
+	}
+	uploadDuration := time.Since(startTime)
+
+	notifyObjectEvent(&bucket, services.EventObjectCreated, object.Key, object.Size, object.ETag, object.VersionID)
 
 	// Update upload status to completed
 	now := time.Now()
@@ -379,14 +371,15 @@ func (h *BucketHandler) processAsyncUpload(uploadID uuid.UUID, tempFilePath stri
 	upload.UploadedSize = upload.TotalSize
 	upload.CompletedAt = &now
 	upload.ObjectID = &object.ID
+	upload.ErrorMessage = ""
 	database.DB.Save(&upload)
 
 	logger.Info("Async upload completed", map[string]interface{}{
-		"upload_id":      uploadID,
-		"object_id":      object.ID,
-		"size_bytes":     upload.TotalSize,
-		"duration":       uploadDuration.String(),
-		"average_speed":  fmt.Sprintf("%.2f MB/s", float64(upload.TotalSize)/(1024*1024)/uploadDuration.Seconds()),
+		"upload_id":     uploadID,
+		"object_id":     object.ID,
+		"size_bytes":    upload.TotalSize,
+		"duration":      uploadDuration.String(),
+		"average_speed": fmt.Sprintf("%.2f MB/s", float64(upload.TotalSize)/(1024*1024)/uploadDuration.Seconds()),
 	})
 }
 
@@ -444,7 +437,7 @@ func (h *BucketHandler) ListUploads(c *gin.Context) {
 
 	// Optional query parameters for filtering
 	status := c.Query("status") // e.g., "pending", "processing", "completed", "failed"
-	limit := 50                  // Default limit
+	limit := 50                 // Default limit
 	if limitStr := c.Query("limit"); limitStr != "" {
 		_, _ = fmt.Sscanf(limitStr, "%d", &limit)
 		if limit > 100 {

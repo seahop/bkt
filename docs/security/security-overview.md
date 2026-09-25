@@ -485,6 +485,29 @@ if fileHeader.Size > h.config.Storage.MaxFileSize {
 - ✅ Content-Type headers
 - ✅ CORS configuration
 - ✅ Frontend sanitization (React escaping)
+- ✅ **Uploader-controlled content never renders on the console origin.** An
+  object's `Content-Type` is chosen by whoever uploaded it. The bucket
+  browser's *Open in new tab* only renders passive types inline (PNG, JPEG,
+  GIF, WebP, AVIF, BMP, PDF, plain text, audio/video — re-typed explicitly);
+  everything else (HTML, SVG, XML, JavaScript, unknown) is downloaded as
+  `application/octet-stream`.
+- ✅ **Security headers on the console listener** (UI, REST API, Swagger):
+  - `Content-Security-Policy` for the UI: `default-src 'self'; script-src 'self';
+    style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:;
+    font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; object-src 'none';
+    base-uri 'self'; form-action 'self'` — the UI loads no third-party scripts
+    (SSO logins are top-level redirects).
+  - Every `/api/*` response (including raw object downloads) carries
+    `Content-Security-Policy: sandbox; default-src 'none'; frame-ancestors 'none'`,
+    so a response rendered as a document can't run script on the console origin.
+  - `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+    `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy: same-origin`,
+    and `Strict-Transport-Security` when TLS is on (`HSTS_MAX_AGE`; skipped for
+    `localhost`/IP hosts because HSTS applies to every port of a host).
+- ✅ **S3 listener GetObject** always sends `X-Content-Type-Options: nosniff`;
+  active types (HTML, SVG, any XML, JavaScript) are served with
+  `Content-Disposition: attachment` unless the (signed) request explicitly
+  set `response-content-disposition`.
 
 **CORS Configuration:**
 ```go
@@ -504,12 +527,39 @@ router.Use(cors.New(cors.Config{
 - ✅ CORS restrictions
 - ✅ Authorization header required
 - ✅ SameSite cookie policy (future)
+- ✅ **Login CSRF on SSO callbacks:** SSO flows finish with a redirect to
+  `/auth/<provider>/callback#token=…`. The UI accepts those tokens only when
+  the same browser tab started an SSO login in the last 10 minutes (a
+  `sessionStorage` marker set by the login button, consumed once); crafted
+  links carrying someone else's tokens are discarded. The fragment is removed
+  from the address bar immediately.
 
-### Information Disclosure — `/metrics`
+### Information Disclosure — `/metrics`, Swagger, access logs
 
 The Prometheus endpoint exposes bucket/object/user counts. Set
 `METRICS_TOKEN` so `GET /metrics` requires `Authorization: Bearer <token>`,
-or keep the endpoint network-isolated.
+or keep the endpoint network-isolated. In production an unset token logs a
+warning at startup.
+
+The Swagger UI (`/api/docs/`) is served by default only in development; set
+`SWAGGER_ENABLED=true` to publish it in production.
+
+Access logs redact credential-bearing query parameters — presigned-URL
+`X-Amz-Signature` / `X-Amz-Credential` / `X-Amz-Security-Token` (and SigV2
+`Signature` / `AWSAccessKeyId`), plus SSO `code` / `state` / `token` — so logs
+don't hold replayable credentials.
+
+### Secrets & runtime hardening
+
+- `JWT_SECRET` (and `ENCRYPTION_KEY` when set) are validated in **every**
+  environment: empty, < 32 characters, the old public development default, or
+  `<placeholder>` values refuse to start. Production also requires
+  `ENCRYPTION_KEY`, a non-default `DB_PASSWORD`, and TLS (on the listeners, or
+  `TLS_TERMINATED_UPSTREAM=true` behind a TLS-terminating proxy).
+- Containers run the backend as the unprivileged uid/gid 10001 (the omnibus
+  keeps Postgres as `postgres` and secrets root-only). The Helm chart applies
+  the "restricted" Pod Security profile (non-root, read-only root filesystem,
+  no capabilities, `RuntimeDefault` seccomp).
 
 ## Security Best Practices
 

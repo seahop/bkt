@@ -707,7 +707,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "Moves all objects under the specified source prefix to a new destination prefix within the same bucket. Cannot move a folder into itself.",
+                "description": "Moves all objects under the specified source prefix to a new destination prefix within the same bucket. Both prefixes must end with '/'. Requires GetObject and DeleteObject on every source object and PutObject on every destination key; refuses to overwrite existing destination objects. Cannot move a folder into itself.",
                 "consumes": [
                     "application/json"
                 ],
@@ -761,6 +761,12 @@ const docTemplate = `{
                             "$ref": "#/definitions/models.ErrorResponse"
                         }
                     },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
@@ -777,7 +783,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "Configures age-based expiry for a bucket (single rule): current objects after expire_days, noncurrent versions after noncurrent_expire_days. Both zero clears the configuration. Bucket owner or admin only.",
+                "description": "Configures age-based expiry for a bucket (single rule): current objects after expire_days, noncurrent versions after noncurrent_expire_days. Both zero clears the configuration. Requires admin or s3:PutLifecycleConfiguration on the bucket.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1584,7 +1590,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "Updates quota, WORM retention, webhook notification, and replication settings. Only fields present in the body are changed. Bucket owner or admin only.",
+                "description": "Updates quota, WORM retention, webhook notification, and replication settings. Only fields present in the body are changed. Requires admin or the matching policy action per field (s3:PutBucketQuota, s3:PutBucketObjectLockConfiguration, s3:PutBucketNotification, s3:PutReplicationConfiguration). retention_days can be raised at any time but only lowered once no data is still under retention.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1621,7 +1627,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "Enables or suspends versioning on a bucket. Bucket owner or admin only.",
+                "description": "Enables or suspends versioning on a bucket. Requires admin or s3:PutBucketVersioning on the bucket.",
                 "consumes": [
                     "application/json"
                 ],
@@ -2761,7 +2767,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "Admin-only. Permanently deletes the specified user account.",
+                "description": "Admin-only. Permanently deletes the specified user account. Refused (409) for your own account, for the last remaining administrator, and for users who still own buckets (reassign or delete those buckets first). The user's name is removed from every bucket-policy Principal so a future account with the same username does not inherit their grants.",
                 "consumes": [
                     "application/json"
                 ],
@@ -2796,6 +2802,12 @@ const docTemplate = `{
                     },
                     "404": {
                         "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
                         "schema": {
                             "$ref": "#/definitions/models.ErrorResponse"
                         }

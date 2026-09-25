@@ -292,6 +292,9 @@ func lookupAndDecryptKey(c *gin.Context, accessKey string) (*models.AccessKey, s
 	// "sign out everywhere" bumps the user's TokenVersion and thereby revokes
 	// every temporary credential issued before it.
 	if stsCredentialRevoked(&key) {
+		// The session that issued this credential is gone; deactivate it so
+		// nothing (listings, presign) keeps treating it as usable.
+		database.DB.Model(&models.AccessKey{}).Where("id = ?", key.ID).Update("is_active", false)
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 			"Code":    "InvalidAccessKeyId",
 			"Message": "The access key ID you provided has been revoked",

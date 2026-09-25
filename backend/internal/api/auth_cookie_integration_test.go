@@ -178,13 +178,18 @@ func TestIntegrationRefreshViaCookieRotatesCookie(t *testing.T) {
 		t.Fatal("refresh did not rotate the cookie")
 	}
 
-	// The rotated cookie works; the superseded one is a replay (401).
+	// The rotated cookie works; the superseded one is a replay — tolerated
+	// only within the reuse grace window (benign races), 401 after it.
 	w = sendAuth(r, authReq{path: "/api/auth/refresh", console: true, cookie: rotated.Value})
 	if w.Code != http.StatusOK {
 		t.Fatalf("rotated cookie refresh: %d %s", w.Code, w.Body.String())
 	}
+	if w := sendAuth(r, authReq{path: "/api/auth/refresh", console: true, cookie: first}); w.Code != http.StatusOK {
+		t.Fatalf("replayed cookie within grace: %d, want 200", w.Code)
+	}
+	database.DB.Exec(`UPDATE revoked_tokens SET created_at = NOW() - INTERVAL '5 minutes'`)
 	if w := sendAuth(r, authReq{path: "/api/auth/refresh", console: true, cookie: first}); w.Code != http.StatusUnauthorized {
-		t.Fatalf("replayed cookie: %d, want 401", w.Code)
+		t.Fatalf("replayed cookie after grace: %d, want 401", w.Code)
 	}
 }
 

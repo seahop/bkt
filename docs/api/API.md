@@ -1136,7 +1136,7 @@ rest are skipped and the skip is logged.
 <details>
 <summary><code>POST /api/buckets/:name/objects/presign</code> - Generate presigned GET URL</summary>
 
-Issues a time-limited presigned download URL for an object, signed with one of the caller's **active access keys** (SigV4). The URL points at the S3 API listener (`S3_PUBLIC_ENDPOINT`, or derived from the request host + S3 API port).
+Issues a time-limited presigned download URL for an object, signed with one of the caller's **long-lived access keys** (SigV4) — active, not expired, non-expiring first, then the longest-lived. STS temporary credentials are never used (they die with the session, which would silently break the link); with no usable key the request returns 409. The URL points at the S3 API listener (`S3_PUBLIC_ENDPOINT`, or derived from the request host + S3 API port).
 
 **Authentication:** Required (and at least one active access key)
 

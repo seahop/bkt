@@ -433,6 +433,16 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 		if database.DB.Where("jti = ?", claims.ID).First(&prior).Error == nil {
 			reason = prior.Reason
 		}
+		// Grace window: a replay moments after the rotation is almost always a
+		// benign race (two tabs refreshing together, a reload or dropped
+		// response while the rotation was in flight, a client retry), not
+		// theft. Revoking every session and STS credential for it would log
+		// the user out and break their temporary credentials. Within the
+		// window, issue a fresh pair instead; outside it, treat as reuse.
+		if reason == models.RevokedReasonRotated && time.Since(prior.CreatedAt) < refreshReuseGrace {
+			h.issueRefreshedPair(c, &user)
+			return
+		}
 		if reason == models.RevokedReasonRotated {
 			database.DB.Model(&models.User{}).Where("id = ?", user.ID).
 				UpdateColumn("token_version", gorm.Expr("token_version + 1"))
@@ -447,6 +457,15 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 		return
 	}
 
+	h.issueRefreshedPair(c, &user)
+}
+
+// refreshReuseGrace is how long after a refresh token's rotation a replay of
+// it is still treated as a benign race rather than token theft.
+const refreshReuseGrace = 20 * time.Second
+
+// issueRefreshedPair mints and delivers a new access/refresh pair for user.
+func (h *AuthHandler) issueRefreshedPair(c *gin.Context, user *models.User) {
 	accessTokenDuration, _ := time.ParseDuration(h.config.Auth.AccessTokenExpiry)
 	refreshTokenDuration, _ := time.ParseDuration(h.config.Auth.RefreshTokenExpiry)
 	newToken, newRefresh, err := auth.GenerateTokenPair(user.ID, user.Username, user.IsAdmin, user.TokenVersion, h.config.Auth.JWTSecret, accessTokenDuration, refreshTokenDuration)

@@ -92,13 +92,17 @@ func (h *BucketHandler) PresignObject(c *gin.Context) {
 		return
 	}
 
-	// Pick one of the caller's active access keys to sign with. Prefer a key
-	// that outlives the requested URL (non-expiring first); if only shorter-
-	// lived keys exist, the URL's effective lifetime is capped by the key —
-	// the SigV4 verifier rejects expired keys at request time.
+	// Pick one of the caller's long-lived access keys to sign with: active,
+	// not expired, non-expiring first, then the one that lives longest. The
+	// SigV4 verifier rejects expired keys at request time, so the URL's
+	// lifetime is capped by the key's. STS temporary credentials are never
+	// used: they last hours at most and are revoked whenever the session is
+	// (password change, lock, refresh-token reuse), which would silently
+	// break every link signed with them.
 	var keys []models.AccessKey
-	if err := database.DB.Where("user_id = ? AND is_active = ?", userUUID, true).
-		Order("expires_at ASC NULLS FIRST").Find(&keys).Error; err != nil || len(keys) == 0 {
+	if err := database.DB.Where("user_id = ? AND is_active = ? AND temporary = ? AND (expires_at IS NULL OR expires_at > ?)",
+		userUUID, true, false, time.Now()).
+		Order("expires_at DESC NULLS FIRST").Find(&keys).Error; err != nil || len(keys) == 0 {
 		c.JSON(http.StatusConflict, models.ErrorResponse{
 			Error:   "No active access key",
 			Message: "Presigned URLs are signed with your access key — generate one in Profile first",

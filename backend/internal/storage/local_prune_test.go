@@ -2,8 +2,10 @@ package storage
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -318,4 +320,36 @@ func TestLocalConcurrentPutDeleteSameDir(t *testing.T) {
 		t.Errorf("version storage not pruned: %d entries left", len(entries))
 	}
 	t.Logf("%d rounds", ops.Load())
+}
+
+func TestRetryableDirErr(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "a", "b")
+	if !retryableDirErr(dir, &fs.PathError{Op: "mkdir", Path: dir, Err: syscall.EEXIST}) {
+		t.Error("stale EEXIST with nothing on the path should be retryable")
+	}
+	if err := os.WriteFile(filepath.Join(root, "a"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if retryableDirErr(dir, &fs.PathError{Op: "mkdir", Path: dir, Err: syscall.EEXIST}) {
+		t.Error("EEXIST caused by a regular file on the path must not be retried")
+	}
+	if !retryableDirErr(dir, &fs.PathError{Op: "mkdir", Path: dir, Err: syscall.ENOENT}) {
+		t.Error("ENOENT should be retryable")
+	}
+	if retryableDirErr(dir, &fs.PathError{Op: "mkdir", Path: dir, Err: syscall.EACCES}) {
+		t.Error("EACCES must not be retried")
+	}
+}
+
+func TestWithDirRetryDoesNotRetryOpEEXIST(t *testing.T) {
+	dir := t.TempDir()
+	calls := 0
+	err := withDirRetry(dir, func() error {
+		calls++
+		return &fs.PathError{Op: "link", Path: dir, Err: syscall.EEXIST}
+	})
+	if !errors.Is(err, fs.ErrExist) || calls != 1 {
+		t.Fatalf("op EEXIST: err=%v calls=%d, want one call returning EEXIST", err, calls)
+	}
 }

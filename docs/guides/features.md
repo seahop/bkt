@@ -153,11 +153,35 @@ Per bucket: an HTTP(S) URL receives a JSON POST for `object:created` and/or
 ```
 
 With a webhook secret set, the raw body is signed:
-`X-Bkt-Signature: sha256=<hex HMAC-SHA256>`. Delivery is asynchronous
-(queued, 3 retries with backoff) and never blocks uploads; persistent
-failures are logged, not queued forever. Configure in bucket Settings →
+`X-Bkt-Signature: sha256=<hex HMAC-SHA256>`. The secret is stored encrypted
+(same scheme as S3 credentials). Configure in bucket Settings →
 Notifications, or via `PUT /api/buckets/{name}/settings` (admin or
 `s3:PutBucketNotification`).
+
+Delivery is asynchronous and never blocks uploads:
+
+- Each destination (`scheme://host:port`) has its own queue and at most 2
+  concurrent deliveries, so a slow or unresponsive receiver only delays its
+  own events.
+- Up to 3 attempts with backoff, bounded to ~20 s per event in total (8 s per
+  attempt). 4xx responses (other than 408/429) are not retried. Redirects are
+  not followed — a 3xx is a failed delivery.
+- Per bucket, at most 512 events may be pending and events are rate-limited
+  (50/s sustained, bursts up to 1000). Events beyond these limits — e.g. from
+  moving a folder with tens of thousands of objects — are **dropped** and
+  counted; drops are logged once when they start and summarized every minute.
+  A single folder move additionally emits at most 1,000 events (the first
+  500 moved objects) and logs how many it skipped.
+- Persistent failures are logged (with the URL reduced to scheme and host —
+  paths and queries often carry tokens), not queued forever.
+
+**Allowed destinations**: webhook URLs must be `http(s)` URLs without
+embedded credentials, and deliveries only reach public addresses — loopback,
+private, link-local (including the cloud metadata endpoint), CGNAT, multicast
+and reserved ranges are refused both when the URL is saved (for literal IPs
+and `localhost`) and on every connection (for the address a hostname actually
+resolves to). To deliver to an internal receiver, list it in
+`WEBHOOK_ALLOWED_HOSTS` (see [configuration](../deployment/configuration.md#webhooks)).
 
 ## Groups
 
@@ -189,6 +213,24 @@ source **plus** `s3:GetObject` on all source objects and `s3:PutObject` +
 `s3:DeleteObject` on all target objects — you can only mirror data you could
 copy yourself into a bucket you could overwrite yourself.
 
+Replication then **runs as the user who configured it, with that user's
+current permissions, checked per object** on every sync: an object is copied
+only if they may `s3:GetObject` it in the source and `s3:PutObject` it in the
+target, and a target object is removed only if they may `s3:DeleteObject` it.
+So a narrower Deny (e.g. on `source/secret/*`) or a permission revoked later
+is honored — denied objects are skipped and counted in the log. If that user
+is deleted or locked, replication is disabled for the bucket. Configurations
+saved before this was recorded run as the bucket owner while the owner is an
+admin, and are otherwise paused (with a warning) until re-saved.
+
+The target is pinned by identity when replication is configured: if the
+target bucket is deleted — even if a new bucket is later created under the
+same name — replication is disabled instead of writing into the new bucket.
+
+Syncs (and lifecycle sweeps) never wait long on objects that are busy (e.g.
+a large upload in progress): such objects are skipped and retried on the
+next run.
+
 Safety on the target: when the target has versioning enabled, replication
 archives the target's current version before overwriting it and mirrors
 deletions as delete markers, so target history is never destroyed — a
@@ -214,12 +256,23 @@ Configure in bucket Settings → Replication.
 
 ## Object keys and uploads
 
-- Keys must be canonical paths: empty segments (`a//b`), `.`/`..` segments,
-  a leading `/` and backslashes are rejected, so one object can never be
-  reached under two spellings. The `.bkt-versions/` prefix is reserved for
-  bkt's version storage. On the **local** backend, S3 "folder marker" keys
-  ending in `/` are rejected (folders are implicit; the console creates
-  `<folder>/.keep`).
+- On every bucket, `..`, a leading `/`, backslashes and NUL bytes are
+  rejected, and the `.bkt-versions/` prefix is reserved for bkt's version
+  storage.
+- On **local**-backend buckets keys must also be canonical paths: empty
+  segments (`a//b`) and `.` segments (`./x`, `a/./b`) are rejected, because
+  the filesystem would alias them onto another key. On **S3**-backed buckets
+  those are distinct, valid S3 keys and are accepted.
+- S3 folder-marker objects (keys ending in `/`, created by s3fs `mkdir`,
+  Cyberduck/rclone "new folder" or `aws s3api put-object --key dir/`) work on
+  both backends. The local backend stores `dir/` as the file
+  `dir/.bkt-folder` inside the folder, so the marker and the folder's
+  contents (`dir/file.txt`) coexist; deleting `dir/` removes only the marker.
+  The name `.bkt-folder` is therefore reserved as a key segment on local
+  buckets. Folder markers created by earlier releases (stored as an empty
+  file `dir`) stay readable and deletable, and re-creating the marker
+  upgrades them. A local bucket still cannot hold both an object `dir` and a
+  folder `dir/` (a file and a directory of the same name).
 - `aws-chunked` uploads must send `X-Amz-Decoded-Content-Length` (as on AWS);
   the decoded length is enforced exactly. Signed streaming uploads
   (`STREAMING-AWS4-HMAC-SHA256-PAYLOAD[-TRAILER]`) have every chunk signature

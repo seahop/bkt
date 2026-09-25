@@ -27,17 +27,11 @@ func TestValidateObjectKeyAcceptsCanonicalKeys(t *testing.T) {
 	}
 }
 
-func TestValidateObjectKeyRejectsAliasesAndTraversal(t *testing.T) {
+func TestValidateObjectKeyRejectsTraversal(t *testing.T) {
 	bad := []string{
 		"",
 		"/abs",
-		"a//b",  // empty segment: aliases a/b on the filesystem
-		"./x",   // aliases x
-		"a/./b", // aliases a/b
-		"a/.",   // aliases a
-		".",
-		"a//", // empty segment before the trailing slash
-		"//",  // empty
+		"//",
 		"a/../b",
 		"..",
 		"a\\b",
@@ -47,6 +41,45 @@ func TestValidateObjectKeyRejectsAliasesAndTraversal(t *testing.T) {
 	for _, k := range bad {
 		if err := ValidateObjectKey(k); err == nil {
 			t.Errorf("ValidateObjectKey(%q) = nil, want error", k)
+		}
+		if err := ValidateLocalObjectKey(k); err == nil {
+			t.Errorf("ValidateLocalObjectKey(%q) = nil, want error", k)
+		}
+	}
+}
+
+// Non-canonical spellings are distinct keys on S3 (backend-independent
+// validation accepts them) but alias on the filesystem (local rule rejects).
+func TestNonCanonicalKeysAreLocalOnlyRejections(t *testing.T) {
+	aliases := []string{
+		"a//b",  // empty segment: aliases a/b on the filesystem
+		"./x",   // aliases x
+		"a/./b", // aliases a/b
+		"a/.",   // aliases a
+		".",
+		"a//",    // empty segment before the trailing slash
+		"a/b//",  // two trailing slashes
+		"dir/./", // '.' segment in a marker key
+	}
+	for _, k := range aliases {
+		if err := ValidateObjectKey(k); err != nil {
+			t.Errorf("ValidateObjectKey(%q) = %v, want nil (valid S3 key)", k, err)
+		}
+		if err := ValidateLocalObjectKey(k); err == nil {
+			t.Errorf("ValidateLocalObjectKey(%q) = nil, want error", k)
+		}
+	}
+}
+
+func TestValidateLocalObjectKeyFolderMarkers(t *testing.T) {
+	for _, k := range []string{"dir/", "a/b/", "dir/file.txt", "dir/.keep", ".bkt-folderX", "x.bkt-folder"} {
+		if err := ValidateLocalObjectKey(k); err != nil {
+			t.Errorf("ValidateLocalObjectKey(%q) = %v, want nil", k, err)
+		}
+	}
+	for _, k := range []string{LocalFolderMarkerName, "dir/" + LocalFolderMarkerName, LocalFolderMarkerName + "/x", "a/" + LocalFolderMarkerName + "/"} {
+		if err := ValidateLocalObjectKey(k); err == nil {
+			t.Errorf("ValidateLocalObjectKey(%q) = nil, want reserved-name error", k)
 		}
 	}
 }

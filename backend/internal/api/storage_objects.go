@@ -3,7 +3,6 @@ package api
 import (
 	"fmt"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -14,6 +13,7 @@ import (
 	"bkt/internal/validation"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -31,8 +31,13 @@ import (
 // same lock. Storage-level archive also refuses to overwrite an existing
 // archived version, which covers multi-process deployments.
 
+// Each key's lock is a 1-slot channel semaphore (rather than a sync.Mutex) so
+// acquisition can be abandoned: tryLockObjectKeys gives up after a timeout,
+// which background sweeps (lifecycle, replication) use so a slow client
+// upload holding a key cannot stall them. Entries are reference-counted and
+// removed from the registry when no holder or waiter remains.
 type keyLockEntry struct {
-	mu   sync.Mutex
+	sem  chan struct{}
 	refs int
 }
 
@@ -41,10 +46,9 @@ var objectKeyLocks = struct {
 	m map[string]*keyLockEntry
 }{m: map[string]*keyLockEntry{}}
 
-// lockObjectKeys locks the given keys of one bucket and returns the unlock
-// function. Keys are de-duplicated and locked in sorted order so concurrent
-// multi-key lockers (moves) cannot deadlock. The returned func is idempotent.
-func lockObjectKeys(bucketName string, keys ...string) func() {
+// objectLockIDs returns the de-duplicated, globally ordered lock ids for keys
+// of one bucket.
+func objectLockIDs(bucketName string, keys []string) []string {
 	ids := make([]string, 0, len(keys))
 	seen := make(map[string]bool, len(keys))
 	for _, k := range keys {
@@ -55,35 +59,85 @@ func lockObjectKeys(bucketName string, keys ...string) func() {
 		}
 	}
 	sort.Strings(ids)
+	return ids
+}
 
+// acquireKeyLockEntry registers interest in id (refcount) and returns its entry.
+func acquireKeyLockEntry(id string) *keyLockEntry {
+	objectKeyLocks.Lock()
+	defer objectKeyLocks.Unlock()
+	e := objectKeyLocks.m[id]
+	if e == nil {
+		e = &keyLockEntry{sem: make(chan struct{}, 1)}
+		objectKeyLocks.m[id] = e
+	}
+	e.refs++
+	return e
+}
+
+// releaseKeyLockEntry drops interest in id, removing the entry when unused.
+func releaseKeyLockEntry(id string, e *keyLockEntry) {
+	objectKeyLocks.Lock()
+	e.refs--
+	if e.refs == 0 {
+		delete(objectKeyLocks.m, id)
+	}
+	objectKeyLocks.Unlock()
+}
+
+// unlockKeyEntries releases held locks in reverse order.
+func unlockKeyEntries(ids []string, entries []*keyLockEntry) {
+	for i := len(entries) - 1; i >= 0; i-- {
+		<-entries[i].sem
+		releaseKeyLockEntry(ids[i], entries[i])
+	}
+}
+
+// lockObjectKeys locks the given keys of one bucket and returns the unlock
+// function. Keys are de-duplicated and locked in sorted order so concurrent
+// multi-key lockers (moves) cannot deadlock. The returned func is idempotent.
+func lockObjectKeys(bucketName string, keys ...string) func() {
+	ids := objectLockIDs(bucketName, keys)
 	entries := make([]*keyLockEntry, len(ids))
 	for i, id := range ids {
-		objectKeyLocks.Lock()
-		e := objectKeyLocks.m[id]
-		if e == nil {
-			e = &keyLockEntry{}
-			objectKeyLocks.m[id] = e
-		}
-		e.refs++
-		objectKeyLocks.Unlock()
-		e.mu.Lock()
+		e := acquireKeyLockEntry(id)
+		e.sem <- struct{}{}
 		entries[i] = e
 	}
-
 	var once sync.Once
-	return func() {
-		once.Do(func() {
-			for i := len(entries) - 1; i >= 0; i-- {
-				entries[i].mu.Unlock()
-				objectKeyLocks.Lock()
-				entries[i].refs--
-				if entries[i].refs == 0 {
-					delete(objectKeyLocks.m, ids[i])
-				}
-				objectKeyLocks.Unlock()
-			}
-		})
+	return func() { once.Do(func() { unlockKeyEntries(ids, entries) }) }
+}
+
+// tryLockObjectKeys is lockObjectKeys with a deadline: it acquires all keys in
+// the same global order, or — if they cannot all be acquired within timeout —
+// releases whatever it took and returns ok=false holding nothing. On success
+// the returned unlock func is idempotent; on failure it is a no-op.
+func tryLockObjectKeys(bucketName string, timeout time.Duration, keys ...string) (unlock func(), ok bool) {
+	ids := objectLockIDs(bucketName, keys)
+	entries := make([]*keyLockEntry, 0, len(ids))
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for _, id := range ids {
+		e := acquireKeyLockEntry(id)
+		// Uncontended fast path first: once the timer has fired, a select
+		// with both cases ready would pick at random.
+		select {
+		case e.sem <- struct{}{}:
+			entries = append(entries, e)
+			continue
+		default:
+		}
+		select {
+		case e.sem <- struct{}{}:
+			entries = append(entries, e)
+		case <-timer.C:
+			releaseKeyLockEntry(id, e)
+			unlockKeyEntries(ids[:len(entries)], entries)
+			return func() {}, false
+		}
 	}
+	var once sync.Once
+	return func() { once.Do(func() { unlockKeyEntries(ids, entries) }) }, true
 }
 
 // ── Metadata commit helpers ──────────────────────────────────────────────────
@@ -91,9 +145,11 @@ func lockObjectKeys(bucketName string, keys ...string) func() {
 // upsertCurrentObject records obj as the current state of its key with a
 // single INSERT ... ON CONFLICT (bucket_id, key) DO UPDATE, so a concurrent or
 // pre-existing row can never make the commit fail on the unique index (the
-// failure mode that left stale rows after a successful byte write). obj is
-// reloaded from the database afterwards (best effort) so ID/CreatedAt reflect
-// the stored row.
+// failure mode that left stale rows after a successful byte write). The
+// upsert and the reload of the stored row (so obj.ID/CreatedAt reflect the
+// row actually in the table) run in one transaction: any error rolls both
+// back, so a caller that treats an error as "not committed" and discards the
+// written bytes can never leave a row pointing at deleted bytes.
 func upsertCurrentObject(obj *models.Object) error {
 	now := time.Now()
 	if obj.CreatedAt.IsZero() {
@@ -103,17 +159,30 @@ func upsertCurrentObject(obj *models.Object) error {
 	if obj.StoragePath == "" {
 		obj.StoragePath = obj.Key
 	}
-	err := database.DB.Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "bucket_id"}, {Name: "key"}},
-		DoUpdates: clause.AssignmentColumns([]string{
-			"size", "content_type", "e_tag", "sha256", "storage_path",
-			"metadata", "tags", "version_id", "updated_at",
-		}),
-	}).Create(obj).Error
+	var stored models.Object
+	err := database.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "bucket_id"}, {Name: "key"}},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"size", "content_type", "e_tag", "sha256", "storage_path",
+				"metadata", "tags", "version_id", "updated_at",
+			}),
+		}).Create(obj).Error; err != nil {
+			return err
+		}
+		// Reload into a fresh struct: obj.ID was assigned by BeforeCreate
+		// and, on the conflict-update path, is not the stored row's id —
+		// First(obj) would add "id = <that id>" to the WHERE clause and find
+		// nothing.
+		if err := tx.Where("bucket_id = ? AND key = ?", obj.BucketID, obj.Key).First(&stored).Error; err != nil {
+			return fmt.Errorf("reload committed object row: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	_ = database.DB.Where("bucket_id = ? AND key = ?", obj.BucketID, obj.Key).First(obj).Error
+	*obj = stored
 	return nil
 }
 
@@ -146,17 +215,15 @@ func discardFailedWrite(backend storage.StorageBackend, bucket *models.Bucket, k
 }
 
 // validateKeyForBucket applies validation.ValidateObjectKey plus the key
-// rules of the bucket's storage backend: the local backend cannot represent
-// S3-style folder-marker keys ending in "/" (they would alias the file of the
-// same name), so they are rejected up front with a client error.
+// rules of the bucket's storage backend: on the local filesystem backend,
+// non-canonical spellings ("a//b", "./a", "a/./b") alias other keys and the
+// folder-marker file name is reserved (validation.ValidateLocalObjectKey);
+// on S3-backed buckets those are distinct, valid keys.
 func validateKeyForBucket(bucket *models.Bucket, key string) error {
-	if err := validation.ValidateObjectKey(key); err != nil {
-		return err
+	if bucket.StorageBackend != "s3" {
+		return validation.ValidateLocalObjectKey(key)
 	}
-	if bucket.StorageBackend != "s3" && strings.HasSuffix(key, "/") {
-		return fmt.Errorf("object keys ending in '/' are not supported by the local storage backend (folders are implicit; the console uses '<folder>/.keep')")
-	}
-	return nil
+	return validation.ValidateObjectKey(key)
 }
 
 // newCurrentVersionID returns the version id for a new current version ("" =

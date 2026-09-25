@@ -103,8 +103,9 @@ func InvalidateS3ConfigCache() {
 	s3ConfigCache = make(map[string]*s3ConfigCacheEntry)
 }
 
-// getStorageBackend creates a storage backend instance based on the bucket's configuration
-// Hybrid approach: If bucket has s3_config_id, use that; otherwise use .env config
+// getStorageBackend creates a storage backend instance based on the bucket's
+// configuration: local storage, the bucket's pinned S3 configuration
+// (s3_config_id), or — for an S3 bucket without one — the .env S3 settings.
 func (h *BucketHandler) getStorageBackend(bucket *models.Bucket) (storage.StorageBackend, error) {
 	backend := bucket.StorageBackend
 	if backend == "" {
@@ -116,100 +117,57 @@ func (h *BucketHandler) getStorageBackend(bucket *models.Bucket) (storage.Storag
 		return storage.NewLocalStorage(h.config.Storage.RootPath), nil
 	}
 
-	// S3 backend: Load configuration with caching (reduces database load)
+	// S3 backend. Routing is fixed per bucket: a bucket with an S3ConfigID is
+	// always served by that configuration, and a bucket WITHOUT one is always
+	// served by the .env S3 settings. The DB default configuration is applied
+	// only when a bucket is created (its id is pinned then — see
+	// CreateBucket); resolving it dynamically here would silently re-route
+	// existing buckets whenever the default changed, after which the listing
+	// reconcile would prune their metadata and import foreign objects.
 	var endpoint, region, accessKeyID, secretAccessKey, bucketPrefix string
 	var useSSL, forcePathStyle bool
 
-	// Determine cache key and load config
-	var cacheKey string
 	var configData *s3ConfigData
-	var cacheHit bool
-
 	if bucket.S3ConfigID != nil {
-		// Bucket-specific S3 configuration
-		cacheKey = bucket.S3ConfigID.String()
+		cacheKey := bucket.S3ConfigID.String()
+		var cacheHit bool
 		configData, cacheHit = getS3ConfigFromCache(cacheKey)
-
 		if !cacheHit {
-			// Cache miss - load from database
 			var s3Config models.S3Configuration
-			if err := database.DB.Where("id = ?", bucket.S3ConfigID).First(&s3Config).Error; err == nil {
-				// Decrypt S3 credentials (they're stored encrypted for security)
-				decryptedAccessKeyID, err := security.DecryptSecretKey(s3Config.AccessKeyID)
-				if err != nil {
-					return nil, fmt.Errorf("failed to decrypt access key ID: %w", err)
-				}
-				decryptedSecretAccessKey, err := security.DecryptSecretKey(s3Config.SecretAccessKey)
-				if err != nil {
-					return nil, fmt.Errorf("failed to decrypt secret access key: %w", err)
-				}
-
-				// Create config data and cache it
-				configData = &s3ConfigData{
-					Endpoint:        s3Config.Endpoint,
-					Region:          s3Config.Region,
-					AccessKeyID:     decryptedAccessKeyID,
-					SecretAccessKey: decryptedSecretAccessKey,
-					BucketPrefix:    s3Config.BucketPrefix,
-					UseSSL:          s3Config.UseSSL,
-					ForcePathStyle:  s3Config.ForcePathStyle,
-				}
-				setS3ConfigInCache(cacheKey, configData)
-			} else {
-				// Config not found - fall back to .env (don't cache fallback)
-				configData = &s3ConfigData{
-					Endpoint:        h.config.Storage.S3.Endpoint,
-					Region:          h.config.Storage.S3.Region,
-					AccessKeyID:     h.config.Storage.S3.AccessKeyID,
-					SecretAccessKey: h.config.Storage.S3.SecretAccessKey,
-					BucketPrefix:    h.config.Storage.S3.BucketPrefix,
-					UseSSL:          h.config.Storage.S3.UseSSL,
-					ForcePathStyle:  h.config.Storage.S3.ForcePathStyle,
-				}
+			if err := database.DB.Where("id = ?", bucket.S3ConfigID).First(&s3Config).Error; err != nil {
+				// Never fall back to another backend: serving the bucket from
+				// a different location would read, write and prune the wrong data.
+				return nil, fmt.Errorf("S3 configuration %s of bucket %q is unavailable: %w", cacheKey, bucket.Name, err)
 			}
+			// Decrypt S3 credentials (they're stored encrypted for security)
+			decryptedAccessKeyID, err := security.DecryptSecretKey(s3Config.AccessKeyID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decrypt access key ID: %w", err)
+			}
+			decryptedSecretAccessKey, err := security.DecryptSecretKey(s3Config.SecretAccessKey)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decrypt secret access key: %w", err)
+			}
+			configData = &s3ConfigData{
+				Endpoint:        s3Config.Endpoint,
+				Region:          s3Config.Region,
+				AccessKeyID:     decryptedAccessKeyID,
+				SecretAccessKey: decryptedSecretAccessKey,
+				BucketPrefix:    s3Config.BucketPrefix,
+				UseSSL:          s3Config.UseSSL,
+				ForcePathStyle:  s3Config.ForcePathStyle,
+			}
+			setS3ConfigInCache(cacheKey, configData)
 		}
 	} else {
-		// No specific config - use default S3 configuration
-		cacheKey = "default"
-		configData, cacheHit = getS3ConfigFromCache(cacheKey)
-
-		if !cacheHit {
-			// Cache miss - load default from database
-			var defaultConfig models.S3Configuration
-			if err := database.DB.Where("is_default = ?", true).First(&defaultConfig).Error; err == nil {
-				// Decrypt S3 credentials (they're stored encrypted for security)
-				decryptedAccessKeyID, err := security.DecryptSecretKey(defaultConfig.AccessKeyID)
-				if err != nil {
-					return nil, fmt.Errorf("failed to decrypt default access key ID: %w", err)
-				}
-				decryptedSecretAccessKey, err := security.DecryptSecretKey(defaultConfig.SecretAccessKey)
-				if err != nil {
-					return nil, fmt.Errorf("failed to decrypt default secret access key: %w", err)
-				}
-
-				// Create config data and cache it
-				configData = &s3ConfigData{
-					Endpoint:        defaultConfig.Endpoint,
-					Region:          defaultConfig.Region,
-					AccessKeyID:     decryptedAccessKeyID,
-					SecretAccessKey: decryptedSecretAccessKey,
-					BucketPrefix:    defaultConfig.BucketPrefix,
-					UseSSL:          defaultConfig.UseSSL,
-					ForcePathStyle:  defaultConfig.ForcePathStyle,
-				}
-				setS3ConfigInCache(cacheKey, configData)
-			} else {
-				// No default config - fall back to .env (don't cache fallback)
-				configData = &s3ConfigData{
-					Endpoint:        h.config.Storage.S3.Endpoint,
-					Region:          h.config.Storage.S3.Region,
-					AccessKeyID:     h.config.Storage.S3.AccessKeyID,
-					SecretAccessKey: h.config.Storage.S3.SecretAccessKey,
-					BucketPrefix:    h.config.Storage.S3.BucketPrefix,
-					UseSSL:          h.config.Storage.S3.UseSSL,
-					ForcePathStyle:  h.config.Storage.S3.ForcePathStyle,
-				}
-			}
+		configData = &s3ConfigData{
+			Endpoint:        h.config.Storage.S3.Endpoint,
+			Region:          h.config.Storage.S3.Region,
+			AccessKeyID:     h.config.Storage.S3.AccessKeyID,
+			SecretAccessKey: h.config.Storage.S3.SecretAccessKey,
+			BucketPrefix:    h.config.Storage.S3.BucketPrefix,
+			UseSSL:          h.config.Storage.S3.UseSSL,
+			ForcePathStyle:  h.config.Storage.S3.ForcePathStyle,
 		}
 	}
 
@@ -338,18 +296,6 @@ func (h *BucketHandler) CreateBucket(c *gin.Context) {
 		StorageBackend: req.StorageBackend,
 	}
 
-	// Set S3 config ID if provided
-	if req.S3ConfigID != nil && *req.S3ConfigID != "" {
-		configUUID, err := uuid.Parse(*req.S3ConfigID)
-		if err == nil {
-			// Verify the S3 config exists
-			var s3Config models.S3Configuration
-			if err := database.DB.Where("id = ?", configUUID).First(&s3Config).Error; err == nil {
-				bucket.S3ConfigID = &configUUID
-			}
-		}
-	}
-
 	if bucket.Region == "" {
 		bucket.Region = "us-east-1"
 	}
@@ -357,6 +303,21 @@ func (h *BucketHandler) CreateBucket(c *gin.Context) {
 	// Default to local storage if not specified or invalid
 	if bucket.StorageBackend != "local" && bucket.StorageBackend != "s3" {
 		bucket.StorageBackend = "local"
+	}
+
+	// Pin the S3 configuration now: the requested one, else the current DB
+	// default, else none (= the .env S3 settings). The routing never changes
+	// afterwards (see getStorageBackend).
+	if bucket.StorageBackend == "s3" {
+		configID, status, err := resolveNewBucketS3Config(req.S3ConfigID)
+		if err != nil {
+			c.JSON(status, models.ErrorResponse{
+				Error:   "Invalid S3 configuration",
+				Message: err.Error(),
+			})
+			return
+		}
+		bucket.S3ConfigID = configID
 	}
 
 	// Check if bucket already exists in storage backend (S3 or local)
@@ -470,6 +431,7 @@ func (h *BucketHandler) CreateBucket(c *gin.Context) {
 		"is_public":       bucket.IsPublic,
 		"region":          bucket.Region,
 		"storage_backend": bucket.StorageBackend,
+		"s3_config_id":    bucket.S3ConfigID,
 		"created_at":      bucket.CreatedAt,
 		"updated_at":      bucket.UpdatedAt,
 	}
@@ -480,6 +442,39 @@ func (h *BucketHandler) CreateBucket(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, response)
+}
+
+// resolveNewBucketS3Config picks the S3 configuration a new S3 bucket is
+// pinned to: the requested id (which must exist), else the current DB default
+// configuration, else nil (the .env S3 settings). On error it returns the
+// HTTP status to answer with.
+func resolveNewBucketS3Config(requested *string) (*uuid.UUID, int, error) {
+	if requested != nil && *requested != "" {
+		id, err := uuid.Parse(*requested)
+		if err != nil {
+			return nil, http.StatusBadRequest, fmt.Errorf("s3_config_id is not a valid id")
+		}
+		var n int64
+		if err := database.DB.Model(&models.S3Configuration{}).Where("id = ?", id).Count(&n).Error; err != nil {
+			return nil, http.StatusInternalServerError, fmt.Errorf("failed to look up S3 configuration: %w", err)
+		}
+		if n == 0 {
+			return nil, http.StatusBadRequest, fmt.Errorf("S3 configuration %s does not exist", id)
+		}
+		return &id, 0, nil
+	}
+	var def models.S3Configuration
+	err := database.DB.Where("is_default = ?", true).Order("created_at ASC").First(&def).Error
+	switch {
+	case err == nil:
+		return &def.ID, 0, nil
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		return nil, 0, nil
+	default:
+		// Don't guess: a bucket silently created on the .env backend instead
+		// of the default configuration would stay there for good.
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to look up the default S3 configuration: %w", err)
+	}
 }
 
 // ListBuckets lists accessible buckets for the authenticated user
@@ -731,6 +726,21 @@ func (h *BucketHandler) DeleteBucket(c *gin.Context) {
 		// Delete any bucket policies
 		if err := tx.Where("bucket_id = ?", bucket.ID).Delete(&models.BucketPolicy{}).Error; err != nil {
 			return fmt.Errorf("failed to delete bucket policies: %w", err)
+		}
+
+		// Disable replication INTO this bucket. A dangling replicate_to would
+		// otherwise target a later bucket re-created under the same name
+		// (possibly by another owner), overwriting and mirror-deleting its
+		// objects.
+		if err := tx.Model(&models.Bucket{}).
+			Where("id <> ? AND (replicate_to = ? OR replicate_to_id = ?)", bucket.ID, bucket.Name, bucket.ID).
+			Updates(map[string]interface{}{
+				"replicate_to":              "",
+				"replicate_to_id":           nil,
+				"replication_configured_by": nil,
+				"replication_configured_at": nil,
+			}).Error; err != nil {
+			return fmt.Errorf("failed to clear replication targeting the bucket: %w", err)
 		}
 
 		// Delete the bucket
@@ -1008,12 +1018,36 @@ func (h *BucketHandler) ListObjects(c *gin.Context) {
 					dbKeysMap[obj.Key] = true
 				}
 
+				// Decide which of this page's rows are stale (absent from
+				// the backend listing) BEFORE importing anything: when most
+				// rows look deleted, the far likelier explanation is that the
+				// bucket is being served from the wrong backend location, and
+				// neither pruning nor importing may happen.
+				// CRITICAL: only treat "absent from the S3 listing" as "deleted
+				// from S3" when the listing is known COMPLETE. The backend caps
+				// its listing at 10,000 objects; if we hit that cap the listing
+				// is truncated and an absent key may simply be beyond the window.
+				listingComplete := len(s3Objects) < storage.MaxListObjects
+				plan := planReconcilePrune(objects, s3KeysMap, listingComplete, time.Now())
+				if plan.suspicious {
+					logger.Warn("Listing reconcile skipped: most metadata rows are missing from the storage backend (possible misrouted backend); not pruning or importing", map[string]interface{}{
+						"bucket":       bucketName,
+						"prefix":       prefix,
+						"rows":         len(objects),
+						"missing_rows": plan.missing,
+					})
+				}
+
 				// Find objects in S3 but not in database (need to add)
 				// Limit sync to prevent overwhelming DB on huge buckets
 				// Users can paginate/navigate to sync more incrementally
 				const maxSyncPerRequest = 1000
+				pageRows := len(objects)
 				newObjects := make([]models.Object, 0)
 				for key, s3Obj := range s3KeysMap {
+					if plan.suspicious {
+						break
+					}
 					if !dbKeysMap[key] {
 						// Parse LastModified time
 						lastModified := time.Now()
@@ -1083,46 +1117,16 @@ func (h *BucketHandler) ListObjects(c *gin.Context) {
 					}
 				}
 
-				// Find objects in database but not in S3 (candidates for removal).
-				// CRITICAL: only treat "absent from the S3 listing" as "deleted
-				// from S3" when the listing is known COMPLETE. The backend caps
-				// its listing at 10,000 objects; if we hit that cap the listing
-				// is truncated and an absent key may simply be beyond the window,
-				// not deleted. Deleting on a truncated (or, before the s3.go fix,
-				// error-masked-as-empty) listing would wipe valid metadata.
-				listingComplete := len(s3Objects) < storage.MaxListObjects
-
-				validObjects := make([]models.Object, 0, len(objects))
-				staleIDs := make([]uuid.UUID, 0)
-				for _, obj := range objects {
-					if _, exists := s3KeysMap[obj.Key]; exists {
-						validObjects = append(validObjects, obj)
-					} else if listingComplete && obj.ID != uuid.Nil {
-						// Only prune when the listing is complete and this is a
-						// persisted row (not one we just appended above).
-						staleIDs = append(staleIDs, obj.ID)
-					} else {
-						// Listing incomplete: keep the row rather than risk
-						// deleting valid metadata.
-						validObjects = append(validObjects, obj)
-					}
+				// Prune stale rows in the background, each under its key's
+				// write lock and only if the row is unchanged since this
+				// listing — so a row being overwritten right now (bytes briefly
+				// absent between archive and write) is never pruned.
+				if len(plan.stale) > 0 {
+					go pruneStaleObjectRows(bucketName, plan.stale)
 				}
 
-				// Delete stale records from database in background (batched)
-				if len(staleIDs) > 0 {
-					go func(ids []uuid.UUID) {
-						// Delete in batches of 100 to avoid huge IN clauses
-						for i := 0; i < len(ids); i += batchSize {
-							end := i + batchSize
-							if end > len(ids) {
-								end = len(ids)
-							}
-							database.DB.Where("id IN ?", ids[i:end]).Delete(&models.Object{})
-						}
-					}(staleIDs)
-				}
-
-				objects = validObjects
+				// Keep the page's non-stale rows plus the imported ones.
+				objects = append(plan.keep, objects[pageRows:]...)
 			}
 		}
 	}
@@ -1154,6 +1158,80 @@ func (h *BucketHandler) ListObjects(c *gin.Context) {
 		"is_truncated":            isTruncated,
 		"next_continuation_token": nextToken,
 	})
+}
+
+// Reconcile pruning bounds (see planReconcilePrune).
+const (
+	// reconcilePruneMinAge: rows written this recently are never pruned — the
+	// backend listing may predate the write, or the key may be mid-overwrite.
+	reconcilePruneMinAge = 5 * time.Minute
+	// Safety valve: when more than reconcileSuspiciousMin rows AND more than
+	// half of the page's rows are missing from the backend, the bucket is far
+	// more likely served from the wrong location than emptied out of band.
+	reconcileSuspiciousMin = 10
+	// reconcilePruneLockWait bounds the wait for a key's write lock.
+	reconcilePruneLockWait = 2 * time.Second
+)
+
+// reconcilePrunePlan is the outcome of planReconcilePrune.
+type reconcilePrunePlan struct {
+	keep       []models.Object // rows to keep in the listing
+	stale      []models.Object // rows to prune
+	missing    int             // rows absent from the backend listing
+	suspicious bool            // safety valve tripped: prune (and import) nothing
+}
+
+// planReconcilePrune partitions a page of persisted metadata rows against the
+// backend listing. A row is stale only when the listing is complete, the key
+// is absent from it, and the row was not updated within reconcilePruneMinAge.
+// If too many rows are missing (see reconcileSuspiciousMin) nothing is stale.
+func planReconcilePrune(rows []models.Object, listed map[string]storage.ObjectInfo, listingComplete bool, now time.Time) reconcilePrunePlan {
+	plan := reconcilePrunePlan{keep: make([]models.Object, 0, len(rows))}
+	persisted := 0
+	for _, obj := range rows {
+		if obj.ID == uuid.Nil {
+			plan.keep = append(plan.keep, obj)
+			continue
+		}
+		persisted++
+		if _, ok := listed[obj.Key]; ok {
+			plan.keep = append(plan.keep, obj)
+			continue
+		}
+		plan.missing++
+		if !listingComplete || now.Sub(obj.UpdatedAt) < reconcilePruneMinAge {
+			plan.keep = append(plan.keep, obj)
+			continue
+		}
+		plan.stale = append(plan.stale, obj)
+	}
+	if plan.missing > reconcileSuspiciousMin && plan.missing*2 > persisted {
+		plan.suspicious = true
+		plan.keep = append(plan.keep, plan.stale...)
+		plan.stale = nil
+		sort.Slice(plan.keep, func(i, j int) bool { return plan.keep[i].Key < plan.keep[j].Key })
+	}
+	return plan
+}
+
+// pruneStaleObjectRows deletes metadata rows whose objects vanished from the
+// backend. Each delete runs under the key's write lock (skipped if the lock is
+// busy) and only matches the row as it was listed (same id and updated_at),
+// so a concurrent overwrite, delete or move of the key always wins.
+func pruneStaleObjectRows(bucketName string, stale []models.Object) {
+	for _, obj := range stale {
+		unlock, ok := tryLockObjectKeys(bucketName, reconcilePruneLockWait, obj.Key)
+		if !ok {
+			continue
+		}
+		res := database.DB.Where("id = ? AND updated_at = ?", obj.ID, obj.UpdatedAt).Delete(&models.Object{})
+		unlock()
+		if res.Error != nil {
+			logger.Warn("Failed to prune stale object row", map[string]interface{}{
+				"bucket": bucketName, "key": obj.Key, "error": res.Error.Error(),
+			})
+		}
+	}
 }
 
 // UploadObject uploads an object to a bucket
@@ -1304,8 +1382,16 @@ func (h *BucketHandler) UploadObject(c *gin.Context) {
 	// Use detected content type (from magic numbers, not from client header)
 	contentType := detectedType
 
-	// Create MultiReader to prepend the first bytes back to the stream
-	combinedReader := io.MultiReader(bytes.NewReader(firstBytes), file)
+	// The form file is already spooled server-side (memory or temp file) and
+	// seekable: rewind it rather than re-joining the sniffed bytes, so the
+	// body stays seekable (the S3 SDK can rewind it on retries) and its size
+	// is exact, as for async uploads.
+	var body io.Reader
+	if _, err := file.Seek(0, io.SeekStart); err == nil {
+		body = file
+	} else {
+		body = io.MultiReader(bytes.NewReader(firstBytes), file)
+	}
 
 	// Get storage backend for this bucket
 	storageBackend, err := h.getStorageBackend(&bucket)
@@ -1333,7 +1419,7 @@ func (h *BucketHandler) UploadObject(c *gin.Context) {
 	}
 	resultChan := make(chan uploadResult, 1)
 	go func() {
-		obj, status, err := h.storeObject(storageBackend, &bucket, objectKey, combinedReader, fileHeader.Size, contentType, "")
+		obj, status, err := h.storeObject(storageBackend, &bucket, objectKey, body, fileHeader.Size, contentType, "")
 		resultChan <- uploadResult{obj: obj, status: status, err: err}
 	}()
 
@@ -1380,7 +1466,13 @@ const multipartBodyOverhead = 1 << 20
 // MaxFileSize plus framing overhead and parses the form under that bound. It
 // writes the error response and returns false when the body is too large or
 // not a valid multipart form.
+//
+// The whole body is received (spooled to memory/temp disk) here, BEFORE the
+// handler takes the object's write lock, so a slow client never holds the
+// lock; the upload inactivity bound (applyUploadIdleTimeout) keeps a stalled
+// client from tying up the request and its spool file indefinitely.
 func (h *BucketHandler) limitMultipartBody(c *gin.Context) bool {
+	applyUploadIdleTimeout(c)
 	if max := h.config.Storage.MaxFileSize; max > 0 {
 		limit := max + multipartBodyOverhead
 		if c.Request.ContentLength > limit {
@@ -1993,14 +2085,7 @@ func (h *BucketHandler) RenameObject(c *gin.Context) {
 		return
 	}
 
-	// Build destination key (same folder, new filename)
-	var destinationKey string
-	lastSlash := strings.LastIndex(req.SourceKey, "/")
-	if lastSlash >= 0 {
-		destinationKey = req.SourceKey[:lastSlash+1] + req.NewName
-	} else {
-		destinationKey = req.NewName
-	}
+	destinationKey := renameDestinationKey(req.SourceKey, req.NewName)
 
 	if req.SourceKey == destinationKey {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{
@@ -2012,6 +2097,21 @@ func (h *BucketHandler) RenameObject(c *gin.Context) {
 	h.moveSingleObject(c, req.SourceKey, destinationKey, "Object renamed successfully", "An object with that name already exists")
 }
 
+// renameDestinationKey builds the key of srcKey renamed to newName in the
+// same folder. A folder-marker object ("a/dir/") is renamed as a folder
+// marker ("a/<newName>/"); this renames only the marker object — the folder
+// move moves a folder's contents.
+func renameDestinationKey(srcKey, newName string) string {
+	name, suffix := strings.TrimSuffix(srcKey, "/"), ""
+	if name != srcKey {
+		suffix = "/"
+	}
+	if lastSlash := strings.LastIndex(name, "/"); lastSlash >= 0 {
+		return name[:lastSlash+1] + newName + suffix
+	}
+	return newName + suffix
+}
+
 // MoveFolderRequest represents the request body for moving a folder
 type MoveFolderRequest struct {
 	SourcePrefix      string `json:"source_prefix" binding:"required"`
@@ -2021,6 +2121,15 @@ type MoveFolderRequest struct {
 // maxFolderMoveObjects bounds a single folder move (every object is copied,
 // permission-checked and locked individually).
 const maxFolderMoveObjects = storage.MaxListObjects
+
+// folderMoveLockTimeout bounds how long a folder move waits for its per-key
+// locks before answering 409 (retry).
+const folderMoveLockTimeout = 10 * time.Second
+
+// maxFolderMoveEvents caps the webhook events one folder move emits (two per
+// moved object: created + removed). Beyond it events are skipped and the
+// skip is logged, so a large move cannot flood the webhook queue.
+const maxFolderMoveEvents = 1000
 
 // MoveFolder moves all objects under a folder prefix to a new prefix
 // @Summary Move a folder
@@ -2130,7 +2239,17 @@ func (h *BucketHandler) MoveFolder(c *gin.Context) {
 
 	// Pre-validate every object before mutating any: destination key
 	// validity, per-object permissions (ownership of the bucket does not
-	// bypass policy), and retention.
+	// bypass policy), and retention. Permissions come from one evaluator
+	// (user, group and bucket policies loaded and parsed once) instead of
+	// three database-backed policy checks per object.
+	evaluator, err := h.policyService.NewAccessEvaluator(userUUID, bucketName)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Policy check failed",
+			Message: err.Error(),
+		})
+		return
+	}
 	newKeys := make([]string, len(sourceObjects))
 	lockKeys := make([]string, 0, 2*len(sourceObjects))
 	for i, obj := range sourceObjects {
@@ -2148,15 +2267,7 @@ func (h *BucketHandler) MoveFolder(c *gin.Context) {
 			{newKey, services.ActionPutObject},
 		}
 		for _, chk := range checks {
-			allowed, err := h.policyService.CheckObjectAccess(userUUID, bucketName, chk.key, chk.action)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-					Error:   "Policy check failed",
-					Message: err.Error(),
-				})
-				return
-			}
-			if !allowed {
+			if !evaluator.Allowed(chk.action, chk.key) {
 				c.JSON(http.StatusForbidden, models.ErrorResponse{
 					Error:   "Permission denied",
 					Message: fmt.Sprintf("Missing %s permission on %s", chk.action, chk.key),
@@ -2178,7 +2289,18 @@ func (h *BucketHandler) MoveFolder(c *gin.Context) {
 		return
 	}
 
-	unlock := lockObjectKeys(bucketName, lockKeys...)
+	// Bounded wait for the per-key locks: a folder move holds thousands of
+	// them, so rather than queueing behind a slow upload of one key (while
+	// blocking every other writer of the keys already acquired) it gives up
+	// and asks the client to retry.
+	unlock, locked := tryLockObjectKeys(bucketName, folderMoveLockTimeout, lockKeys...)
+	if !locked {
+		c.JSON(http.StatusConflict, models.ErrorResponse{
+			Error:   "Objects busy",
+			Message: "Some objects in the folder are being modified; please retry",
+		})
+		return
+	}
 	defer unlock()
 
 	// Re-read the source rows under the lock and re-check the destinations
@@ -2234,8 +2356,18 @@ func (h *BucketHandler) MoveFolder(c *gin.Context) {
 		sourceObjects[i] = cur
 	}
 
-	// Move each object through the versioning-aware helper.
+	// Move each object through the versioning-aware helper. Webhook events
+	// are bounded per request (see maxFolderMoveEvents).
 	movedCount := 0
+	eventsSent := 0
+	defer func() {
+		if skipped := 2*movedCount - eventsSent; skipped > 0 {
+			logger.Warn("Folder move: webhook events capped", map[string]interface{}{
+				"bucket": bucketName, "source_prefix": srcPrefix, "destination_prefix": dstPrefix,
+				"moved": movedCount, "events_sent": eventsSent, "events_skipped": skipped,
+			})
+		}
+	}()
 	for i := range sourceObjects {
 		obj := sourceObjects[i]
 		moved, err := moveObjectWithinBucket(storageBackend, &bucket, &obj, newKeys[i])
@@ -2247,8 +2379,11 @@ func (h *BucketHandler) MoveFolder(c *gin.Context) {
 			})
 			return
 		}
-		notifyObjectEvent(&bucket, services.EventObjectCreated, moved.Key, moved.Size, moved.ETag, moved.VersionID)
-		notifyObjectEvent(&bucket, services.EventObjectRemoved, obj.Key, 0, "", "")
+		if eventsSent+2 <= maxFolderMoveEvents {
+			notifyObjectEvent(&bucket, services.EventObjectCreated, moved.Key, moved.Size, moved.ETag, moved.VersionID)
+			notifyObjectEvent(&bucket, services.EventObjectRemoved, obj.Key, 0, "", "")
+			eventsSent += 2
+		}
 		movedCount++
 	}
 

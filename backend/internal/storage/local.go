@@ -4,6 +4,7 @@ import (
 	"crypto/md5" //nolint:gosec // MD5 is the S3 ETag algorithm (content fingerprint, not a security control)
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -13,7 +14,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+
+	"bkt/internal/validation"
 
 	"github.com/google/uuid"
 )
@@ -63,13 +67,12 @@ func (ls *LocalStorage) resolve(parts ...string) (string, error) {
 
 // checkLocalObjectKey rejects object keys that the filesystem would alias to
 // a different key. filepath.Join (inside resolve) cleans its input, so "a//b",
-// "./a", "a/./b" and "a/" would all land on the same file as their canonical
-// form — letting a caller reach an object through a spelling that policy
-// rules and the metadata index treat as a different key. Only canonical keys
-// (path.Clean(key) == key) are accepted. Keys ending in "/" (S3-style folder
-// marker objects) cannot be represented on a filesystem without colliding
-// with the file of the same name, so the local backend rejects them; the
-// console represents folders with "<folder>/.keep" objects instead.
+// "./a" and "a/./b" would all land on the same file as their canonical form —
+// letting a caller reach an object through a spelling that policy rules and
+// the metadata index treat as a different key. Only canonical keys are
+// accepted, plus exactly one trailing "/" for S3 folder-marker objects, which
+// are stored as a reserved marker file inside the folder (see localKeyRel).
+// The marker file name may not be used as a key segment.
 func checkLocalObjectKey(bucketName, objectKey string) error {
 	if strings.HasPrefix(bucketName, ".") {
 		return fmt.Errorf("invalid bucket name")
@@ -77,13 +80,39 @@ func checkLocalObjectKey(bucketName, objectKey string) error {
 	if objectKey == "" {
 		return fmt.Errorf("invalid empty object key")
 	}
-	if strings.HasSuffix(objectKey, "/") {
-		return fmt.Errorf("object keys ending in '/' are not supported by the local storage backend")
+	if strings.ContainsAny(objectKey, "\\\x00") || strings.HasPrefix(objectKey, "/") {
+		return fmt.Errorf("non-canonical object key")
 	}
-	if strings.ContainsAny(objectKey, "\\\x00") || strings.HasPrefix(objectKey, "/") || path.Clean(objectKey) != objectKey {
+	body := strings.TrimSuffix(objectKey, "/")
+	for _, seg := range strings.Split(body, "/") {
+		switch seg {
+		case "", ".", "..":
+			return fmt.Errorf("non-canonical object key")
+		case validation.LocalFolderMarkerName:
+			return fmt.Errorf("object key uses the reserved name %q", validation.LocalFolderMarkerName)
+		}
+	}
+	if path.Clean(body) != body {
 		return fmt.Errorf("non-canonical object key")
 	}
 	return nil
+}
+
+// isFolderMarkerKey reports whether key is an S3 folder-marker key ("a/b/").
+func isFolderMarkerKey(objectKey string) bool {
+	return strings.HasSuffix(objectKey, "/")
+}
+
+// localKeyRel maps an object key to its bucket-relative file path. Regular
+// keys map to themselves; a folder-marker key "a/b/" maps to the reserved
+// marker file "a/b/.bkt-folder" INSIDE the folder, so the marker coexists
+// with the folder's contents ("a/b/file.txt") instead of occupying the path
+// the folder needs.
+func localKeyRel(objectKey string) string {
+	if isFolderMarkerKey(objectKey) {
+		return objectKey + validation.LocalFolderMarkerName
+	}
+	return objectKey
 }
 
 // objectPath resolves the on-disk path of an object after checking that the
@@ -93,7 +122,85 @@ func (ls *LocalStorage) objectPath(bucketName, objectKey string) (string, error)
 	if err := checkLocalObjectKey(bucketName, objectKey); err != nil {
 		return "", err
 	}
-	return ls.resolve(bucketName, objectKey)
+	return ls.resolve(bucketName, localKeyRel(objectKey))
+}
+
+// legacyMarkerPath is where releases before folder-marker support stored a
+// folder-marker key "a/b/": filepath.Join cleaned it onto the plain file
+// "a/b". Only a zero-length regular file there is treated as such a legacy
+// marker (see readablePath / DeleteObject).
+func (ls *LocalStorage) legacyMarkerPath(bucketName, objectKey string) (string, bool) {
+	if !isFolderMarkerKey(objectKey) || checkLocalObjectKey(bucketName, objectKey) != nil {
+		return "", false
+	}
+	p, err := ls.resolve(bucketName, strings.TrimSuffix(objectKey, "/"))
+	if err != nil {
+		return "", false
+	}
+	if info, err := os.Lstat(p); err != nil || !info.Mode().IsRegular() || info.Size() != 0 {
+		return "", false
+	}
+	return p, true
+}
+
+// readablePath resolves the path an existing object's bytes are read from:
+// the object path, or — for a folder-marker key whose marker file is absent —
+// a legacy zero-length marker file (see legacyMarkerPath).
+func (ls *LocalStorage) readablePath(bucketName, objectKey string) (string, error) {
+	p, err := ls.objectPath(bucketName, objectKey)
+	if err != nil {
+		return "", err
+	}
+	if isFolderMarkerKey(objectKey) {
+		if _, serr := os.Lstat(p); os.IsNotExist(serr) || isNotDirErr(serr) {
+			if legacy, ok := ls.legacyMarkerPath(bucketName, objectKey); ok {
+				return legacy, nil
+			}
+		}
+	}
+	return p, nil
+}
+
+// isNotDirErr reports an ENOTDIR-style failure: a path component that should
+// be a directory is a file (e.g. a legacy marker file "a/b" in the way of
+// "a/b/.bkt-folder").
+func isNotDirErr(err error) bool {
+	return err != nil && errors.Is(err, syscall.ENOTDIR)
+}
+
+// statObjectFile stats p and treats a directory (a folder that has contents
+// or a marker, never an object's bytes) as "not found".
+func statObjectFile(p string) (os.FileInfo, error) {
+	info, err := os.Stat(p)
+	if err != nil {
+		if os.IsNotExist(err) || isNotDirErr(err) {
+			return nil, os.ErrNotExist
+		}
+		return nil, err
+	}
+	if info.IsDir() {
+		return nil, os.ErrNotExist
+	}
+	return info, nil
+}
+
+// openObjectFile opens an object's bytes for reading ("object not found" for
+// a missing path or a directory).
+func openObjectFile(p string) (*os.File, error) {
+	if _, err := statObjectFile(p); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("object not found")
+		}
+		return nil, fmt.Errorf("failed to open file: %w", err)
+	}
+	f, err := os.Open(p) //nolint:gosec // path validated by objectPath()/resolve() containment
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("object not found")
+		}
+		return nil, fmt.Errorf("failed to open file: %w", err)
+	}
+	return f, nil
 }
 
 // writeAtomic streams data into a temp file in dir and renames it into place
@@ -185,33 +292,50 @@ func (ls *LocalStorage) PutObject(bucketName, objectKey string, data io.Reader, 
 	if err != nil {
 		return err
 	}
+	ls.upgradeLegacyMarker(bucketName, objectKey)
 	if _, err := writeAtomic(filepath.Dir(objectPath), objectPath, data); err != nil {
 		return err
 	}
 	return nil
 }
 
+// upgradeLegacyMarker removes a legacy zero-length marker file "a/b" before a
+// folder-marker key "a/b/" is (re)written, so the folder directory — and the
+// new in-folder marker — can be created in its place.
+func (ls *LocalStorage) upgradeLegacyMarker(bucketName, objectKey string) {
+	if legacy, ok := ls.legacyMarkerPath(bucketName, objectKey); ok {
+		_ = os.Remove(legacy)
+	}
+}
+
 // GetObject retrieves an object from the local filesystem
 func (ls *LocalStorage) GetObject(bucketName, objectKey string) (io.ReadCloser, error) {
-	objectPath, err := ls.objectPath(bucketName, objectKey)
+	objectPath, err := ls.readablePath(bucketName, objectKey)
 	if err != nil {
 		return nil, err
 	}
-	file, err := os.Open(objectPath) //nolint:gosec // path validated by resolve() containment
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("object not found")
-		}
-		return nil, fmt.Errorf("failed to open file: %w", err)
-	}
-	return file, nil
+	return openObjectFile(objectPath)
 }
 
-// DeleteObject removes an object from the local filesystem
+// DeleteObject removes an object from the local filesystem. Deleting a
+// folder-marker key removes only the marker file, never the folder's
+// contents; a legacy marker file (see legacyMarkerPath) is removed instead
+// when no in-folder marker exists. A directory at a regular key's path is a
+// folder, not the object, and is left alone.
 func (ls *LocalStorage) DeleteObject(bucketName, objectKey string) error {
-	objectPath, err := ls.objectPath(bucketName, objectKey)
+	objectPath, err := ls.readablePath(bucketName, objectKey)
 	if err != nil {
 		return err
+	}
+	info, err := os.Lstat(objectPath)
+	if err != nil {
+		if os.IsNotExist(err) || isNotDirErr(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to delete file: %w", err)
+	}
+	if info.IsDir() {
+		return nil
 	}
 	if err := os.Remove(objectPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to delete file: %w", err)
@@ -241,8 +365,16 @@ func (ls *LocalStorage) ListObjects(bucketName, prefix string) ([]ObjectInfo, er
 		key := filepath.ToSlash(relPath)
 
 		// Skip internal temp files from interrupted atomic writes.
-		if strings.HasPrefix(filepath.Base(key), ".tmp-upload-") {
+		base := filepath.Base(key)
+		if strings.HasPrefix(base, ".tmp-upload-") || strings.HasPrefix(base, ".tmp-assemble-") {
 			return nil
+		}
+		// A folder-marker file "a/b/.bkt-folder" is the object "a/b/".
+		if base == validation.LocalFolderMarkerName {
+			key = strings.TrimSuffix(key, validation.LocalFolderMarkerName)
+			if key == "" {
+				return nil // never a valid key ("/" is not an object key)
+			}
 		}
 
 		if prefix != "" && !strings.HasPrefix(key, prefix) {
@@ -280,12 +412,12 @@ func (ls *LocalStorage) ListObjects(bucketName, prefix string) ([]ObjectInfo, er
 
 // ObjectExists checks if an object exists in a bucket
 func (ls *LocalStorage) ObjectExists(bucketName, objectKey string) (bool, error) {
-	objectPath, err := ls.objectPath(bucketName, objectKey)
+	objectPath, err := ls.readablePath(bucketName, objectKey)
 	if err != nil {
 		return false, err
 	}
-	if _, err := os.Stat(objectPath); err != nil {
-		if os.IsNotExist(err) {
+	if _, err := statObjectFile(objectPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
 		}
 		return false, fmt.Errorf("failed to check object: %w", err)
@@ -295,13 +427,13 @@ func (ls *LocalStorage) ObjectExists(bucketName, objectKey string) (bool, error)
 
 // GetObjectInfo gets metadata about an object
 func (ls *LocalStorage) GetObjectInfo(bucketName, objectKey string) (*ObjectInfo, error) {
-	objectPath, err := ls.objectPath(bucketName, objectKey)
+	objectPath, err := ls.readablePath(bucketName, objectKey)
 	if err != nil {
 		return nil, err
 	}
-	info, err := os.Stat(objectPath)
+	info, err := statObjectFile(objectPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("object not found")
 		}
 		return nil, fmt.Errorf("failed to get object info: %w", err)
@@ -312,7 +444,10 @@ func (ls *LocalStorage) GetObjectInfo(bucketName, objectKey string) (*ObjectInfo
 		return nil, fmt.Errorf("failed to compute object etag: %w", err)
 	}
 
-	contentType := mime.TypeByExtension(filepath.Ext(objectPath))
+	contentType := mime.TypeByExtension(path.Ext(objectKey))
+	if isFolderMarkerKey(objectKey) {
+		contentType = ""
+	}
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
@@ -328,7 +463,7 @@ func (ls *LocalStorage) GetObjectInfo(bucketName, objectKey string) (*ObjectInfo
 
 // CopyObject copies an object within the same bucket.
 func (ls *LocalStorage) CopyObject(bucketName, srcKey, dstKey string) error {
-	srcPath, err := ls.objectPath(bucketName, srcKey)
+	srcPath, err := ls.readablePath(bucketName, srcKey)
 	if err != nil {
 		return err
 	}
@@ -337,25 +472,28 @@ func (ls *LocalStorage) CopyObject(bucketName, srcKey, dstKey string) error {
 		return err
 	}
 
-	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
-		return fmt.Errorf("source object not found")
-	}
-
 	// Copying an object onto itself (e.g. a metadata-only REPLACE copy) is a
 	// no-op for the bytes. Short-circuit — otherwise the atomic write below
 	// still handles it safely, but this avoids needless IO.
-	if srcPath == dstPath {
+	if srcKey == dstKey {
+		if _, err := statObjectFile(srcPath); err != nil {
+			return fmt.Errorf("source object not found")
+		}
 		return nil
 	}
 
 	// Stream through a temp file + rename so the source is fully read before
 	// the destination is committed. This is safe even if src and dst alias.
-	src, err := os.Open(srcPath) //nolint:gosec // path validated by resolve() containment
+	src, err := openObjectFile(srcPath)
 	if err != nil {
+		if err.Error() == "object not found" {
+			return fmt.Errorf("source object not found")
+		}
 		return fmt.Errorf("failed to open source file: %w", err)
 	}
 	defer src.Close() //nolint:errcheck // best-effort close of read-only file
 
+	ls.upgradeLegacyMarker(bucketName, dstKey)
 	if _, err := writeAtomic(filepath.Dir(dstPath), dstPath, src); err != nil {
 		return err
 	}
@@ -460,6 +598,7 @@ func (ls *LocalStorage) CompleteMultipartUpload(bucketName, objectKey, uploadID 
 	if err != nil {
 		return err
 	}
+	ls.upgradeLegacyMarker(bucketName, objectKey)
 	if err := os.MkdirAll(filepath.Dir(finalPath), 0750); err != nil {
 		return fmt.Errorf("failed to create object dir: %w", err)
 	}
@@ -560,16 +699,13 @@ func (ls *LocalStorage) GetObjectRange(bucketName, objectKey string, start, leng
 	if start < 0 || length < 0 {
 		return nil, fmt.Errorf("invalid range")
 	}
-	p, err := ls.objectPath(bucketName, objectKey)
+	p, err := ls.readablePath(bucketName, objectKey)
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.Open(p) //nolint:gosec // path validated by objectPath()/resolve() containment
+	f, err := openObjectFile(p)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("object not found")
-		}
-		return nil, fmt.Errorf("failed to open file: %w", err)
+		return nil, err
 	}
 	if _, err := f.Seek(start, io.SeekStart); err != nil {
 		_ = f.Close()

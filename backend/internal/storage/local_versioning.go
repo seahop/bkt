@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/google/uuid"
 )
@@ -19,7 +20,29 @@ func (ls *LocalStorage) versionPath(bucketName, objectKey, versionID string) (st
 	if err := checkLocalObjectKey(bucketName, objectKey); err != nil {
 		return "", err
 	}
-	return ls.resolve(".versions", bucketName, objectKey, versionID)
+	// Folder-marker keys ("a/b/") keep their versions under the marker name
+	// ("a/b/.bkt-folder/<vid>"), apart from the versions of the key "a/b".
+	return ls.resolve(".versions", bucketName, localKeyRel(objectKey), versionID)
+}
+
+// storedVersionPath is versionPath for an existing stored version. Releases
+// before folder-marker support archived a marker key "a/b/" at the cleaned
+// path ".versions/<bucket>/a/b/<vid>"; that legacy location is used when the
+// version is not at the current one.
+func (ls *LocalStorage) storedVersionPath(bucketName, objectKey, versionID string) (string, error) {
+	p, err := ls.versionPath(bucketName, objectKey, versionID)
+	if err != nil || !isFolderMarkerKey(objectKey) {
+		return p, err
+	}
+	if _, serr := os.Lstat(p); os.IsNotExist(serr) {
+		legacy, lerr := ls.resolve(".versions", bucketName, strings.TrimSuffix(objectKey, "/"), versionID)
+		if lerr == nil {
+			if info, ierr := os.Lstat(legacy); ierr == nil && info.Mode().IsRegular() {
+				return legacy, nil
+			}
+		}
+	}
+	return p, nil
 }
 
 // renameNoReplace moves src to dst but fails if dst already exists, so an
@@ -50,9 +73,14 @@ func renameNoReplace(src, dst string) error {
 }
 
 func (ls *LocalStorage) ArchiveObjectVersion(bucketName, objectKey, versionID string) error {
-	src, err := ls.objectPath(bucketName, objectKey)
+	src, err := ls.readablePath(bucketName, objectKey)
 	if err != nil {
 		return err
+	}
+	// Only an object's bytes are archived — never a folder that happens to
+	// sit at the key's path (renaming it would move the folder's contents).
+	if _, err := statObjectFile(src); err != nil {
+		return fmt.Errorf("failed to archive version: object not found")
 	}
 	dst, err := ls.versionPath(bucketName, objectKey, versionID)
 	if err != nil {
@@ -68,7 +96,7 @@ func (ls *LocalStorage) ArchiveObjectVersion(bucketName, objectKey, versionID st
 }
 
 func (ls *LocalStorage) PromoteObjectVersion(bucketName, objectKey, versionID string) error {
-	src, err := ls.versionPath(bucketName, objectKey, versionID)
+	src, err := ls.storedVersionPath(bucketName, objectKey, versionID)
 	if err != nil {
 		return err
 	}
@@ -76,6 +104,7 @@ func (ls *LocalStorage) PromoteObjectVersion(bucketName, objectKey, versionID st
 	if err != nil {
 		return err
 	}
+	ls.upgradeLegacyMarker(bucketName, objectKey)
 	if err := os.MkdirAll(filepath.Dir(dst), 0750); err != nil {
 		return fmt.Errorf("failed to create object dir: %w", err)
 	}
@@ -86,7 +115,7 @@ func (ls *LocalStorage) PromoteObjectVersion(bucketName, objectKey, versionID st
 }
 
 func (ls *LocalStorage) GetObjectVersion(bucketName, objectKey, versionID string) (io.ReadCloser, error) {
-	p, err := ls.versionPath(bucketName, objectKey, versionID)
+	p, err := ls.storedVersionPath(bucketName, objectKey, versionID)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +130,7 @@ func (ls *LocalStorage) GetObjectVersion(bucketName, objectKey, versionID string
 }
 
 func (ls *LocalStorage) DeleteObjectVersion(bucketName, objectKey, versionID string) error {
-	p, err := ls.versionPath(bucketName, objectKey, versionID)
+	p, err := ls.storedVersionPath(bucketName, objectKey, versionID)
 	if err != nil {
 		return err
 	}

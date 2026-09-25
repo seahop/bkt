@@ -80,13 +80,61 @@ func TestValidateDevelopmentAllowsMissingEncryptionKey(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsWeakEncryptionKeyWhenSet(t *testing.T) {
-	for _, v := range []string{"<generated_by_setup.py>", "short", LegacyDevJWTSecret} {
+func TestValidateRejectsPlaceholderEncryptionKeyWhenSet(t *testing.T) {
+	for _, v := range []string{
+		"<generated_by_setup.py>", " <anything> ", LegacyDevJWTSecret,
+		"generated_by_setup.py-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "CHANGE_ME_CHANGE_ME_CHANGE_ME_CHANGE_ME",
+		"dev-encryption-key-change-in-production", "replace-me",
+	} {
 		cfg := devConfig(t, goodSecret)
 		t.Setenv("ENCRYPTION_KEY", v)
 		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "ENCRYPTION_KEY") {
 			t.Errorf("expected ENCRYPTION_KEY %q to be rejected, got %v", v, err)
 		}
+	}
+}
+
+// An existing ENCRYPTION_KEY that is short or contains '<'/'>' inside a real
+// value is in use and protects stored credentials: refusing to start (or
+// forcing a change) would strand them. Warn only.
+func TestValidateAllowsShortOrOddExistingEncryptionKey(t *testing.T) {
+	for _, v := range []string{"short", "a<b>c-real-key-with-brackets-in-it", "p@ss<word"} {
+		cfg := devConfig(t, goodSecret)
+		t.Setenv("ENCRYPTION_KEY", v)
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("ENCRYPTION_KEY %q must only warn, got %v", v, err)
+		}
+		cfg = validProdConfig(t)
+		t.Setenv("ENCRYPTION_KEY", v)
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("production: ENCRYPTION_KEY %q must only warn, got %v", v, err)
+		}
+	}
+	if p, w := validateEncryptionKey("short"); p != "" || w == "" {
+		t.Errorf("short key: problem=%q warning=%q", p, w)
+	}
+	if p, w := validateEncryptionKey(goodSecret); p != "" || w != "" {
+		t.Errorf("good key: problem=%q warning=%q", p, w)
+	}
+}
+
+// Decrypt-only keys are exempt from every check (they exist to read data
+// encrypted under weak/retired keys).
+func TestValidateIgnoresDecryptOnlyKeys(t *testing.T) {
+	cfg := validProdConfig(t)
+	t.Setenv("ENCRYPTION_KEY_PREVIOUS", "short,"+LegacyDevJWTSecret)
+	t.Setenv("ENCRYPTION_LEGACY_JWT_SECRET", LegacyDevJWTSecret)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("decrypt-only keys must not be validated: %v", err)
+	}
+}
+
+// JWT_SECRET rules are unchanged: the public default stays fatal (token
+// forgery), and the message points at the decrypt-only escape hatch.
+func TestLegacyJWTSecretMessageMentionsDecryptOnlyVar(t *testing.T) {
+	p := validateSecret("JWT_SECRET", LegacyDevJWTSecret)
+	if p == "" || !strings.Contains(p, "ENCRYPTION_LEGACY_JWT_SECRET") {
+		t.Fatalf("got %q", p)
 	}
 }
 

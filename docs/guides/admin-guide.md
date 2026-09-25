@@ -468,9 +468,20 @@ The system supports multiple S3 configurations, allowing buckets to use differen
 
 #### Default S3 Configuration (.env)
 
-The `.env` file provides a default S3 configuration that will be used when:
-1. No S3 configurations exist in the database
-2. A bucket uses S3 storage but doesn't specify a configuration
+The `.env` file provides the S3 settings used by every S3-backed bucket that
+has no S3 configuration pinned (`s3_config_id` is empty) — for example the
+buckets provisioned from `S3_BUCKETS`.
+
+**Routing is fixed per bucket.** When an S3 bucket is created without an
+explicit `s3_config_id`, the current *default* database configuration (if
+any) is pinned to it; otherwise it uses the `.env` settings. Changing or
+clearing the default later affects only buckets created afterwards. (Before
+this release, buckets without a configuration followed whichever
+configuration was the default at request time, so creating or switching the
+default silently re-routed them. On the first start of this release a
+one-time migration pins those buckets to the default configuration that was
+current at that moment — except `S3_BUCKETS` buckets, which stay on `.env`;
+the log lists every bucket it pinned.)
 
 ```bash
 # Default S3 Configuration in .env
@@ -525,7 +536,9 @@ curl -k -X POST https://localhost:9443/api/s3-configs \
     "is_default": false
   }'
 
-# Update S3 configuration
+# Update S3 configuration. Credentials, name and is_default can always be
+# changed; endpoint/region/bucket_prefix/use_ssl/force_path_style are refused
+# (409, listing the buckets) while any bucket uses the configuration.
 curl -k -X PUT https://localhost:9443/api/s3-configs/{config_id} \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
@@ -555,7 +568,8 @@ curl -k -X POST https://localhost:9443/api/buckets \
     "region": "us-east-1"
   }'
 
-# Create bucket using default S3 configuration
+# Create bucket using the current default S3 configuration (pinned at
+# creation; .env settings if there is no default)
 curl -k -X POST https://localhost:9443/api/buckets \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
@@ -568,10 +582,15 @@ curl -k -X POST https://localhost:9443/api/buckets \
 
 #### S3 Configuration Priority
 
-The system uses this priority order for S3 configurations:
-1. **Bucket-specific configuration**: If bucket has `s3_config_id` set, use that configuration
-2. **Default database configuration**: If a configuration is marked `is_default=true`, use it
-3. **Environment configuration**: Fall back to `.env` settings
+At **bucket creation** the configuration is chosen once and pinned:
+1. **Requested configuration**: the `s3_config_id` in the request (must exist)
+2. **Default database configuration**: the configuration marked `is_default=true`, if any
+3. **Environment configuration**: otherwise no configuration is pinned and the bucket uses the `.env` settings
+
+After that a bucket is always served by its pinned configuration, or by
+`.env` when none is pinned — it never follows later changes of the default.
+A pinned configuration that cannot be loaded makes the bucket's requests
+fail rather than falling back to another backend.
 
 ### Storage Backend Best Practices
 

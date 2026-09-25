@@ -261,11 +261,23 @@ func RunLifecycleSweep(cfg *config.Config) {
 				q = q.Where("key LIKE ?", validation.EscapeLikeWildcards(lc.Prefix)+"%")
 			}
 			if err := q.Limit(1000).Find(&expired).Error; err == nil {
+				expiredCount, busy := 0, 0
 				for i := range expired {
-					expireCurrentObject(backend, b, expired[i].Key, cutoff)
+					if busy >= sweepMaxBusyKeys {
+						break // the rest is retried next sweep
+					}
+					done, wasBusy := expireCurrentObject(backend, b, expired[i].Key, cutoff)
+					if done {
+						expiredCount++
+					} else if wasBusy {
+						busy++
+					}
 				}
-				if len(expired) > 0 {
-					logger.Info("Lifecycle: expired current objects", map[string]interface{}{"bucket": b.Name, "count": len(expired)})
+				if expiredCount > 0 {
+					logger.Info("Lifecycle: expired current objects", map[string]interface{}{"bucket": b.Name, "count": expiredCount})
+				}
+				if busy > 0 {
+					logger.Info("Lifecycle: busy keys deferred to the next sweep", map[string]interface{}{"bucket": b.Name, "busy": busy})
 				}
 			}
 		}
@@ -284,14 +296,23 @@ func RunLifecycleSweep(cfg *config.Config) {
 				vq = vq.Where("key LIKE ?", validation.EscapeLikeWildcards(lc.Prefix)+"%")
 			}
 			if err := vq.Order("versioned_at ASC").Limit(1000).Find(&vers).Error; err == nil {
-				expiredCount := 0
+				expiredCount, busy := 0, 0
 				for i := range vers {
-					if expireNoncurrentVersion(backend, b, &vers[i]) {
+					if busy >= sweepMaxBusyKeys {
+						break // the rest is retried next sweep
+					}
+					done, wasBusy := expireNoncurrentVersion(backend, b, &vers[i])
+					if done {
 						expiredCount++
+					} else if wasBusy {
+						busy++
 					}
 				}
 				if expiredCount > 0 {
 					logger.Info("Lifecycle: expired noncurrent versions", map[string]interface{}{"bucket": b.Name, "count": expiredCount})
+				}
+				if busy > 0 {
+					logger.Info("Lifecycle: busy keys deferred to the next sweep", map[string]interface{}{"bucket": b.Name, "busy": busy})
 				}
 			}
 		}
@@ -300,53 +321,64 @@ func RunLifecycleSweep(cfg *config.Config) {
 
 // expireCurrentObject expires one current object under the key's write lock.
 // The row is re-read under the lock: a concurrent overwrite or delete since
-// the candidate query must not be undone by a stale expiry.
-func expireCurrentObject(backend storage.StorageBackend, b *models.Bucket, key string, cutoff time.Time) {
-	unlock := lockObjectKeys(b.Name, key)
+// the candidate query must not be undone by a stale expiry. The lock is
+// try-acquired (sweepLockTimeout); a busy key reports busy=true and is left
+// for the next sweep rather than stalling the whole sweep.
+func expireCurrentObject(backend storage.StorageBackend, b *models.Bucket, key string, cutoff time.Time) (expired, busy bool) {
+	unlock, ok := tryLockObjectKeys(b.Name, sweepLockTimeout, key)
+	if !ok {
+		return false, true
+	}
 	defer unlock()
 
 	var obj models.Object
 	if err := database.DB.Where("bucket_id = ? AND key = ?", b.ID, key).First(&obj).Error; err != nil {
-		return // already gone
+		return false, false // already gone
 	}
 	if !obj.UpdatedAt.Before(cutoff) {
-		return // rewritten since the candidate query
+		return false, false // rewritten since the candidate query
 	}
 	if _, handled, derr := versionedDeleteCurrent(backend, b, &obj); handled {
 		if derr != nil {
 			logger.Warn("Lifecycle: versioned expiry failed", map[string]interface{}{"bucket": b.Name, "key": key, "error": derr.Error()})
+			return false, false
 		}
-		return
+		return true, false
 	}
 	if retentionBlocks(b, obj.UpdatedAt) {
-		return // defensive: retention requires versioning, so not normally reachable
+		return false, false // defensive: retention requires versioning, so not normally reachable
 	}
 	if derr := backend.DeleteObject(b.Name, key); derr != nil {
 		logger.Warn("Lifecycle: expiry failed", map[string]interface{}{"bucket": b.Name, "key": key, "error": derr.Error()})
-		return
+		return false, false
 	}
 	database.DB.Delete(&models.Object{}, "id = ?", obj.ID)
+	return true, false
 }
 
 // expireNoncurrentVersion permanently removes one noncurrent version under
 // the key's write lock when noncurrentVersionExpirable allows it (evaluated
-// under the lock). Reports whether the version was removed.
-func expireNoncurrentVersion(backend storage.StorageBackend, b *models.Bucket, v *models.ObjectVersion) bool {
-	unlock := lockObjectKeys(b.Name, v.Key)
+// under the lock). Reports whether the version was removed, and whether the
+// key was busy (lock not acquired within sweepLockTimeout; retried later).
+func expireNoncurrentVersion(backend storage.StorageBackend, b *models.Bucket, v *models.ObjectVersion) (removed, busy bool) {
+	unlock, ok := tryLockObjectKeys(b.Name, sweepLockTimeout, v.Key)
+	if !ok {
+		return false, true
+	}
 	defer unlock()
 
 	var fresh models.ObjectVersion
 	if err := database.DB.Where("id = ?", v.ID).First(&fresh).Error; err != nil {
-		return false // already removed
+		return false, false // already removed
 	}
 	if !noncurrentVersionExpirable(b, &fresh) {
-		return false // retained content, or a latest delete marker that still hides versions
+		return false, false // retained content, or a latest delete marker that still hides versions
 	}
 	if err := deleteSpecificVersion(backend, b, fresh.Key, fresh.VersionID); err != nil {
 		logger.Warn("Lifecycle: version expiry failed", map[string]interface{}{"bucket": b.Name, "key": fresh.Key, "version": fresh.VersionID, "error": err.Error()})
-		return false
+		return false, false
 	}
-	return true
+	return true, false
 }
 
 // noncurrentVersionExpirable gathers the key's current state from the DB and

@@ -2423,7 +2423,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "Admin-only. Updates an existing S3 backend configuration. New credentials are encrypted before storage. The S3 config cache is invalidated on success.",
+                "description": "Admin-only. Updates an existing S3 backend configuration. New credentials are encrypted before storage (credential rotation is always allowed). Changing endpoint, region, bucket_prefix, use_ssl or force_path_style is refused with 409 while any bucket uses the configuration, since it would re-route those buckets' data. bucket_prefix: omit to keep, \"\" to clear. The S3 config cache is invalidated on success.",
                 "consumes": [
                     "application/json"
                 ],
@@ -2473,6 +2473,12 @@ const docTemplate = `{
                     },
                     "404": {
                         "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
                         "schema": {
                             "$ref": "#/definitions/models.ErrorResponse"
                         }
@@ -3395,10 +3401,12 @@ const docTemplate = `{
             ],
             "properties": {
                 "password": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 1024
                 },
                 "username": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 255
                 }
             }
         },
@@ -3584,6 +3592,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "bucket_prefix": {
+                    "description": "BucketPrefix: omitted/null = unchanged, \"\" = clear the prefix.",
                     "type": "string"
                 },
                 "endpoint": {

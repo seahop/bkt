@@ -134,8 +134,8 @@ func TestDecryptLegacyWithV2LeadingByte(t *testing.T) {
 // them: decryption retries with the JWT_SECRET-derived (decrypt-only) source.
 func TestDecryptFallsBackToJWTSecretMaterial(t *testing.T) {
 	useTestKeyMaterial(t)
-	old := fallbackSource
-	t.Cleanup(func() { fallbackSource = old })
+	old := decryptOnlySources
+	t.Cleanup(func() { decryptOnlySources = old })
 
 	jwtSource := newKeySource([]byte("an-older-jwt-secret-used-as-encryption-key"))
 	enc, err := encryptV2With("written-before-encryption-key", jwtSource.v2Key)
@@ -143,12 +143,12 @@ func TestDecryptFallsBackToJWTSecretMaterial(t *testing.T) {
 		t.Fatalf("encrypt: %v", err)
 	}
 
-	fallbackSource = nil
+	decryptOnlySources = nil
 	if _, err := DecryptSecretKey(enc); err == nil {
 		t.Fatal("expected decrypt with the wrong primary key and no fallback to fail")
 	}
 
-	fallbackSource = jwtSource
+	decryptOnlySources = []*keySource{jwtSource}
 	dec, err := DecryptSecretKey(enc)
 	if err != nil {
 		t.Fatalf("fallback decrypt failed: %v", err)
@@ -162,7 +162,7 @@ func TestDecryptFallsBackToJWTSecretMaterial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fallbackSource = nil
+	decryptOnlySources = nil
 	if got, err := DecryptSecretKey(fresh); err != nil || got != "new" {
 		t.Fatalf("primary round trip failed: %q %v", got, err)
 	}

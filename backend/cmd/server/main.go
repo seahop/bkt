@@ -5,6 +5,9 @@ import (
 	"bkt/internal/config"
 	"bkt/internal/database"
 	"bkt/internal/metrics"
+	"bkt/internal/middleware"
+	"bkt/internal/security"
+	"bkt/internal/storage"
 	"context"
 	"log"
 	"net/http"
@@ -29,6 +32,29 @@ func main() {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 
+	// Move credentials still encrypted under a decrypt-only key
+	// (ENCRYPTION_KEY_PREVIOUS, the JWT_SECRET fallback,
+	// ENCRYPTION_LEGACY_JWT_SECRET) or in the legacy v1 format to the current
+	// ENCRYPTION_KEY, so retired keys can be dropped later. Runs in the
+	// background: each value costs a PBKDF2 derivation.
+	if getEnvBool("ENCRYPTION_REENCRYPT_ON_STARTUP", true) {
+		go func() {
+			st, err := security.ReencryptStoredSecrets(database.DB)
+			if err != nil {
+				log.Printf("ERROR: re-encrypting stored credentials stopped: %v (re-encrypted %d so far; will retry on next start)", err, st.Reencrypted)
+				return
+			}
+			if st.Reencrypted > 0 || st.Failed > 0 || st.Skipped > 0 {
+				log.Printf("Stored credential re-encryption: %d re-encrypted under the current ENCRYPTION_KEY, %d undecryptable (left unchanged), %d skipped (changed concurrently), %d examined",
+					st.Reencrypted, st.Failed, st.Skipped, st.Scanned)
+			}
+			if st.Failed == 0 && st.Skipped == 0 && (os.Getenv("ENCRYPTION_KEY_PREVIOUS") != "" || os.Getenv("ENCRYPTION_LEGACY_JWT_SECRET") != "") {
+				log.Printf("Stored credential re-encryption: no stored credential needs a decrypt-only key any more (%d examined). "+
+					"ENCRYPTION_KEY_PREVIOUS / ENCRYPTION_LEGACY_JWT_SECRET can be removed once every replica runs this version.", st.Scanned)
+			}
+		}()
+	}
+
 	// Initialize default admin user
 	if err := database.InitializeDefaultAdmin(cfg); err != nil {
 		log.Fatalf("Failed to initialize default admin: %v", err)
@@ -42,6 +68,11 @@ func main() {
 	// Create storage directory if it doesn't exist
 	if err := os.MkdirAll(cfg.Storage.RootPath, 0750); err != nil {
 		log.Fatalf("Failed to create storage directory: %v", err)
+	}
+	// MkdirAll succeeds on an existing root-owned volume (written by a
+	// pre-uid-10001 image) — probe real writes/reads so it fails fast instead.
+	if err := storage.ProbeWritable(cfg.Storage.RootPath); err != nil {
+		log.Fatalf("Storage root check failed: %v", err)
 	}
 
 	// Start Prometheus storage metrics collector (runs every 60s)
@@ -138,6 +169,16 @@ func main() {
 	log.Println("Server exited")
 }
 
+// getEnvBool parses a boolean env var, returning def when unset/invalid.
+func getEnvBool(key string, def bool) bool {
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
+		}
+	}
+	return def
+}
+
 // auditRetentionDays returns the audit-log retention window in days
 // (AUDIT_RETENTION_DAYS, default 90; 0 disables pruning).
 func auditRetentionDays() int {
@@ -152,8 +193,10 @@ func auditRetentionDays() int {
 // startServer launches an http.Server in a goroutine, using TLS when enabled.
 func startServer(name, addr string, handler http.Handler, cfg *config.Config) *http.Server {
 	srv := &http.Server{
-		Addr:    addr,
-		Handler: handler,
+		Addr: addr,
+		// Methods outside the fixed set the API serves are refused (501)
+		// before routing, logging or metrics see them.
+		Handler: middleware.RejectUnknownMethods(handler),
 		// Slowloris protection. ReadTimeout/WriteTimeout are intentionally left
 		// unset: this server streams arbitrarily large object bodies in both
 		// directions, and a fixed whole-request deadline would abort legitimate
@@ -161,7 +204,12 @@ func startServer(name, addr string, handler http.Handler, cfg *config.Config) *h
 		// abuse phases without capping transfer duration.
 		ReadHeaderTimeout: 15 * time.Second,
 		IdleTimeout:       120 * time.Second,
-		MaxHeaderBytes:    1 << 20, // 1 MiB
+		// Request line + headers. 64 KiB comfortably fits the largest
+		// legitimate requests (AWS caps S3 user metadata at 2 KB and the
+		// whole header block at 8 KB; presigned URLs with 1 KiB keys and
+		// session cookies/JWTs are a few KB) while bounding per-connection
+		// memory for unauthenticated clients.
+		MaxHeaderBytes: 64 << 10,
 	}
 	go func() {
 		if cfg.TLS.Enabled {

@@ -539,6 +539,11 @@ action below on the bucket resource (`arn:aws:s3:::bucket`):
 `s3:GetObject` on every object of the source (`arn:aws:s3:::source/*`) and
 `s3:PutObject` + `s3:DeleteObject` on every object of the target
 (`arn:aws:s3:::target/*`); prefix-scoped grants are not sufficient.
+Replication then keeps acting as the configuring user: every sync re-checks
+that user's current `s3:GetObject` (source key), `s3:PutObject` (target key)
+and `s3:DeleteObject` (target key, for mirrored deletions) per object, so an
+explicit Deny on a prefix or a single key — or a later revocation — is
+honored. A deleted or locked configurer disables the replication.
 
 ### Resource Matching
 

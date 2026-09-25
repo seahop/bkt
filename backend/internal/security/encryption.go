@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"strings"
 	"sync"
 
 	"golang.org/x/crypto/pbkdf2"
@@ -51,25 +52,47 @@ var (
 	// on the S3 auth hot path (once per request, same salt per access key).
 	derivedKeyCache sync.Map // hex(salt) -> []byte
 
-	// fallbackSource is DECRYPT-ONLY key material derived from JWT_SECRET, set
-	// when a dedicated ENCRYPTION_KEY is configured. Deployments that ran
-	// without ENCRYPTION_KEY stored credentials under the JWT_SECRET fallback;
-	// adding an ENCRYPTION_KEY later must not strand that data, so decryption
-	// retries with this source when the primary key fails. New ciphertexts
-	// are always written with the primary key.
-	fallbackSource *keySource
-	fallbackUsed   sync.Once
+	// decryptOnlySources are DECRYPT-ONLY key sources, tried in order when
+	// the primary key fails. New ciphertexts are always written with the
+	// primary key; values read through one of these are reported as stale so
+	// ReencryptStoredSecrets can move them to the primary key. In order:
+	//   1. ENCRYPTION_KEY_PREVIOUS (comma-separated) — keys rotated away from;
+	//   2. JWT_SECRET, when a dedicated ENCRYPTION_KEY is set — deployments
+	//      that ran without ENCRYPTION_KEY stored credentials under it;
+	//   3. ENCRYPTION_LEGACY_JWT_SECRET — a JWT_SECRET that has since been
+	//      rotated (e.g. away from the public development default) under
+	//      which credentials were encrypted.
+	// None of them is subject to the secret-strength checks: they never
+	// encrypt anything and exist only so old data stays readable.
+	decryptOnlySources []*keySource
 )
 
 // keySource caches the derived keys for one piece of secret material.
 type keySource struct {
+	name       string // env var it came from (for logs; never the value)
 	secret     []byte
 	legacyOnce sync.Once
 	legacy     []byte
 	v2Cache    sync.Map // hex(salt) -> []byte
+	usedOnce   sync.Once
 }
 
 func newKeySource(secret []byte) *keySource { return &keySource{secret: secret} }
+
+func newNamedKeySource(name string, secret []byte) *keySource {
+	return &keySource{name: name, secret: secret}
+}
+
+// splitKeyList parses a comma-separated key list, trimming blanks.
+func splitKeyList(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 func (k *keySource) legacyKey() ([]byte, error) {
 	k.legacyOnce.Do(func() {
@@ -99,14 +122,14 @@ func getSecretMaterial() ([]byte, error) {
 					"Set a dedicated ENCRYPTION_KEY so a JWT secret rotation/leak does not affect credential encryption " +
 					"(credentials already encrypted under JWT_SECRET remain readable after you add it).")
 			}
-		} else if jwtSecret != "" && jwtSecret != keyString {
-			fallbackSource = newKeySource([]byte(jwtSecret))
 		}
 		if keyString == "" {
 			secretMaterialErr = fmt.Errorf("ENCRYPTION_KEY (or JWT_SECRET) must be set")
 			return
 		}
 		secretMaterial = []byte(keyString)
+		decryptOnlySources = buildDecryptOnlySources(keyString, os.Getenv("ENCRYPTION_KEY") != "", jwtSecret,
+			os.Getenv("ENCRYPTION_KEY_PREVIOUS"), os.Getenv("ENCRYPTION_LEGACY_JWT_SECRET"))
 	})
 	return secretMaterial, secretMaterialErr
 }
@@ -177,49 +200,86 @@ func encryptV2With(secretKey string, derive func(salt []byte) ([]byte, error)) (
 	return base64.StdEncoding.EncodeToString(out), nil
 }
 
+// buildDecryptOnlySources assembles the decrypt-only key chain (see
+// decryptOnlySources), skipping blanks and duplicates of the primary or of
+// each other.
+func buildDecryptOnlySources(primary string, primaryIsEncryptionKey bool, jwtSecret, previous, legacyJWT string) []*keySource {
+	seen := map[string]bool{primary: true}
+	var out []*keySource
+	add := func(name, v string) {
+		if v == "" || seen[v] {
+			return
+		}
+		seen[v] = true
+		out = append(out, newNamedKeySource(name, []byte(v)))
+	}
+	for i, p := range splitKeyList(previous) {
+		add(fmt.Sprintf("ENCRYPTION_KEY_PREVIOUS[%d]", i), p)
+	}
+	if primaryIsEncryptionKey {
+		add("JWT_SECRET", jwtSecret)
+	}
+	add("ENCRYPTION_LEGACY_JWT_SECRET", strings.TrimSpace(legacyJWT))
+	return out
+}
+
 // DecryptSecretKey decrypts a secret produced by EncryptSecretKey. It handles
-// both the current v2 format and legacy v1 ciphertexts, and — when a dedicated
-// ENCRYPTION_KEY is configured — data written earlier under the JWT_SECRET
-// fallback key.
+// both the current v2 format and legacy v1 ciphertexts, and data written under
+// any configured decrypt-only key (ENCRYPTION_KEY_PREVIOUS, the JWT_SECRET
+// fallback, ENCRYPTION_LEGACY_JWT_SECRET).
 func DecryptSecretKey(encryptedSecretKey string) (string, error) {
+	plaintext, _, err := DecryptSecretKeyStatus(encryptedSecretKey)
+	return plaintext, err
+}
+
+// DecryptSecretKeyStatus is DecryptSecretKey that also reports whether the
+// ciphertext is stale — readable only through a decrypt-only key, or still in
+// the legacy v1 format — and should be re-encrypted with EncryptSecretKey.
+func DecryptSecretKeyStatus(encryptedSecretKey string) (plaintext string, stale bool, err error) {
 	raw, err := base64.StdEncoding.DecodeString(encryptedSecretKey)
 	if err != nil {
-		return "", fmt.Errorf("failed to decode base64: %w", err)
+		return "", false, fmt.Errorf("failed to decode base64: %w", err)
 	}
 
-	plaintext, err := decryptWith(raw, deriveV2Key, getLegacyKey)
+	plaintext, v1, err := decryptWith(raw, deriveV2Key, getLegacyKey)
 	if err == nil {
-		return plaintext, nil
+		return plaintext, v1, nil
 	}
-	if _, merr := getSecretMaterial(); merr == nil && fallbackSource != nil {
-		if fbPlain, fbErr := decryptWith(raw, fallbackSource.v2Key, fallbackSource.legacyKey); fbErr == nil {
-			fallbackUsed.Do(func() {
-				log.Println("NOTICE: decrypted stored credentials with the JWT_SECRET-derived key (written before ENCRYPTION_KEY was set). " +
-					"They stay readable while JWT_SECRET is unchanged; re-save those S3 configurations to re-encrypt them under ENCRYPTION_KEY.")
+	if _, merr := getSecretMaterial(); merr != nil {
+		return "", false, err
+	}
+	for _, src := range decryptOnlySources {
+		if p, _, srcErr := decryptWith(raw, src.v2Key, src.legacyKey); srcErr == nil {
+			src.usedOnce.Do(func() {
+				log.Printf("NOTICE: decrypted stored credentials with the decrypt-only key from %s. "+
+					"They are re-encrypted under the current key at startup; keep %s configured until the startup log reports no stale values remain.",
+					src.name, src.name)
 			})
-			return fbPlain, nil
+			return p, true, nil
 		}
 	}
-	return "", err
+	return "", false, err
 }
 
 // decryptWith dispatches on the format version using the given key sources.
-func decryptWith(raw []byte, derive func(salt []byte) ([]byte, error), legacy func() ([]byte, error)) (string, error) {
+// v1 reports whether the legacy (v1) format was used.
+func decryptWith(raw []byte, derive func(salt []byte) ([]byte, error), legacy func() ([]byte, error)) (plaintext string, v1 bool, err error) {
 	if len(raw) > 0 && raw[0] == encVersionV2 {
 		plaintext, err := decryptV2With(raw, derive)
 		if err == nil {
-			return plaintext, nil
+			return plaintext, false, nil
 		}
 		// A legacy (v1) ciphertext is nonce||ct with a random nonce, so ~1/256 of
 		// legacy blobs happen to begin with the v2 version byte. GCM authentication
 		// makes a wrong-format decrypt fail, never succeed spuriously, so fall back
 		// to the legacy path before reporting failure.
 		if legacyPlain, lerr := decryptLegacyWith(raw, legacy); lerr == nil {
-			return legacyPlain, nil
+			return legacyPlain, true, nil
 		}
-		return "", err
+		return "", false, err
 	}
-	return decryptLegacyWith(raw, legacy)
+	plaintext, err = decryptLegacyWith(raw, legacy)
+	return plaintext, err == nil, err
 }
 
 func decryptV2With(raw []byte, derive func(salt []byte) ([]byte, error)) (string, error) {

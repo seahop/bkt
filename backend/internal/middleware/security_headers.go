@@ -3,6 +3,7 @@ package middleware
 import (
 	"mime"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -165,6 +166,10 @@ func (w *dispositionWriter) Flush() {
 	w.apply()
 	w.ResponseWriter.Flush()
 }
+
+// Unwrap exposes the underlying writer so http.NewResponseController can
+// reach the connection (deadlines, full-duplex) through this wrapper.
+func (w *dispositionWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // IsActiveContentType reports whether a browser may execute script when it
 // renders a response of this media type: HTML, SVG, any XML (XHTML/XSLT can

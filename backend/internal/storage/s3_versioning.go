@@ -11,6 +11,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/google/uuid"
+
+	"bkt/internal/logger"
 )
 
 // s3VersionPrefix is where bkt-managed versions live inside the real bucket.
@@ -78,25 +80,20 @@ func awsURIEncode(s string, encodeSlash bool) string {
 // With noReplace it refuses to overwrite an existing dstKey (used when
 // archiving, so an archived version is never silently replaced). The check is
 // a HEAD before the copy — not atomic against other processes, but handlers
-// serialize writes per key in-process.
+// serialize writes per key in-process, and archive destinations embed a fresh
+// random version id, so a collision is practically impossible: the HEAD is
+// defense in depth. When the upstream credential lacks s3:ListBucket, AWS
+// answers a HEAD of a missing key with 403 instead of 404; that is treated as
+// "unknown — proceed" rather than failing every archive.
 func (s3s *S3Storage) serverSideMove(bucketName, srcKey, dstKey string, noReplace bool) error {
-	ctx := context.Background()
 	actual := s3s.getBucketName(bucketName)
 	if noReplace {
-		_, herr := s3s.client.HeadObject(ctx, &s3.HeadObjectInput{
-			Bucket: aws.String(actual),
-			Key:    aws.String(dstKey),
-		})
-		if herr == nil {
-			return fmt.Errorf("archived version already exists")
-		}
-		var nf *types.NotFound
-		var nsk *types.NoSuchKey
-		if !errors.As(herr, &nf) && !errors.As(herr, &nsk) &&
-			!strings.Contains(herr.Error(), "NotFound") && !strings.Contains(herr.Error(), "404") {
-			return fmt.Errorf("failed to check archived version: %w", herr)
+		if err := s3s.checkMoveDestinationFree(actual, dstKey); err != nil {
+			return err
 		}
 	}
+	ctx, cancel := s3LongCtx() // server-side copy: time grows with object size
+	defer cancel()
 	input := &s3.CopyObjectInput{
 		Bucket:     aws.String(actual),
 		Key:        aws.String(dstKey),
@@ -109,7 +106,9 @@ func (s3s *S3Storage) serverSideMove(bucketName, srcKey, dstKey string, noReplac
 	if err != nil {
 		return fmt.Errorf("failed to copy for version move: %w", err)
 	}
-	_, err = s3s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+	dctx, dcancel := s3MetaCtx()
+	defer dcancel()
+	_, err = s3s.client.DeleteObject(dctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(actual),
 		Key:    aws.String(srcKey),
 	})
@@ -117,6 +116,40 @@ func (s3s *S3Storage) serverSideMove(bucketName, srcKey, dstKey string, noReplac
 		return fmt.Errorf("failed to remove source after version move: %w", err)
 	}
 	return nil
+}
+
+// checkMoveDestinationFree HEADs dstKey and returns an error when it exists
+// (or the check failed for a reason other than "not found" / "forbidden").
+func (s3s *S3Storage) checkMoveDestinationFree(actualBucket, dstKey string) error {
+	ctx, cancel := s3MetaCtx()
+	defer cancel()
+	_, herr := s3s.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(actualBucket),
+		Key:    aws.String(dstKey),
+	})
+	return classifyMoveDestinationHead(herr, actualBucket, dstKey)
+}
+
+// classifyMoveDestinationHead interprets the no-replace HEAD's outcome.
+func classifyMoveDestinationHead(herr error, actualBucket, dstKey string) error {
+	if herr == nil {
+		return fmt.Errorf("archived version already exists")
+	}
+	var nf *types.NotFound
+	var nsk *types.NoSuchKey
+	status := s3HTTPStatus(herr)
+	if errors.As(herr, &nf) || errors.As(herr, &nsk) || status == 404 ||
+		strings.Contains(herr.Error(), "NotFound") {
+		return nil
+	}
+	if status == 403 {
+		// Without s3:ListBucket, AWS reports a missing key as 403.
+		logger.Debug("Archive destination HEAD returned 403 (upstream credential likely lacks s3:ListBucket); proceeding", map[string]interface{}{
+			"bucket": actualBucket, "key": dstKey,
+		})
+		return nil
+	}
+	return fmt.Errorf("failed to check archived version: %w", herr)
 }
 
 func (s3s *S3Storage) ArchiveObjectVersion(bucketName, objectKey, versionID string) error {
@@ -140,6 +173,7 @@ func (s3s *S3Storage) GetObjectVersion(bucketName, objectKey, versionID string) 
 	if err != nil {
 		return nil, err
 	}
+	// Streaming read: no total deadline (the body outlives this call).
 	out, err := s3s.client.GetObject(context.Background(), &s3.GetObjectInput{
 		Bucket: aws.String(s3s.getBucketName(bucketName)),
 		Key:    aws.String(vk),
@@ -155,7 +189,9 @@ func (s3s *S3Storage) DeleteObjectVersion(bucketName, objectKey, versionID strin
 	if err != nil {
 		return err
 	}
-	_, err = s3s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+	ctx, cancel := s3MetaCtx()
+	defer cancel()
+	_, err = s3s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(s3s.getBucketName(bucketName)),
 		Key:    aws.String(vk),
 	})

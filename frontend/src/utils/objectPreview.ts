@@ -55,3 +55,73 @@ export function saveBlob(blob: Blob, key: string): void {
   // Revoke after the download has had a chance to start.
   window.setTimeout(() => window.URL.revokeObjectURL(url), 10_000)
 }
+
+/**
+ * "Open in new tab" loads the whole object into memory (as a Blob) before it
+ * can be shown, so larger objects are downloaded instead.
+ */
+export const INLINE_OPEN_MAX_BYTES = 500 * 1024 * 1024
+
+/** Upper bound on how long an opened tab's blob: URL is kept alive. */
+export const INLINE_BLOB_URL_MAX_LIFETIME_MS = 30 * 60 * 1000
+const INLINE_TAB_POLL_MS = 3_000
+
+/**
+ * Opens an empty tab synchronously. Call this directly from the click handler
+ * — before any await — so popup blockers treat it as user-initiated; fill it
+ * later with showBlobInTab, or close it on failure. Returns null when the
+ * browser blocked the popup.
+ */
+export function openPendingTab(): Window | null {
+  // 'noopener' would make window.open return null, and we need the handle to
+  // navigate the tab once the object has downloaded; cut the back-reference
+  // by hand instead.
+  const tab = window.open('', '_blank')
+  if (!tab) return null
+  try {
+    tab.opener = null
+    tab.document.title = 'Loading…'
+    tab.document.body.textContent = 'Loading…'
+  } catch {
+    // Cosmetic only.
+  }
+  return tab
+}
+
+/**
+ * Navigates a tab from openPendingTab to a blob: URL of `blob`, re-typed as
+ * `inlineType` (which must come from safeInlineType). The URL stays valid
+ * while the tab is open — so the viewer can seek in media or reload — and is
+ * revoked once the tab is closed or after INLINE_BLOB_URL_MAX_LIFETIME_MS.
+ */
+export function showBlobInTab(tab: Window, blob: Blob, inlineType: string): void {
+  const url = window.URL.createObjectURL(new Blob([blob], { type: inlineType }))
+  try {
+    tab.location.href = url
+  } catch (err) {
+    window.URL.revokeObjectURL(url)
+    throw err
+  }
+  const openedAt = Date.now()
+  const timer = window.setInterval(() => {
+    let closed = true
+    try {
+      closed = tab.closed
+    } catch {
+      // Treat an inaccessible handle as closed.
+    }
+    if (closed || Date.now() - openedAt > INLINE_BLOB_URL_MAX_LIFETIME_MS) {
+      window.clearInterval(timer)
+      window.URL.revokeObjectURL(url)
+    }
+  }, INLINE_TAB_POLL_MS)
+}
+
+/** Closes a pending tab, ignoring errors (it may already be gone). */
+export function closeTab(tab: Window | null): void {
+  try {
+    tab?.close()
+  } catch {
+    // ignore
+  }
+}

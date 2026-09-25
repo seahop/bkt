@@ -38,8 +38,9 @@ func InitializeStartupBuckets(cfg *config.Config) error {
 		return nil
 	}
 
-	// Build an S3 backend from the .env S3 configuration (the same default
-	// config getStorageBackend falls back to for buckets without an S3ConfigID).
+	// Build an S3 backend from the .env S3 configuration. Buckets registered
+	// here get no S3ConfigID, which always means "the .env S3 backend" (see
+	// api getStorageBackend) — they are never re-routed to a DB default config.
 	s3Backend, err := storage.NewStorageBackend(
 		"s3",
 		cfg.Storage.RootPath,
@@ -92,7 +93,8 @@ func provisionOneBucket(s3Backend storage.StorageBackend, ownerID uuid.UUID, nam
 		log.Printf("✅ Linked existing S3 bucket %q", name)
 	}
 
-	// Register the bkt bucket record so it appears in the UI.
+	// Register the bkt bucket record so it appears in the UI. S3ConfigID
+	// stays nil: the bucket lives on the .env S3 backend.
 	bucket := models.Bucket{
 		Name:           name,
 		OwnerID:        ownerID,

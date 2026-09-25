@@ -1,4 +1,5 @@
 import api from './api';
+import type { User } from '../types';
 
 export interface SSOConfig {
   google_enabled: boolean;
@@ -14,12 +15,8 @@ export interface SSOConfig {
 export interface SSOLoginResponse {
   token: string;
   refresh_token: string;
-  user: {
-    id: string;
-    username: string;
-    email: string;
-    is_admin: boolean;
-  };
+  /** The full user record (backend models.User), same shape as /auth/login. */
+  user: User;
   is_new_user: boolean;
 }
 

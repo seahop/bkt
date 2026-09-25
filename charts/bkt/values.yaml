@@ -53,6 +53,19 @@ backend:
     ENCRYPTION_KEY: ""
     ADMIN_PASSWORD: ""
 
+    # Key rotation / migration — DECRYPT-ONLY, stored in the Secret, exempt
+    # from the secret-strength checks. Leave empty unless rotating.
+    #   ENCRYPTION_KEY_PREVIOUS: comma-separated retired ENCRYPTION_KEY values
+    #     (rotate: move the current key here, set a new ENCRYPTION_KEY).
+    #   ENCRYPTION_LEGACY_JWT_SECRET: a retired JWT_SECRET that encrypted stored
+    #     credentials while no ENCRYPTION_KEY was set.
+    # Stored credentials are re-encrypted under ENCRYPTION_KEY at startup
+    # (ENCRYPTION_REENCRYPT_ON_STARTUP, empty = true); remove these values once
+    # the startup log says no stored credential needs them.
+    ENCRYPTION_KEY_PREVIOUS: ""
+    ENCRYPTION_LEGACY_JWT_SECRET: ""
+    ENCRYPTION_REENCRYPT_ON_STARTUP: ""
+
     # Optional overrides
     ADMIN_USERNAME: "admin"
     ADMIN_EMAIL: "admin@localhost"
@@ -114,6 +127,11 @@ backend:
     # Empty (default) leaves the endpoint open (a warning is logged in
     # production). Stored as a Secret.
     METRICS_TOKEN: ""
+    # Bucket-notification webhooks may not reach private, loopback, link-local
+    # (incl. cloud metadata) or reserved addresses. Comma-separated hostnames,
+    # IPs or CIDRs listed here are exempt (e.g. an in-cluster receiver:
+    # "hooks.my-ns.svc.cluster.local,10.96.0.0/12").
+    WEBHOOK_ALLOWED_HOSTS: ""
 
     # Generic OIDC SSO (any OpenID Connect IdP; authorization code + PKCE).
     # Enabled automatically when OIDC_ISSUER_URL and OIDC_CLIENT_ID are set.
@@ -132,6 +150,10 @@ backend:
     OIDC_LINK_BY_EMAIL: "false"
     # Empty = backend default (true when OIDC_POLICIES_CLAIM is set).
     OIDC_POLICIES_AUTHORITATIVE: ""
+    # Issuer the IdP's discovery document / ID tokens carry when it differs
+    # from OIDC_ISSUER_URL (e.g. the IdP is reached via an in-cluster service
+    # name but advertises its public URL). Empty = must equal OIDC_ISSUER_URL.
+    OIDC_EXPECTED_ISSUER: ""
 
     # Google OIDC SSO
     GOOGLE_OIDC_ENABLED: "false"
@@ -140,12 +162,22 @@ backend:
     GOOGLE_REDIRECT_URL: ""
     GOOGLE_ALLOWED_DOMAINS: ""
 
+    # Vault base URL (e.g. https://vault.example.com:8200). Required for the
+    # legacy Vault JWT login (its JWKS is fetched from here).
+    VAULT_ADDR: ""
     # Vault OIDC SSO
     VAULT_OIDC_ENABLED: "false"
     VAULT_OIDC_CLIENT_ID: ""
     VAULT_OIDC_PROVIDER_URL: ""
     VAULT_OIDC_REDIRECT_URL: ""
     VAULT_OIDC_SCOPES: "openid profile"
+    # Issuer Vault advertises when it differs from VAULT_OIDC_PROVIDER_URL
+    # (Vault's api_addr != the URL bkt uses). Empty = must match.
+    VAULT_OIDC_EXPECTED_ISSUER: ""
+    # "true": a Vault "policies" claim always replaces the user's bkt policies
+    # (an empty/unmatched claim removes all). Empty/"false": only when a claimed
+    # name matches an existing bkt policy.
+    VAULT_POLICIES_AUTHORITATIVE: ""
     # Legacy Vault JWT login
     VAULT_SSO_ENABLED: "false"
     VAULT_JWT_AUDIENCE: ""

@@ -126,6 +126,14 @@ type Bucket struct {
 	// ReplicateTo mirrors this bucket's current objects into another bkt
 	// bucket (periodic sync; the target is fully managed by replication).
 	ReplicateTo string `gorm:"default:''" json:"replicate_to,omitempty"`
+	// Replication provenance, recorded when replicate_to is set. The sweep
+	// runs with the configuring user's CURRENT permissions (per key) and
+	// refuses to write into a target whose ID no longer matches (a bucket
+	// deleted and re-created under the same name). Nil on legacy configs.
+	ReplicationConfiguredBy *uuid.UUID `gorm:"type:uuid" json:"-"`
+	ReplicationConfiguredAt *time.Time `json:"-"`
+	ReplicateToID           *uuid.UUID `gorm:"type:uuid" json:"-"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 
@@ -210,8 +218,8 @@ type RegisterRequest struct {
 }
 
 type LoginRequest struct {
-	Username string `json:"username" binding:"required"`
-	Password string `json:"password" binding:"required"`
+	Username string `json:"username" binding:"required,max=255"`
+	Password string `json:"password" binding:"required,max=1024"`
 }
 
 type CreateBucketRequest struct {
@@ -252,10 +260,11 @@ type UpdateS3ConfigRequest struct {
 	Region          string `json:"region"`
 	AccessKeyID     string `json:"access_key_id"`
 	SecretAccessKey string `json:"secret_access_key"` // Only update if provided
-	BucketPrefix    string `json:"bucket_prefix"`
-	UseSSL          *bool  `json:"use_ssl"`
-	ForcePathStyle  *bool  `json:"force_path_style"`
-	IsDefault       *bool  `json:"is_default"`
+	// BucketPrefix: omitted/null = unchanged, "" = clear the prefix.
+	BucketPrefix   *string `json:"bucket_prefix"`
+	UseSSL         *bool   `json:"use_ssl"`
+	ForcePathStyle *bool   `json:"force_path_style"`
+	IsDefault      *bool   `json:"is_default"`
 }
 
 // Response DTOs

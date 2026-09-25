@@ -144,7 +144,7 @@ func SetupS3Router(cfg *config.Config) *gin.Engine {
 		s3.HEAD("/:bucket", s3Handler.HeadBucket)
 		s3.GET("/:bucket", s3Handler.ListObjects)
 		s3.POST("/:bucket", s3Handler.HandleBucketPost) // e.g. ?delete for bulk delete
-		s3.PUT("/:bucket", s3Handler.CreateBucket)      // Currently disabled
+		s3.PUT("/:bucket", s3Handler.CreateBucket)      // 409 BucketAlreadyOwnedByYou for an existing bucket
 
 		// Object-level operations
 		s3.HEAD("/:bucket/*key", s3Handler.HeadObject)

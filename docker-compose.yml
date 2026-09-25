@@ -53,6 +53,17 @@ services:
       # JWT_SECRET-derived key (with a warning); data written that way stays
       # readable after ENCRYPTION_KEY is set. Production requires it.
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      # Decrypt-only keys for rotation/migration (never used to encrypt, exempt
+      # from strength checks). ENCRYPTION_KEY_PREVIOUS: comma-separated retired
+      # ENCRYPTION_KEYs. ENCRYPTION_LEGACY_JWT_SECRET: a retired JWT_SECRET that
+      # encrypted credentials while no ENCRYPTION_KEY was set. Stored credentials
+      # are re-encrypted under ENCRYPTION_KEY at startup
+      # (ENCRYPTION_REENCRYPT_ON_STARTUP, default true); drop these once the
+      # startup log says nothing needs them. setup.py fills them in when it
+      # replaces a placeholder/default/short secret.
+      ENCRYPTION_KEY_PREVIOUS: ${ENCRYPTION_KEY_PREVIOUS:-}
+      ENCRYPTION_LEGACY_JWT_SECRET: ${ENCRYPTION_LEGACY_JWT_SECRET:-}
+      ENCRYPTION_REENCRYPT_ON_STARTUP: ${ENCRYPTION_REENCRYPT_ON_STARTUP:-}
       GO_ENV: ${GO_ENV:-development}
       SERVER_PORT: ${SERVER_PORT:-9000}
       # TLS Configuration (paths are inside the container; certs from setup.py)
@@ -79,6 +90,9 @@ services:
       AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-}
       # When set, GET /metrics requires "Authorization: Bearer <token>".
       METRICS_TOKEN: ${METRICS_TOKEN:-}
+      # Comma-separated hostnames/IPs/CIDRs webhook deliveries may reach even
+      # though they are private/loopback (SSRF guard); empty = public only.
+      WEBHOOK_ALLOWED_HOSTS: ${WEBHOOK_ALLOWED_HOSTS:-}
       # Base URL embedded in console-generated presigned URLs. The dev stack
       # fronts the backend with the vite proxy, so host derivation would see the
       # internal service name — pin the browser-facing S3 endpoint instead.
@@ -104,6 +118,9 @@ services:
       OIDC_LINK_BY_EMAIL: ${OIDC_LINK_BY_EMAIL:-false}
       # Empty = backend default (authoritative when OIDC_POLICIES_CLAIM is set)
       OIDC_POLICIES_AUTHORITATIVE: ${OIDC_POLICIES_AUTHORITATIVE:-}
+      # Issuer the discovery doc / ID tokens carry when it legitimately differs
+      # from OIDC_ISSUER_URL (IdP reached via an internal hostname); empty = same.
+      OIDC_EXPECTED_ISSUER: ${OIDC_EXPECTED_ISSUER:-}
       # Google OIDC Configuration (browser-based SSO)
       GOOGLE_OIDC_ENABLED: ${GOOGLE_OIDC_ENABLED:-false}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
@@ -126,6 +143,13 @@ services:
       VAULT_OIDC_PROVIDER_URL: ${VAULT_OIDC_PROVIDER_URL:-}
       VAULT_OIDC_REDIRECT_URL: ${VAULT_OIDC_REDIRECT_URL:-https://localhost:9443/api/auth/vault/callback}
       VAULT_OIDC_SCOPES: ${VAULT_OIDC_SCOPES:-openid profile}
+      # Issuer Vault advertises when it differs from VAULT_OIDC_PROVIDER_URL
+      # (Vault's api_addr != the URL bkt uses); empty = same.
+      VAULT_OIDC_EXPECTED_ISSUER: ${VAULT_OIDC_EXPECTED_ISSUER:-}
+      # true = a Vault "policies" claim always replaces the user's bkt policies
+      # (empty/unmatched claim removes all). Empty/false = only when a claimed
+      # name matches an existing bkt policy.
+      VAULT_POLICIES_AUTHORITATIVE: ${VAULT_POLICIES_AUTHORITATIVE:-}
       # Where SSO flows land after login. The dev stack serves the UI from the
       # vite dev server (5173); set FRONTEND_URL=https://localhost:9443 if you
       # browse the backend-embedded UI instead. It must be the SAME origin the

@@ -295,7 +295,13 @@ own port (`9000`).
 - [ ] Use minimal base images
 - [ ] Run containers as non-root (the images run the backend as uid 10001;
       re-own bind mounts from older releases — `docker-compose.prod.yml`'s
-      `init-perms` service does this)
+      `init-perms` service does this; otherwise run
+      `chown -R 10001:10001 <data dir>` once. The backend refuses to start
+      when it cannot write `STORAGE_ROOT` or read existing objects)
+- [ ] After rotating `ENCRYPTION_KEY` (old value in `ENCRYPTION_KEY_PREVIOUS`)
+      or a pre-`ENCRYPTION_KEY` `JWT_SECRET` (old value in
+      `ENCRYPTION_LEGACY_JWT_SECRET`), remove the decrypt-only value once the
+      startup log reports no stored credential needs it
 - [ ] Enable Docker Content Trust
 - [ ] Scan images for vulnerabilities
 - [ ] Keep Docker updated

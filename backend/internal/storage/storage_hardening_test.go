@@ -18,8 +18,10 @@ func TestLocalRejectsAliasingKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Every one of these would resolve (filepath.Join cleans) onto dir/file or
-	// dir; none may be usable to read, write or delete it.
-	aliases := []string{"dir//file", "./dir/file", "dir/./file", "dir/file/", "dir/", "dir/."}
+	// dir; none may be usable to read, write or delete it. (Folder-marker keys
+	// such as "dir/" are valid: they map to "dir/.bkt-folder", see
+	// local_folder_marker_test.go.)
+	aliases := []string{"dir//file", "./dir/file", "dir/./file", "dir/.", "dir//", "dir/./", "dir/.bkt-folder"}
 	for _, k := range aliases {
 		if _, err := ls.GetObject("b", k); err == nil {
 			t.Errorf("GetObject(%q) succeeded, want rejection", k)

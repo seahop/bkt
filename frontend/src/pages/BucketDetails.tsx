@@ -5,7 +5,14 @@ import { bucketApi } from '../services/api'
 import type { ObjectVersion } from '../services/api'
 import type { Object as StorageObject, Bucket } from '../types'
 import { getErrorMessage } from '../utils/errors'
-import { safeInlineType, saveBlob } from '../utils/objectPreview'
+import {
+  INLINE_OPEN_MAX_BYTES,
+  closeTab,
+  openPendingTab,
+  safeInlineType,
+  saveBlob,
+  showBlobInTab,
+} from '../utils/objectPreview'
 
 interface ContextMenuState {
   show: boolean
@@ -1095,6 +1102,19 @@ export default function BucketDetails() {
   const handleOpenInNewTab = (item: FileItem) => {
     if (!bucketName) return
     setContextMenu(prev => ({ ...prev, show: false }))
+
+    // The whole object is buffered in memory before it can be shown, and
+    // objects whose listed type can never be shown inline would only open an
+    // empty tab: download those directly.
+    if (item.size > INLINE_OPEN_MAX_BYTES || !safeInlineType(item.content_type)) {
+      void handleDownload(item)
+      return
+    }
+
+    // Open the tab NOW, inside the click, so popup blockers allow it; it is
+    // pointed at the object once the download finishes. Blocked popup -> the
+    // object is downloaded instead.
+    const tab = openPendingTab()
     bucketApi.downloadObject(bucketName, item.key).then(blob => {
       // The blob's type is the object's stored Content-Type, which the
       // uploader controls. A blob: URL inherits THIS origin, so opening an
@@ -1102,15 +1122,15 @@ export default function BucketDetails() {
       // token. Only render known-passive types inline (re-typed explicitly);
       // everything else is saved as a download instead.
       const inlineType = safeInlineType(blob.type)
-      if (!inlineType) {
+      if (tab?.closed) return // the user closed the tab while it loaded
+      if (!inlineType || !tab) {
+        closeTab(tab)
         saveBlob(blob, item.key)
         return
       }
-      const url = window.URL.createObjectURL(new Blob([blob], { type: inlineType }))
-      window.open(url, '_blank')
-      // Give the new tab time to load before releasing the object URL.
-      window.setTimeout(() => window.URL.revokeObjectURL(url), 60_000)
+      showBlobInTab(tab, blob, inlineType)
     }).catch((error: unknown) => {
+      closeTab(tab)
       console.error('Failed to open object:', error)
       setError(getErrorMessage(error, 'Failed to open object'))
     })

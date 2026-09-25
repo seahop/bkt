@@ -175,26 +175,40 @@ func (h *GoogleOAuthHandler) HandleGoogleCallback(c *gin.Context) {
 		return
 	}
 
-	// Sync policies from Google Workspace groups (if enabled). Workspace is
-	// then the source of truth: the mapped set always replaces the user's
-	// policies — even when empty, so removing someone from their groups
-	// revokes access — and a failed lookup fails the login rather than
-	// silently keeping stale (possibly revoked) policies.
+	// Sync policies from Google Workspace groups (if enabled). Workspace owns
+	// the MAPPED policies only (those some Workspace group maps to): they are
+	// added/removed to match the user's groups — so leaving a group revokes
+	// its policy — while policies an administrator assigned by hand are left
+	// alone. If the Directory API fails, bkt admins (whose access does not
+	// depend on groups) still get in without a sync; everyone else is refused
+	// rather than keeping stale (possibly revoked) policies.
 	if h.workspaceService != nil {
 		ctx := c.Request.Context()
 
 		groups, err := h.workspaceService.GetUserGroups(ctx, userInfo.Email)
-		if err != nil {
+		var managed map[string]bool
+		if err == nil {
+			managed, err = h.workspaceService.GetManagedPolicyNames(ctx)
+		}
+		switch {
+		case err != nil && user.IsAdmin:
+			logger.Warn("Google Workspace group lookup failed; admin login allowed without policy sync", map[string]interface{}{"email": userInfo.Email, "error": err.Error()})
+			_ = services.NewAuditService().LogFailure(c, user.ID, user.Username, "auth.policy_sync", "user", user.ID.String(), user.Username,
+				"google workspace lookup failed; admin login allowed without policy sync", map[string]interface{}{"provider": "google"})
+		case err != nil:
 			logger.Warn("Google Workspace group lookup failed; refusing login", map[string]interface{}{"email": userInfo.Email, "error": err.Error()})
-			h.redirectWithError(c, "policy_sync_failed", "Could not verify your Google Workspace group membership; please try again later.")
+			_ = services.NewAuditService().LogFailure(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username,
+				"google workspace group lookup failed", map[string]interface{}{"provider": "google"})
+			h.redirectWithError(c, "policy_sync_failed", "Could not verify your Google Workspace group membership (the Google Directory API is unavailable or misconfigured); please try again later or contact an administrator.")
 			return
+		default:
+			policyNames := h.workspaceService.GetPolicyNamesFromGroups(groups)
+			if err := h.workspaceService.SyncUserPoliciesFromGroups(user, policyNames, managed); err != nil {
+				h.redirectWithError(c, "policy_sync_failed", err.Error())
+				return
+			}
+			database.DB.Preload("Policies").First(user, user.ID)
 		}
-		policyNames := h.workspaceService.GetPolicyNamesFromGroups(groups)
-		if err := h.workspaceService.SyncUserPoliciesFromGroups(user, policyNames); err != nil {
-			h.redirectWithError(c, "policy_sync_failed", err.Error())
-			return
-		}
-		database.DB.Preload("Policies").First(user, user.ID)
 	}
 
 	_ = services.NewAuditService().LogSuccess(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, map[string]interface{}{"provider": "google"})

@@ -67,3 +67,7 @@ data/
 .claude
 # OIDC e2e harness scratch (screenshots, playwright install)
 tests/oidc-e2e/.work/
+
+# Python bytecode (setup.py, tests)
+__pycache__/
+*.pyc

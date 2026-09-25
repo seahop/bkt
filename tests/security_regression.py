@@ -171,7 +171,7 @@ def _enc(s, safe="-_.~"):
     return urllib.parse.quote(s, safe=safe)
 
 
-def signed_put(ak, sk, bucket, key, body, content_sha):
+def signed_put(ak, sk, bucket, key, body, content_sha, unsigned=None):
     host = urllib.parse.urlsplit(S3EP).netloc
     now = datetime.datetime.now(datetime.timezone.utc)
     amz, date = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
@@ -185,10 +185,15 @@ def signed_put(ak, sk, bucket, key, body, content_sha):
     h = {"Host": host, "X-Amz-Content-Sha256": content_sha, "X-Amz-Date": amz,
          "Content-Length": str(len(body)),
          "Authorization": f"AWS4-HMAC-SHA256 Credential={ak}/{scope}, SignedHeaders={sh}, Signature={sig}"}
+    h.update(unsigned or {})
     return raw("PUT", S3EP, path, body, h)
 
 
 def presign_get(ak, sk, bucket, key, when, expires=3600):
+    return presign(ak, sk, "GET", bucket, key, when, expires)
+
+
+def presign(ak, sk, method, bucket, key, when, expires=3600, body=b"", send_headers=None):
     host = urllib.parse.urlsplit(S3EP).netloc
     amz, date = when.strftime("%Y%m%dT%H%M%SZ"), when.strftime("%Y%m%d")
     path = "/" + bucket + "/" + _enc(key, "-_.~/")
@@ -196,11 +201,11 @@ def presign_get(ak, sk, bucket, key, when, expires=3600):
          "X-Amz-Credential": f"{ak}/{date}/us-east-1/s3/aws4_request",
          "X-Amz-Date": amz, "X-Amz-Expires": str(expires), "X-Amz-SignedHeaders": "host"}
     cq = "&".join(f"{_enc(k)}={_enc(v)}" for k, v in sorted(q.items()))
-    creq = "\n".join(["GET", path, cq, f"host:{host}\n", "host", "UNSIGNED-PAYLOAD"])
+    creq = "\n".join([method, path, cq, f"host:{host}\n", "host", "UNSIGNED-PAYLOAD"])
     sts = "\n".join(["AWS4-HMAC-SHA256", amz, f"{date}/us-east-1/s3/aws4_request",
                      hashlib.sha256(creq.encode()).hexdigest()])
     sig = hmac.new(_signing_key(sk, date), sts.encode(), hashlib.sha256).hexdigest()
-    return raw("GET", S3EP, f"{path}?{cq}&X-Amz-Signature={sig}")
+    return raw(method, S3EP, f"{path}?{cq}&X-Amz-Signature={sig}", body, send_headers or {})
 
 
 # ── Setup ────────────────────────────────────────────────────────────────────
@@ -467,11 +472,105 @@ if st == 201:
 else:
     check("create returns an error (not 201) and no dead bucket is left", st == 502 and st2 == 404, (st, b, st2))
 
+# ── 18. Unsigned x-amz-* headers ─────────────────────────────────────────────
+section("x-amz-* headers must be signed (upload link can't become a copy)")
+now = datetime.datetime.now(datetime.timezone.utc)
+st, _, _ = presign(AK, SK, "PUT", LB, "links/upload.txt", now, body=b"uploaded via link")
+check("presigned PUT without extras works (control)", st == 200 and s3_body(LB, "links/upload.txt") == b"uploaded via link", st)
+st, _, body = presign(AK, SK, "PUT", LB, "links/stolen.txt", now,
+                      send_headers={"X-Amz-Copy-Source": f"/{LB}/secret/s1.txt"})
+check("presigned PUT + unsigned X-Amz-Copy-Source rejected", st == 403 and s3_body(LB, "links/stolen.txt") is None, (st, body[:160]))
+good = b"abc"
+st, _, body = signed_put(AK, SK, LB, "links/inj.txt", good, hashlib.sha256(good).hexdigest(),
+                         unsigned={"X-Amz-Copy-Source": f"/{LB}/secret/s1.txt"})
+check("signed PUT + injected unsigned X-Amz-Copy-Source rejected", st == 403 and s3_body(LB, "links/inj.txt") is None, (st, body[:160]))
+
+# ── 19. Folder markers & key rules per backend ───────────────────────────────
+section("Folder markers (s3fs/Cyberduck mkdir) and backend-specific key rules")
+ok, code = s3err(s3.put_object, Bucket=LB, Key="mk/", Body=b"")
+ok2, code2 = s3err(s3.put_object, Bucket=LB, Key="mk/child.txt", Body=b"child")
+check("local: 'mk/' marker and 'mk/child.txt' coexist", ok and ok2 and s3_body(LB, "mk/") == b"" and s3_body(LB, "mk/child.txt") == b"child", (code, code2))
+ok, code = s3err(s3.delete_object, Bucket=LB, Key="mk/")
+check("local: deleting marker leaves children", ok and s3_body(LB, "mk/child.txt") == b"child" and s3_body(LB, "mk/") is None, code)
+ok, code = s3err(s3.put_object, Bucket=LB, Key="mk/.bkt-folder", Body=b"x")
+check("local: reserved '.bkt-folder' segment rejected", not ok, code)
+ok, code = s3err(s3.put_object, Bucket=LB, Key="dbl//slash.txt", Body=b"x")
+check("local: 'a//b' still rejected", not ok, code)
+if S3_BUCKET:
+    k = f"e2e-sec-{TS}/dbl//slash.txt"
+    ok, code = s3err(s3.put_object, Bucket=S3_BUCKET, Key=k, Body=b"s3 ok")
+    check("S3-backed: 'a//b' is a valid distinct key", ok and s3_body(S3_BUCKET, k) == b"s3 ok", code)
+    s3err(s3.delete_object, Bucket=S3_BUCKET, Key=k)
+
+# ── 20. S3 CreateBucket on an existing bucket (rclone/SDK probe) ─────────────
+section("S3 CreateBucket on existing bucket answers like AWS")
+ok, code = s3err(s3.create_bucket, Bucket=LB)
+check("existing bucket → BucketAlreadyOwnedByYou", code == "BucketAlreadyOwnedByYou", code)
+ok, code = s3err(s3.create_bucket, Bucket=f"e2e-new-{TS}")
+check("new bucket via S3 API still refused", not ok and code not in ("BucketAlreadyOwnedByYou",), code)
+
+# ── 21. Versions: DeleteObjects VersionId + ListObjectVersions pagination ────
+section("Version-aware DeleteObjects and paginated ListObjectVersions")
+VB = f"e2e-ver-{TS}"
+api("POST", "/api/buckets", ADMIN, js={"name": VB, "storage_backend": "local"})
+api("PUT", f"/api/buckets/{VB}/versioning", ADMIN, js={"versioning": "enabled"})
+v1 = s3.put_object(Bucket=VB, Key="k.txt", Body=b"one").get("VersionId")
+s3.put_object(Bucket=VB, Key="k.txt", Body=b"two")
+for i in range(3):
+    s3.put_object(Bucket=VB, Key=f"p{i}.txt", Body=b"x")
+page = s3.list_object_versions(Bucket=VB, MaxKeys=2)
+check("ListObjectVersions honours MaxKeys and sets IsTruncated", page.get("IsTruncated") is True and
+      len(page.get("Versions", [])) + len(page.get("DeleteMarkers", [])) == 2, page.get("IsTruncated"))
+allv, km, vm = [], None, None
+for _ in range(10):
+    kw = {"Bucket": VB, "MaxKeys": 2}
+    if km:
+        kw.update(KeyMarker=km, VersionIdMarker=vm)
+    pg = s3.list_object_versions(**kw)
+    allv += [(v["Key"], v["VersionId"]) for v in pg.get("Versions", [])]
+    if not pg.get("IsTruncated"):
+        break
+    km, vm = pg.get("NextKeyMarker"), pg.get("NextVersionIdMarker")
+check("paging through versions returns every version once", len(allv) == 5 and len(set(allv)) == 5, allv)
+if v1:
+    r = s3.delete_objects(Bucket=VB, Delete={"Objects": [{"Key": "k.txt", "VersionId": v1}]})
+    left = [v["VersionId"] for v in s3.list_object_versions(Bucket=VB, Prefix="k.txt").get("Versions", [])]
+    check("DeleteObjects with VersionId removes that version (no delete marker)",
+          v1 not in left and len(left) == 1 and s3_body(VB, "k.txt") == b"two" and not r.get("Errors"), (r.get("Errors"), left))
+else:
+    check("PutObject on versioned bucket returns VersionId", False)
+
+# ── 22. Junk HTTP methods & webhook SSRF targets ─────────────────────────────
+section("Junk HTTP methods refused; webhook URLs can't target internal hosts")
+for base in (CONSOLE, S3EP):
+    st, _, _ = raw("X" * 2000, base, "/")
+    check(f"{base}: arbitrary method → 501", st == 501, st)
+for u in ("http://127.0.0.1:9443/x", "http://169.254.169.254/latest/meta-data/", "http://localhost/",
+          "http://10.0.0.5/", "http://2130706433/", "http://user:pw@example.com/"):
+    st, b, _ = api("PUT", f"/api/buckets/{LB}/settings", ADMIN, js={"webhook_url": u})
+    check(f"webhook_url {u} rejected", st == 400, (st, b))
+st, b, _ = api("PUT", f"/api/buckets/{LB}/settings", ADMIN, js={"webhook_url": "https://hooks.example.com/ok"})
+check("public webhook URL accepted (control)", st == 200, (st, b))
+api("PUT", f"/api/buckets/{LB}/settings", ADMIN, js={"webhook_url": ""})
+
 # ── Cleanup ──────────────────────────────────────────────────────────────────
 for bkt in (LB, QB):
     for o in s3.list_objects_v2(Bucket=bkt).get("Contents", []):
         s3.delete_object(Bucket=bkt, Key=o["Key"])
     api("DELETE", f"/api/buckets/{bkt}", ADMIN)
+try:
+    vs = s3.list_object_versions(Bucket=VB)
+    for v in vs.get("Versions", []) + vs.get("DeleteMarkers", []):
+        s3err(s3.delete_object, Bucket=VB, Key=v["Key"], VersionId=v["VersionId"])
+    for o in s3.list_objects_v2(Bucket=VB).get("Contents", []):
+        s3err(s3.delete_object, Bucket=VB, Key=o["Key"])
+    api("DELETE", f"/api/buckets/{VB}", ADMIN)
+except Exception as e:  # cleanup is best-effort
+    print("  (cleanup of", VB, "failed:", e, ")")
+st, keys, _ = api("GET", "/api/access-keys", ADMIN)
+for k in (keys if isinstance(keys, list) else []):
+    if k.get("access_key") == AK:
+        api("DELETE", f"/api/access-keys/{k.get('id')}", ADMIN)
 for u in cleanup_users:
     api("DELETE", f"/api/users/{u}", ADMIN)
 for p in cleanup_policies:

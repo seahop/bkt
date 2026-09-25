@@ -335,23 +335,30 @@ func (h *S3APIHandler) CompleteMultipartUpload(c *gin.Context) {
 	unlock := lockObjectKeys(mpu.BucketName, mpu.ObjectKey)
 	defer unlock()
 
-	// Quota: the assembled object's size is the sum of the listed parts.
-	partSizes, err := storage.PartSizes(storageBackend, mpu.BucketName, mpu.ObjectKey, uploadID)
-	if err != nil {
-		h.s3Error(c, "NoSuchUpload", "The specified upload does not exist", uploadID, http.StatusNotFound)
-		return
-	}
+	// Quota: the assembled object's size is the sum of the listed parts. On
+	// S3-backed buckets the part listing is only requested when the bucket
+	// has a quota: it requires s3:ListMultipartUploadParts on the upstream,
+	// which a minimally-privileged backend credential may lack, and without a
+	// quota the upstream CompleteMultipartUpload validates the parts itself.
+	// Local listings are free and keep the precise InvalidPart error.
 	var assembledSize int64
-	seenParts := make(map[int]bool, len(parts))
-	for _, p := range parts {
-		sz, ok := partSizes[p.PartNumber]
-		if !ok {
-			h.s3Error(c, "InvalidPart", fmt.Sprintf("Part %d has not been uploaded", p.PartNumber), objectKey, http.StatusBadRequest)
+	if bucket.QuotaBytes > 0 || bucket.StorageBackend != "s3" {
+		partSizes, err := storage.PartSizes(storageBackend, mpu.BucketName, mpu.ObjectKey, uploadID)
+		if err != nil {
+			h.s3Error(c, "InternalError", "Failed to list uploaded parts", uploadID, http.StatusInternalServerError)
 			return
 		}
-		if !seenParts[p.PartNumber] {
-			seenParts[p.PartNumber] = true
-			assembledSize += sz
+		seenParts := make(map[int]bool, len(parts))
+		for _, p := range parts {
+			sz, ok := partSizes[p.PartNumber]
+			if !ok {
+				h.s3Error(c, "InvalidPart", fmt.Sprintf("Part %d has not been uploaded", p.PartNumber), objectKey, http.StatusBadRequest)
+				return
+			}
+			if !seenParts[p.PartNumber] {
+				seenParts[p.PartNumber] = true
+				assembledSize += sz
+			}
 		}
 	}
 	reservation, qerr := reserveBucketQuota(bucket, assembledSize)

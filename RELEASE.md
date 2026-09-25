@@ -246,6 +246,24 @@ so the old image can still be run against the volume if needed — delete
 that directory once you are satisfied. External-Postgres deployments
 (compose `docker-compose.prod.yml`, Helm) are not touched: upgrade those
 databases on your own schedule with `pg_dump`/`pg_restore`.
+
+**Unprivileged backend (upgrading from v1.4.0 or earlier):** the images now
+run the backend as uid/gid 10001 instead of root. Bucket data written by the
+old root-run images is root-owned (objects often 0600), so the new backend
+could neither write nor read it. It now probes `STORAGE_ROOT` at startup and
+exits with a fix-it message rather than starting and failing every request.
+Handled automatically by the omnibus entrypoint, `docker-compose.prod.yml`
+(`init-perms`) and the Helm chart (`fsGroup`). Custom compose files,
+`docker run -v` with `bkt-backend`, and Helm on hostPath/NFS need a one-time
+`chown -R 10001:10001 <data dir>` (named volume:
+`docker run --rm -v <volume>:/data alpine chown -R 10001:10001 /data`) before
+starting the new version.
+
+**Secrets:** re-run `python3 setup.py` after pulling a new release. If `.env`
+still contains a placeholder / old default / short `JWT_SECRET` or
+`ENCRYPTION_KEY`, it is replaced and the old value moved to
+`ENCRYPTION_KEY_PREVIOUS` / `ENCRYPTION_LEGACY_JWT_SECRET` (decrypt-only), and
+the backend re-encrypts stored S3 credentials under the new key at startup.
 ```bash
 BKT_VERSION=1.4.0 docker compose -f docker-compose.prod.yml pull
 BKT_VERSION=1.4.0 docker compose -f docker-compose.prod.yml up -d

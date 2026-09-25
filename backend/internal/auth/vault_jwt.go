@@ -66,6 +66,8 @@ func (h *VaultJWTHandler) LoginWithVaultJWT(c *gin.Context) {
 		return
 	}
 
+	// Unauthenticated endpoint: bound the body (a JWT is a few KB).
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10)
 	var req VaultLoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{
@@ -106,9 +108,13 @@ func (h *VaultJWTHandler) LoginWithVaultJWT(c *gin.Context) {
 		return
 	}
 
-	// Sync policies from SSO claims (on every login, SSO is source of truth).
-	// A present-but-empty claim clears them, so offboarding in Vault takes
-	// effect instead of failing open with the previous policies.
+	// Sync policies from SSO claims. With VAULT_POLICIES_AUTHORITATIVE=true
+	// Vault is the source of truth: a present claim always replaces them and
+	// a present-but-empty claim clears them (offboarding in Vault takes
+	// effect). By default a claim only replaces them when it names at least
+	// one existing bkt policy, so Vault's usual template (which always sends
+	// "policies", often with Vault-only names) doesn't wipe policies an
+	// administrator assigned in bkt.
 	if claims.Policies != nil {
 		if err := h.syncUserPoliciesFromClaims(user, *claims.Policies); err != nil {
 			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
@@ -276,10 +282,15 @@ func (h *VaultJWTHandler) GetVaultJWKS() (*VaultJWKS, error) {
 
 // syncUserPoliciesFromClaims syncs the user's policies based on SSO JWT claims.
 // Policy names in the JWT must match policy names in the database exactly.
-// This replaces the user's current policies with those from SSO (SSO is source
-// of truth) — an empty list removes them all.
+// Authoritative mode (VAULT_POLICIES_AUTHORITATIVE=true) replaces the user's
+// policies with those named — an empty list removes them all; the default
+// replaces only when at least one name matches an existing bkt policy.
 func (h *VaultJWTHandler) syncUserPoliciesFromClaims(user *models.User, policyNames []string) error {
-	if err := syncUserPoliciesByName(user, policyNames); err != nil {
+	sync := syncUserPoliciesIfAnyMatch
+	if h.config.VaultSSO.PoliciesAuthoritative {
+		sync = syncUserPoliciesByName
+	}
+	if err := sync(user, policyNames); err != nil {
 		return fmt.Errorf("failed to sync policies: %w", err)
 	}
 	return nil

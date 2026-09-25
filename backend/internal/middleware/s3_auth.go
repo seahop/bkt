@@ -102,6 +102,9 @@ func S3AuthMiddleware() gin.HandlerFunc {
 
 		signingKey, err := verifyHeaderSignature(c.Request, auth, secretKey, time.Now())
 		if err != nil {
+			if abortUnsignedHeaders(c, err) {
+				return
+			}
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"Code":    "SignatureDoesNotMatch",
 				"Message": "The request signature we calculated does not match the signature you provided",
@@ -187,6 +190,9 @@ func authenticatePresigned(c *gin.Context) {
 	}
 
 	if err := verifyPresignedSignature(c.Request, q, secretKey); err != nil {
+		if abortUnsignedHeaders(c, err) {
+			return
+		}
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 			"Code":    "SignatureDoesNotMatch",
 			"Message": "The request signature we calculated does not match the signature you provided",
@@ -233,6 +239,9 @@ func verifyPresignedSignature(r *http.Request, q url.Values, secretKey string) e
 	}
 	if !signedHeadersIncludeHost(signedHeaders) {
 		return fmt.Errorf("host must be a signed header")
+	}
+	if err := checkAmzHeadersSigned(r, signedHeaders, true); err != nil {
+		return err
 	}
 	dateStr := q.Get("X-Amz-Date")
 
@@ -443,6 +452,15 @@ func computeHeaderSignature(r *http.Request, a *sigV4Auth, secretKey string) ([]
 	if !signedHeadersIncludeHost(a.SignedHeaders) {
 		return nil, fmt.Errorf("host must be a signed header")
 	}
+	if err := checkAmzHeadersSigned(r, a.SignedHeaders, false); err != nil {
+		return nil, err
+	}
+	// The timestamp the signature is bound to must itself be signed; with
+	// X-Amz-Date that is enforced above (every x-amz-* header), with the
+	// legacy Date header it is checked here.
+	if r.Header.Get("X-Amz-Date") == "" && !signedHeadersInclude(a.SignedHeaders, "date") {
+		return nil, &unsignedHeadersError{names: []string{"date"}}
+	}
 	q, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil {
 		return nil, fmt.Errorf("malformed query string")
@@ -469,12 +487,73 @@ func computeHeaderSignature(r *http.Request, a *sigV4Auth, secretKey string) ([]
 }
 
 func signedHeadersIncludeHost(signedHeaders string) bool {
+	return signedHeadersInclude(signedHeaders, "host")
+}
+
+func signedHeadersInclude(signedHeaders, name string) bool {
 	for _, h := range strings.Split(signedHeaders, ";") {
-		if h == "host" {
+		if h == name {
 			return true
 		}
 	}
 	return false
+}
+
+// unsignedHeadersError reports x-amz-* (or date) headers that were present on
+// the request but not covered by the signature. It maps to 403 AccessDenied,
+// matching AWS.
+type unsignedHeadersError struct{ names []string }
+
+func (e *unsignedHeadersError) Error() string {
+	return "There were headers present in the request which were not signed: " + strings.Join(e.names, ", ")
+}
+
+// checkAmzHeadersSigned enforces the AWS rule that every x-amz-* header sent
+// with a request must be part of SignedHeaders. Without it an unsigned
+// header could change the meaning of a signed request — e.g. adding
+// X-Amz-Copy-Source to a presigned PUT turns an upload link into a
+// server-side copy of any object the signer can read, and x-amz-tagging /
+// x-amz-meta-* / x-amz-acl could be injected likewise.
+//
+// For presigned (query-string) requests x-amz-content-sha256 may be present
+// unsigned, as AWS allows (the payload is UNSIGNED-PAYLOAD there anyway and
+// the value is not used for integrity checks). For header auth it must be
+// signed like every other x-amz-* header (including x-amz-date).
+func checkAmzHeadersSigned(r *http.Request, signedHeaders string, presigned bool) error {
+	signed := make(map[string]bool)
+	for _, h := range strings.Split(signedHeaders, ";") {
+		signed[strings.ToLower(strings.TrimSpace(h))] = true
+	}
+	var missing []string
+	for k := range r.Header {
+		name := strings.ToLower(k)
+		if !strings.HasPrefix(name, "x-amz-") || signed[name] {
+			continue
+		}
+		if presigned && name == "x-amz-content-sha256" {
+			continue
+		}
+		missing = append(missing, name)
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	sort.Strings(missing)
+	return &unsignedHeadersError{names: missing}
+}
+
+// abortUnsignedHeaders answers 403 AccessDenied (the AWS response) when err is
+// an unsignedHeadersError; it reports whether it did.
+func abortUnsignedHeaders(c *gin.Context, err error) bool {
+	var ue *unsignedHeadersError
+	if !errors.As(err, &ue) {
+		return false
+	}
+	c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+		"Code":    "AccessDenied",
+		"Message": ue.Error(),
+	})
+	return true
 }
 
 // ── Canonical request ───────────────────────────────────────────────────────

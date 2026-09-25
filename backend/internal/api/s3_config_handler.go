@@ -1,7 +1,10 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
+	"strings"
+
 	"bkt/internal/config"
 	"bkt/internal/database"
 	"bkt/internal/models"
@@ -218,7 +221,7 @@ func (h *S3ConfigHandler) GetS3Config(c *gin.Context) {
 
 // UpdateS3Config updates an S3 configuration (admin only)
 // @Summary Update an S3 configuration
-// @Description Admin-only. Updates an existing S3 backend configuration. New credentials are encrypted before storage. The S3 config cache is invalidated on success.
+// @Description Admin-only. Updates an existing S3 backend configuration. New credentials are encrypted before storage (credential rotation is always allowed). Changing endpoint, region, bucket_prefix, use_ssl or force_path_style is refused with 409 while any bucket uses the configuration, since it would re-route those buckets' data. bucket_prefix: omit to keep, "" to clear. The S3 config cache is invalidated on success.
 // @Tags s3-configs
 // @Accept json
 // @Produce json
@@ -228,6 +231,7 @@ func (h *S3ConfigHandler) GetS3Config(c *gin.Context) {
 // @Failure 400 {object} models.ErrorResponse
 // @Failure 403 {object} models.ErrorResponse
 // @Failure 404 {object} models.ErrorResponse
+// @Failure 409 {object} models.ErrorResponse
 // @Failure 500 {object} models.ErrorResponse
 // @Security BearerAuth
 // @Router /api/s3-configs/{id} [put]
@@ -267,6 +271,30 @@ func (h *S3ConfigHandler) UpdateS3Config(c *gin.Context) {
 		return
 	}
 
+	// Settings that decide WHERE a bucket's data lives cannot change while
+	// buckets are pinned to this configuration: every such bucket would
+	// silently be served from a different location (and the listing
+	// reconcile would then prune its metadata). Credential rotation, the
+	// name and the default flag stay editable.
+	if changed := s3ConfigLocationChanges(&s3Config, &req); len(changed) > 0 {
+		names, err := bucketsUsingS3Config(configUUID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+				Error:   "Failed to check S3 configuration usage",
+				Message: err.Error(),
+			})
+			return
+		}
+		if len(names) > 0 {
+			c.JSON(http.StatusConflict, models.ErrorResponse{
+				Error: "S3 configuration is in use",
+				Message: fmt.Sprintf("Cannot change %s while buckets use this configuration (it would re-route their data): %s",
+					strings.Join(changed, ", "), strings.Join(names, ", ")),
+			})
+			return
+		}
+	}
+
 	// Update fields if provided
 	if req.Name != "" {
 		s3Config.Name = req.Name
@@ -277,32 +305,8 @@ func (h *S3ConfigHandler) UpdateS3Config(c *gin.Context) {
 	if req.Region != "" {
 		s3Config.Region = req.Region
 	}
-	if req.AccessKeyID != "" {
-		// Encrypt access key ID before storing
-		encryptedAccessKeyID, err := security.EncryptSecretKey(req.AccessKeyID)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-				Error:   "Failed to encrypt access key ID",
-				Message: err.Error(),
-			})
-			return
-		}
-		s3Config.AccessKeyID = encryptedAccessKeyID
-	}
-	if req.SecretAccessKey != "" {
-		// Encrypt secret access key before storing (CRITICAL security requirement)
-		encryptedSecretAccessKey, err := security.EncryptSecretKey(req.SecretAccessKey)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-				Error:   "Failed to encrypt secret access key",
-				Message: err.Error(),
-			})
-			return
-		}
-		s3Config.SecretAccessKey = encryptedSecretAccessKey
-	}
-	if req.BucketPrefix != "" {
-		s3Config.BucketPrefix = req.BucketPrefix
+	if req.BucketPrefix != nil {
+		s3Config.BucketPrefix = *req.BucketPrefix
 	}
 	if req.UseSSL != nil {
 		s3Config.UseSSL = *req.UseSSL
@@ -312,6 +316,52 @@ func (h *S3ConfigHandler) UpdateS3Config(c *gin.Context) {
 	}
 	if req.IsDefault != nil {
 		s3Config.IsDefault = *req.IsDefault
+	}
+
+	// Credentials: a value equal to the stored ciphertext is the console
+	// echoing back what GET returned (access_key_id is served encrypted), not
+	// a new key — encrypting it again would corrupt the credential. Unchanged
+	// credentials are re-encrypted under the current key (the "re-save to
+	// re-encrypt" path for credentials written under an older key).
+	accessKeyID, secretAccessKey := req.AccessKeyID, req.SecretAccessKey
+	if accessKeyID == s3Config.AccessKeyID {
+		accessKeyID = ""
+	}
+	if secretAccessKey == s3Config.SecretAccessKey {
+		secretAccessKey = ""
+	}
+	if accessKeyID == "" {
+		if plain, derr := security.DecryptSecretKey(s3Config.AccessKeyID); derr == nil {
+			accessKeyID = plain
+		}
+	}
+	if secretAccessKey == "" {
+		if plain, derr := security.DecryptSecretKey(s3Config.SecretAccessKey); derr == nil {
+			secretAccessKey = plain
+		}
+	}
+	if accessKeyID != "" {
+		encryptedAccessKeyID, err := security.EncryptSecretKey(accessKeyID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+				Error:   "Failed to encrypt access key ID",
+				Message: err.Error(),
+			})
+			return
+		}
+		s3Config.AccessKeyID = encryptedAccessKeyID
+	}
+	if secretAccessKey != "" {
+		// Encrypt secret access key before storing (CRITICAL security requirement)
+		encryptedSecretAccessKey, err := security.EncryptSecretKey(secretAccessKey)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+				Error:   "Failed to encrypt secret access key",
+				Message: err.Error(),
+			})
+			return
+		}
+		s3Config.SecretAccessKey = encryptedSecretAccessKey
 	}
 
 	// Use transaction to atomically unset existing default and save config (prevents TOCTOU race)
@@ -389,13 +439,21 @@ func (h *S3ConfigHandler) DeleteS3Config(c *gin.Context) {
 		return
 	}
 
-	// Check if any buckets are using this configuration
-	var bucketCount int64
-	database.DB.Model(&models.Bucket{}).Where("s3_config_id = ?", configUUID).Count(&bucketCount)
-	if bucketCount > 0 {
+	// Check if any buckets are using this configuration. Every S3 bucket
+	// served by a DB configuration has its id pinned (buckets without one use
+	// the .env settings), so this covers all buckets whose data lives there.
+	names, err := bucketsUsingS3Config(configUUID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to check S3 configuration usage",
+			Message: err.Error(),
+		})
+		return
+	}
+	if len(names) > 0 {
 		c.JSON(http.StatusConflict, models.ErrorResponse{
 			Error:   "Cannot delete S3 configuration",
-			Message: "Configuration is in use by one or more buckets. Please update or delete those buckets first.",
+			Message: "Configuration is in use by buckets (delete those buckets first): " + strings.Join(names, ", "),
 		})
 		return
 	}
@@ -419,4 +477,50 @@ func (h *S3ConfigHandler) DeleteS3Config(c *gin.Context) {
 	c.JSON(http.StatusOK, models.SuccessResponse{
 		Message: "S3 configuration deleted successfully",
 	})
+}
+
+// maxListedBuckets bounds the bucket names quoted in an "in use" error.
+const maxListedBuckets = 20
+
+// bucketsUsingS3Config returns (up to maxListedBuckets, then a "+N more"
+// entry) the names of buckets pinned to the S3 configuration.
+func bucketsUsingS3Config(configID uuid.UUID) ([]string, error) {
+	var names []string
+	if err := database.DB.Model(&models.Bucket{}).Where("s3_config_id = ?", configID).
+		Order("name ASC").Limit(maxListedBuckets+1).Pluck("name", &names).Error; err != nil {
+		return nil, err
+	}
+	if len(names) > maxListedBuckets {
+		var total int64
+		if err := database.DB.Model(&models.Bucket{}).Where("s3_config_id = ?", configID).Count(&total).Error; err != nil {
+			return nil, err
+		}
+		names = append(names[:maxListedBuckets], fmt.Sprintf("(+%d more)", total-maxListedBuckets))
+	}
+	return names, nil
+}
+
+// s3ConfigLocationChanges lists the settings in req that would change where
+// the configuration's buckets live (endpoint, region, bucket prefix, TLS and
+// addressing style). Fields that are omitted or equal to the stored value are
+// not changes, so a console form that re-submits every field only counts the
+// fields the user actually edited.
+func s3ConfigLocationChanges(cur *models.S3Configuration, req *models.UpdateS3ConfigRequest) []string {
+	var changed []string
+	if req.Endpoint != "" && req.Endpoint != cur.Endpoint {
+		changed = append(changed, "endpoint")
+	}
+	if req.Region != "" && req.Region != cur.Region {
+		changed = append(changed, "region")
+	}
+	if req.BucketPrefix != nil && *req.BucketPrefix != cur.BucketPrefix {
+		changed = append(changed, "bucket_prefix")
+	}
+	if req.UseSSL != nil && *req.UseSSL != cur.UseSSL {
+		changed = append(changed, "use_ssl")
+	}
+	if req.ForcePathStyle != nil && *req.ForcePathStyle != cur.ForcePathStyle {
+		changed = append(changed, "force_path_style")
+	}
+	return changed
 }

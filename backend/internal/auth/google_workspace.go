@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"bkt/internal/config"
+	"bkt/internal/database"
 	"bkt/internal/models"
 
 	"golang.org/x/oauth2/google"
@@ -18,7 +21,16 @@ import (
 // GoogleWorkspaceService handles Google Workspace API interactions
 type GoogleWorkspaceService struct {
 	config *config.Config
+
+	// managed caches the set of bkt policy names the group→policy mapping
+	// can produce from the domain's groups (see GetManagedPolicyNames).
+	managedMu sync.Mutex
+	managed   map[string]bool
+	managedAt time.Time
 }
+
+// managedPolicyTTL bounds how long the domain-wide group list is reused.
+const managedPolicyTTL = 10 * time.Minute
 
 // NewGoogleWorkspaceService creates a new Google Workspace service
 func NewGoogleWorkspaceService(cfg *config.Config) *GoogleWorkspaceService {
@@ -30,29 +42,9 @@ func (s *GoogleWorkspaceService) GetUserGroups(ctx context.Context, userEmail st
 	if !s.config.GoogleSSO.WorkspaceEnabled {
 		return nil, nil
 	}
-
-	// Load service account credentials
-	keyFile := s.config.GoogleSSO.ServiceAccountKeyFile
-	keyData, err := os.ReadFile(keyFile) //nolint:gosec // path from server-side config (service account key file), not user input
+	adminService, err := s.directory(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read service account key file: %w", err)
-	}
-
-	// Create JWT config with domain-wide delegation
-	// The admin email is used for impersonation (required for domain-wide delegation)
-	jwtConfig, err := google.JWTConfigFromJSON(keyData, admin.AdminDirectoryGroupReadonlyScope)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse service account key: %w", err)
-	}
-
-	// Set the subject (admin user to impersonate)
-	jwtConfig.Subject = s.config.GoogleSSO.WorkspaceAdminEmail
-
-	// Create the Admin SDK client
-	client := jwtConfig.Client(ctx)
-	adminService, err := admin.NewService(ctx, option.WithHTTPClient(client))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Admin SDK client: %w", err)
+		return nil, err
 	}
 
 	// Fetch groups for the user
@@ -83,6 +75,77 @@ func (s *GoogleWorkspaceService) GetUserGroups(ctx context.Context, userEmail st
 	}
 
 	return groups, nil
+}
+
+// GetManagedPolicyNames returns the set of policy names the group→policy
+// mapping produces from ALL of the domain's groups — the policies Workspace
+// "owns". Login-time sync only adds/removes policies in this set, leaving
+// policies an administrator assigned by hand untouched. Cached for
+// managedPolicyTTL.
+func (s *GoogleWorkspaceService) GetManagedPolicyNames(ctx context.Context) (map[string]bool, error) {
+	s.managedMu.Lock()
+	defer s.managedMu.Unlock()
+	if s.managed != nil && time.Since(s.managedAt) < managedPolicyTTL {
+		return s.managed, nil
+	}
+	adminService, err := s.directory(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var groups []string
+	pageToken := ""
+	for {
+		call := adminService.Groups.List().Customer("my_customer").MaxResults(200)
+		if pageToken != "" {
+			call = call.PageToken(pageToken)
+		}
+		result, err := call.Do()
+		if err != nil {
+			return nil, fmt.Errorf("failed to list Workspace groups: %w", err)
+		}
+		for _, g := range result.Groups {
+			groups = append(groups, extractGroupName(g.Email))
+		}
+		pageToken = result.NextPageToken
+		if pageToken == "" {
+			break
+		}
+	}
+	managed := make(map[string]bool)
+	for _, n := range s.GetPolicyNamesFromGroups(groups) {
+		managed[n] = true
+	}
+	s.managed, s.managedAt = managed, time.Now()
+	return managed, nil
+}
+
+// directory builds an Admin SDK Directory client using the service account
+// with domain-wide delegation (impersonating GOOGLE_WORKSPACE_ADMIN_EMAIL).
+func (s *GoogleWorkspaceService) directory(ctx context.Context) (*admin.Service, error) {
+	// Load service account credentials
+	keyFile := s.config.GoogleSSO.ServiceAccountKeyFile
+	keyData, err := os.ReadFile(keyFile) //nolint:gosec // path from server-side config (service account key file), not user input
+	if err != nil {
+		return nil, fmt.Errorf("failed to read service account key file: %w", err)
+	}
+
+	// Create JWT config with domain-wide delegation
+	// The admin email is used for impersonation (required for domain-wide delegation)
+	jwtConfig, err := google.JWTConfigFromJSON(keyData, admin.AdminDirectoryGroupReadonlyScope)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse service account key: %w", err)
+	}
+
+	// Set the subject (admin user to impersonate)
+	jwtConfig.Subject = s.config.GoogleSSO.WorkspaceAdminEmail
+
+	// Create the Admin SDK client
+	client := jwtConfig.Client(ctx)
+	adminService, err := admin.NewService(ctx, option.WithHTTPClient(client))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Admin SDK client: %w", err)
+	}
+	return adminService, nil
 }
 
 // GetPolicyNamesFromGroups maps group names to policy names based on config
@@ -118,15 +181,69 @@ func (s *GoogleWorkspaceService) GetPolicyNamesFromGroups(groups []string) []str
 	return policyNames
 }
 
-// SyncUserPoliciesFromGroups replaces the user's policies with those mapped
-// from their Google Workspace groups. An empty list removes all of them:
-// Workspace is the source of truth, so leaving every mapped group must revoke
-// access rather than keep the previous set.
-func (s *GoogleWorkspaceService) SyncUserPoliciesFromGroups(user *models.User, policyNames []string) error {
-	if err := syncUserPoliciesByName(user, policyNames); err != nil {
+// SyncUserPoliciesFromGroups applies the policies mapped from the user's
+// Google Workspace groups, managing ONLY Workspace-mapped policies: every
+// policy in managed (plus the ones mapped for this user) is added or removed
+// to match the user's current groups — so leaving a group revokes its
+// policy — while policies outside that set (assigned manually by an
+// administrator) are left untouched.
+func (s *GoogleWorkspaceService) SyncUserPoliciesFromGroups(user *models.User, policyNames []string, managed map[string]bool) error {
+	desired := []models.Policy{}
+	if len(policyNames) > 0 {
+		if err := database.DB.Where("name IN ?", policyNames).Find(&desired).Error; err != nil {
+			return fmt.Errorf("failed to look up policies: %w", err)
+		}
+	}
+	var current []models.Policy
+	if err := database.DB.Model(user).Association("Policies").Find(&current); err != nil {
+		return fmt.Errorf("failed to load current policies: %w", err)
+	}
+	result := mergeManagedPolicies(current, desired, policyNames, managed)
+	if len(result) == 0 {
+		if err := database.DB.Model(user).Association("Policies").Clear(); err != nil {
+			return fmt.Errorf("failed to sync policies: %w", err)
+		}
+		return nil
+	}
+	if err := database.DB.Model(user).Association("Policies").Replace(result); err != nil {
 		return fmt.Errorf("failed to sync policies: %w", err)
 	}
 	return nil
+}
+
+// mergeManagedPolicies computes the user's new policy set: current policies
+// that Workspace does not manage are kept; managed ones are replaced by the
+// desired set. A name is managed when it is in managed or among the names
+// mapped for this user.
+func mergeManagedPolicies(current, desired []models.Policy, desiredNames []string, managed map[string]bool) []models.Policy {
+	isManaged := func(name string) bool {
+		if managed[name] {
+			return true
+		}
+		for _, n := range desiredNames {
+			if n == name {
+				return true
+			}
+		}
+		return false
+	}
+	seen := map[string]bool{}
+	out := []models.Policy{}
+	for _, p := range current {
+		if isManaged(p.Name) || seen[p.ID.String()] {
+			continue
+		}
+		seen[p.ID.String()] = true
+		out = append(out, p)
+	}
+	for _, p := range desired {
+		if seen[p.ID.String()] {
+			continue
+		}
+		seen[p.ID.String()] = true
+		out = append(out, p)
+	}
+	return out
 }
 
 // extractGroupName extracts the group name from an email address

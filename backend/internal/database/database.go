@@ -92,7 +92,13 @@ func Initialize(cfg *config.Config) error {
 				})
 			}
 		}()
-		return runMigrations(conn)
+		if err := runMigrations(conn); err != nil {
+			return err
+		}
+		// One-time data migrations (recorded in bkt_data_migrations). They
+		// run before InitializeStartupBuckets, so S3_BUCKETS buckets that
+		// already exist are recognized by name.
+		return runDataMigrations(conn, cfg.Storage.S3.Buckets)
 	}); err != nil {
 		return err
 	}

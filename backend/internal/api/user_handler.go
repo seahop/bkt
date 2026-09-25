@@ -218,7 +218,7 @@ func (h *UserHandler) UpdateCurrentUser(c *gin.Context) {
 // @Router /api/users [post]
 func (h *UserHandler) CreateUser(c *gin.Context) {
 	var req struct {
-		Username string `json:"username" binding:"required"`
+		Username string `json:"username" binding:"required,max=255"`
 		Email    string `json:"email" binding:"required,email"`
 		Password string `json:"password" binding:"required,min=8"`
 		IsAdmin  bool   `json:"is_admin"`
@@ -228,6 +228,19 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error:   "Invalid request",
 			Message: err.Error(),
+		})
+		return
+	}
+
+	// Like self-registration: a username still named as a Principal in a
+	// bucket policy (e.g. left over from a deleted account whose policy
+	// scrub missed it, or hand-written for a future user) would silently
+	// inherit that policy's grants. Refuse it; the admin must remove the
+	// name from the bucket policy first.
+	if auth.UsernameReferencedByBucketPolicy(req.Username) {
+		c.JSON(http.StatusConflict, models.ErrorResponse{
+			Error:   "Username referenced by bucket policy",
+			Message: "This username is still named as a principal in a bucket policy. Remove it from the bucket policy (or choose another username) before creating the user.",
 		})
 		return
 	}
@@ -420,14 +433,15 @@ func (h *UserHandler) DeleteUser(c *gin.Context) {
 	err = database.DB.Transaction(func(tx *gorm.DB) error {
 		if targetUser.IsAdmin {
 			// Lock the admin rows so two admins can't delete each other
-			// concurrently and leave none.
+			// concurrently and leave none. Only ACTIVE (unlocked) admins
+			// count: a locked admin cannot log in to administer anything.
 			var admins []models.User
 			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("is_admin = ?", true).Find(&admins).Error; err != nil {
 				return err
 			}
 			others := 0
 			for _, a := range admins {
-				if a.ID != userID {
+				if a.ID != userID && !a.IsLocked {
 					others++
 				}
 			}
@@ -586,11 +600,24 @@ func (h *UserHandler) LockUser(c *gin.Context) {
 		return
 	}
 
-	user.IsLocked = true
 	// Invalidate outstanding sessions immediately so the lock takes effect on
-	// the console path without waiting for token expiry.
-	user.TokenVersion++
-	if err := database.DB.Save(&user).Error; err != nil {
+	// the console path without waiting for token expiry. The update is
+	// conditional on the target still not being an admin, so a concurrent
+	// promotion can't slip an admin (possibly the last active one) into the
+	// locked state.
+	res := database.DB.Model(&models.User{}).
+		Where("id = ? AND is_admin = ?", userID, false).
+		Updates(map[string]interface{}{"is_locked": true, "token_version": gorm.Expr("token_version + 1")})
+	err = res.Error
+	if err == nil && res.RowsAffected == 0 {
+		c.JSON(http.StatusConflict, models.ErrorResponse{
+			Error:   "Cannot lock user",
+			Message: "The user changed concurrently (e.g. was promoted to admin); reload and retry.",
+		})
+		return
+	}
+	user.IsLocked = true
+	if err != nil {
 		// Get admin user info for audit log
 		adminUserID, _ := c.Get("user_id")
 		adminUsername, _ := c.Get("username")

@@ -65,7 +65,25 @@ export default function SSOCallback({ provider }: { provider: string }) {
 
       if (!startedHere) {
         // Tokens we did not ask for (e.g. a crafted link): discard them.
-        setError('This sign-in was not started from this browser tab, or it took longer than 10 minutes. For your safety it was ignored — please sign in again.');
+        // The marker lives in per-origin sessionStorage, so the common benign
+        // cause is the SSO flow landing on a different origin than the one
+        // the login was started from (FRONTEND_URL mismatch: localhost vs
+        // 127.0.0.1, dev port 8443 vs 5173, http vs https).
+        const origin = window.location.origin;
+        console.warn(
+          `[bkt] SSO callback rejected: no pending sign-in marker for ${origin}. ` +
+            'If you just started a sign-in, the server\'s FRONTEND_URL probably points at a different origin ' +
+            'than the one you started from — FRONTEND_URL must match the address you browse bkt at exactly ' +
+            '(scheme, host and port).',
+        );
+        setError(
+          `This sign-in could not be matched to a login started in this browser tab at ${origin}, ` +
+            'or it took longer than 10 minutes, so for your safety it was ignored. ' +
+            `If you did just click a sign-in button, you probably started on a different address than ${origin} ` +
+            '(for example localhost vs 127.0.0.1, or another port): open bkt at the address configured as the ' +
+            "server's FRONTEND_URL and sign in again there, or ask an administrator to set FRONTEND_URL to " +
+            `${origin}.`,
+        );
         setProcessing(false);
         return;
       }

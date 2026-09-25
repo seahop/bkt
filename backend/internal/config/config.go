@@ -132,6 +132,20 @@ type VaultSSOConfig struct {
 	ProviderURL string // e.g., https://vault.example.com/v1/identity/oidc/provider/default
 	RedirectURL string
 	Scopes      string // space-separated, e.g., "openid profile"
+	// OIDCExpectedIssuer (VAULT_OIDC_EXPECTED_ISSUER): the issuer Vault's
+	// discovery document and ID tokens must carry, when it legitimately
+	// differs from VAULT_OIDC_PROVIDER_URL (Vault's api_addr differs from the
+	// URL bkt uses to reach it, e.g. dev mode's 127.0.0.1:8200). Empty =
+	// must equal VAULT_OIDC_PROVIDER_URL.
+	OIDCExpectedIssuer string
+	// PoliciesAuthoritative (VAULT_POLICIES_AUTHORITATIVE): when false (the
+	// default) a Vault "policies" claim replaces the user's policies only
+	// if at least one claimed name matches an existing bkt policy, so the
+	// documented Vault token template (which always emits the claim, often
+	// with only Vault-side names or []) doesn't wipe policies an
+	// administrator assigned in bkt. When true, a present claim always
+	// replaces them — an empty/unmatched claim removes all.
+	PoliciesAuthoritative bool
 }
 
 // OIDCConfig is the generic OpenID Connect provider (Keycloak, Okta, Entra ID,
@@ -159,6 +173,12 @@ type OIDCConfig struct {
 	// policies claim is absent (absent = no policies). Defaults to true when
 	// OIDC_POLICIES_CLAIM is set explicitly.
 	PoliciesAuthoritative bool
+	// ExpectedIssuer (OIDC_EXPECTED_ISSUER): the issuer the discovery
+	// document and ID tokens must carry, when it legitimately differs from
+	// OIDC_ISSUER_URL (e.g. Keycloak reached via an internal hostname while
+	// KC_HOSTNAME advertises the public one). Empty = must equal
+	// OIDC_ISSUER_URL.
+	ExpectedIssuer string
 }
 
 type CORSConfig struct {
@@ -254,6 +274,9 @@ func Load() *Config {
 			ProviderURL: getEnv("VAULT_OIDC_PROVIDER_URL", ""),
 			RedirectURL: getEnv("VAULT_OIDC_REDIRECT_URL", "https://localhost:9443/api/auth/vault/callback"),
 			Scopes:      getEnv("VAULT_OIDC_SCOPES", "openid profile"),
+
+			OIDCExpectedIssuer:    strings.TrimSpace(getEnv("VAULT_OIDC_EXPECTED_ISSUER", "")),
+			PoliciesAuthoritative: getEnvBool("VAULT_POLICIES_AUTHORITATIVE", false),
 		},
 		OIDC: loadOIDCConfig(),
 	}
@@ -285,13 +308,59 @@ func validateSecret(name, value string) string {
 	case value == "":
 		return name + " must be set (generate one with: openssl rand -hex 32)"
 	case value == LegacyDevJWTSecret:
-		return name + " is the publicly known development default; generate a real one with: openssl rand -hex 32"
+		msg := name + " is the publicly known development default; generate a real one with: openssl rand -hex 32"
+		if name == "JWT_SECRET" {
+			msg += ". If stored credentials were encrypted under it (no ENCRYPTION_KEY was set), also set " +
+				"ENCRYPTION_LEGACY_JWT_SECRET=" + LegacyDevJWTSecret + " (decrypt-only) so they stay readable and are re-encrypted at startup"
+		}
+		return msg
 	case strings.ContainsAny(value, "<>"):
 		return name + " still contains a placeholder (e.g. <generated_by_setup.py>); run setup.py or generate one with: openssl rand -hex 32"
 	case len(value) < MinSecretLength:
 		return fmt.Sprintf("%s must be at least %d characters (generate one with: openssl rand -hex 32)", name, MinSecretLength)
 	}
 	return ""
+}
+
+// encryptionKeyPlaceholderMarkers are substrings (compared after lower-casing
+// and dropping '-', '_', '.' and spaces) that only occur in template or
+// placeholder values, never in a generated key.
+var encryptionKeyPlaceholderMarkers = []string{
+	"generatedbysetup",
+	"changeme",
+	"changeinproduction",
+	"replaceme",
+	"yourencryptionkey",
+}
+
+// validateEncryptionKey checks ENCRYPTION_KEY. Unlike JWT_SECRET, an
+// ENCRYPTION_KEY that is already in use encrypts stored credentials, and
+// changing it would strand them — so only values that are certainly not a
+// real key are fatal: the public development default and literal
+// placeholders. A short (weak but real) key only produces a warning; rotate
+// it with ENCRYPTION_KEY_PREVIOUS (see docs/deployment/configuration.md).
+// Returns (fatal problem, warning).
+func validateEncryptionKey(value string) (problem, warning string) {
+	trimmed := strings.TrimSpace(value)
+	if value == LegacyDevJWTSecret {
+		return "ENCRYPTION_KEY is the publicly known development default; generate a real one with: openssl rand -hex 32 " +
+			"(set the old value in ENCRYPTION_KEY_PREVIOUS so existing data stays readable and is re-encrypted)", ""
+	}
+	if strings.HasPrefix(trimmed, "<") && strings.HasSuffix(trimmed, ">") {
+		return "ENCRYPTION_KEY still contains a placeholder (e.g. <generated_by_setup.py>); run setup.py or generate one with: openssl rand -hex 32", ""
+	}
+	norm := strings.NewReplacer("-", "", "_", "", ".", "", " ", "").Replace(strings.ToLower(trimmed))
+	for _, m := range encryptionKeyPlaceholderMarkers {
+		if strings.Contains(norm, m) {
+			return "ENCRYPTION_KEY looks like a placeholder/template value; generate a real one with: openssl rand -hex 32", ""
+		}
+	}
+	if len(value) < MinSecretLength {
+		return "", fmt.Sprintf("ENCRYPTION_KEY is shorter than %d characters. It is still used (changing it outright would make stored credentials unreadable), "+
+			"but you should rotate it: set ENCRYPTION_KEY to a new value from `openssl rand -hex 32` and the current value in ENCRYPTION_KEY_PREVIOUS; "+
+			"stored credentials are re-encrypted at startup", MinSecretLength)
+	}
+	return "", ""
 }
 
 // IsProduction reports whether GO_ENV (or APP_ENV) selects production mode.
@@ -313,10 +382,17 @@ func (c *Config) Validate() error {
 		errors = append(errors, problem)
 	}
 	if encryptionKey != "" {
-		if problem := validateSecret("ENCRYPTION_KEY", encryptionKey); problem != "" {
+		problem, warning := validateEncryptionKey(encryptionKey)
+		if problem != "" {
 			errors = append(errors, problem)
 		}
+		if warning != "" {
+			log.Println("WARNING: " + warning)
+		}
 	}
+	// ENCRYPTION_KEY_PREVIOUS / ENCRYPTION_LEGACY_JWT_SECRET are decrypt-only
+	// and deliberately exempt from every strength check: their whole purpose
+	// is to keep data readable that was encrypted under a weak or retired key.
 
 	if !isProd {
 		if len(errors) > 0 {
@@ -531,5 +607,6 @@ func loadOIDCConfig() OIDCConfig {
 		PoliciesClaim:         getEnv("OIDC_POLICIES_CLAIM", "policies"),
 		LinkByEmail:           getEnv("OIDC_LINK_BY_EMAIL", "false") == "true",
 		PoliciesAuthoritative: getEnvBool("OIDC_POLICIES_AUTHORITATIVE", strings.TrimSpace(os.Getenv("OIDC_POLICIES_CLAIM")) != ""),
+		ExpectedIssuer:        strings.TrimSpace(getEnv("OIDC_EXPECTED_ISSUER", "")),
 	}
 }

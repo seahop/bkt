@@ -88,12 +88,36 @@ func ValidateObjectKey(key string) error {
 		return fmt.Errorf("object key cannot contain backslashes")
 	}
 
-	// Reject non-canonical spellings. The local backend maps keys onto the
-	// filesystem, which collapses "a//b", "./a" and "a/./b" onto the same file
-	// as "a/b"; accepting them would let a caller reach one object through a
-	// key that policy rules, versioning and the metadata index treat as a
-	// different object. A single trailing "/" (an S3 folder-marker object) is
-	// allowed here; backends that cannot represent it reject it themselves.
+	// Non-canonical spellings ("a//b", "./a", "a/./b") are distinct, valid
+	// keys on S3-backed buckets; only the local filesystem backend aliases
+	// them, so that rule lives in ValidateLocalObjectKey (applied per bucket).
+
+	if IsReservedObjectKey(key) {
+		return fmt.Errorf("object keys under %q are reserved", ReservedObjectKeyPrefix)
+	}
+
+	return nil
+}
+
+// LocalFolderMarkerName is the file the local storage backend uses to store
+// an S3 folder-marker object: the key "a/b/" (what s3fs mkdir, Cyberduck,
+// rclone and `aws s3api put-object --key a/b/` create) is stored as the file
+// "a/b/<LocalFolderMarkerName>", so the marker and the objects inside the
+// folder ("a/b/file.txt") coexist. User keys may not use this name as a path
+// segment on local-backend buckets.
+const LocalFolderMarkerName = ".bkt-folder"
+
+// ValidateLocalObjectKey applies the extra key rules of the local filesystem
+// backend on top of ValidateObjectKey's backend-independent checks. The
+// filesystem collapses "a//b", "./a" and "a/./b" onto the same file as "a/b",
+// so accepting them would let a caller reach one object through a key that
+// policy rules, versioning and the metadata index treat as a different
+// object: only canonical keys are accepted. Exactly one trailing "/" (a
+// folder-marker object) is allowed. The folder-marker file name is reserved.
+func ValidateLocalObjectKey(key string) error {
+	if err := ValidateObjectKey(key); err != nil {
+		return err
+	}
 	for _, seg := range strings.Split(strings.TrimSuffix(key, "/"), "/") {
 		if seg == "" {
 			return fmt.Errorf("object key cannot contain empty path segments ('//')")
@@ -101,12 +125,10 @@ func ValidateObjectKey(key string) error {
 		if seg == "." {
 			return fmt.Errorf("object key cannot contain '.' path segments")
 		}
+		if seg == LocalFolderMarkerName {
+			return fmt.Errorf("object key cannot contain the reserved path segment %q", LocalFolderMarkerName)
+		}
 	}
-
-	if IsReservedObjectKey(key) {
-		return fmt.Errorf("object keys under %q are reserved", ReservedObjectKeyPrefix)
-	}
-
 	return nil
 }
 

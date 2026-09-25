@@ -76,6 +76,17 @@ services:
       # Required — the backend refuses empty/short/placeholder secrets.
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env (openssl rand -hex 32)}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in .env (openssl rand -hex 32)}
+      # Decrypt-only keys for rotation/migration (never used to encrypt, exempt
+      # from strength checks). ENCRYPTION_KEY_PREVIOUS: comma-separated retired
+      # ENCRYPTION_KEYs. ENCRYPTION_LEGACY_JWT_SECRET: a retired JWT_SECRET that
+      # encrypted credentials while no ENCRYPTION_KEY was set. Stored credentials
+      # are re-encrypted under ENCRYPTION_KEY at startup
+      # (ENCRYPTION_REENCRYPT_ON_STARTUP, default true); drop these once the
+      # startup log says nothing needs them. setup.py fills them in when it
+      # replaces a placeholder/default/short secret.
+      ENCRYPTION_KEY_PREVIOUS: ${ENCRYPTION_KEY_PREVIOUS:-}
+      ENCRYPTION_LEGACY_JWT_SECRET: ${ENCRYPTION_LEGACY_JWT_SECRET:-}
+      ENCRYPTION_REENCRYPT_ON_STARTUP: ${ENCRYPTION_REENCRYPT_ON_STARTUP:-}
       SERVER_PORT: 9000
       GO_ENV: production
       # TLS Configuration
@@ -102,6 +113,9 @@ services:
       # When set, GET /metrics requires "Authorization: Bearer <token>".
       # Strongly recommended in production (a warning is logged when unset).
       METRICS_TOKEN: ${METRICS_TOKEN:-}
+      # Comma-separated hostnames/IPs/CIDRs webhook deliveries may reach even
+      # though they are private/loopback (SSRF guard); empty = public only.
+      WEBHOOK_ALLOWED_HOSTS: ${WEBHOOK_ALLOWED_HOSTS:-}
       # Base URL embedded in console-generated presigned URLs (empty = derive
       # from the request host + S3 API port, correct when clients reach the
       # backend directly; set it when running behind a proxy/LB).
@@ -126,6 +140,9 @@ services:
       OIDC_LINK_BY_EMAIL: ${OIDC_LINK_BY_EMAIL:-false}
       # Empty = backend default (authoritative when OIDC_POLICIES_CLAIM is set)
       OIDC_POLICIES_AUTHORITATIVE: ${OIDC_POLICIES_AUTHORITATIVE:-}
+      # Issuer the discovery doc / ID tokens carry when it legitimately differs
+      # from OIDC_ISSUER_URL (IdP reached via an internal hostname); empty = same.
+      OIDC_EXPECTED_ISSUER: ${OIDC_EXPECTED_ISSUER:-}
       # Google OIDC
       GOOGLE_OIDC_ENABLED: ${GOOGLE_OIDC_ENABLED:-false}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
@@ -148,6 +165,13 @@ services:
       VAULT_OIDC_PROVIDER_URL: ${VAULT_OIDC_PROVIDER_URL:-}
       VAULT_OIDC_REDIRECT_URL: ${VAULT_OIDC_REDIRECT_URL:-}
       VAULT_OIDC_SCOPES: ${VAULT_OIDC_SCOPES:-openid profile}
+      # Issuer Vault advertises when it differs from VAULT_OIDC_PROVIDER_URL
+      # (Vault's api_addr != the URL bkt uses); empty = same.
+      VAULT_OIDC_EXPECTED_ISSUER: ${VAULT_OIDC_EXPECTED_ISSUER:-}
+      # true = a Vault "policies" claim always replaces the user's bkt policies
+      # (empty/unmatched claim removes all). Empty/false = only when a claimed
+      # name matches an existing bkt policy.
+      VAULT_POLICIES_AUTHORITATIVE: ${VAULT_POLICIES_AUTHORITATIVE:-}
       # Where SSO flows land after login: the console origin users browse to.
       FRONTEND_URL: ${FRONTEND_URL:-https://localhost:9443}
       # Storage

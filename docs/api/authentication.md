@@ -134,7 +134,8 @@ Authenticate and receive access tokens.
 **Error Responses:**
 - `400 Bad Request` - Invalid request format
 - `401 Unauthorized` - Invalid credentials
-- `429 Too Many Requests` - Too many failed attempts. Lockout is per **username + client IP** (10 failures in 15 minutes locks that source for 15 minutes), so failures from one address cannot lock the account for everyone. Beyond 100 failures per username across all addresses, attempts are throttled with exponential backoff (max 1 minute) rather than hard-locked.
+- `429 Too Many Requests` - Too many failed attempts. Lockout is per **username + client IP** (10 failures in 15 minutes locks that source for 15 minutes, without checking the password), so failures from one address cannot lock the account for everyone. Beyond 100 failures per username across all addresses a per-username throttle (exponential backoff, max 1 minute) activates. The throttle never blocks the **correct** password: the password is still checked, a correct one logs in and a wrong one gets `429`; while it is active each source may fail only 3 times before its (username, IP) pair is hard-locked. An address the user has successfully logged in from during the last 30 days is exempt from the throttle. A successful login does not reset the per-username counter (it ages out after 15 minutes without failures).
+- `400 Bad Request` - `username` longer than 255 or `password` longer than 1024 characters, or a request body over 64 KiB (applies to login, register, refresh and logout).
 
 **Example:**
 ```bash

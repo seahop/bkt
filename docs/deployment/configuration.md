@@ -62,6 +62,19 @@ Access logs redact credential-bearing query parameters (`X-Amz-Signature`,
 and SSO `code`/`state`/`token`), so presigned URLs and authorization codes don't
 leak through container logs.
 
+## Webhooks
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `WEBHOOK_ALLOWED_HOSTS` | _(empty)_ | Comma-separated hostnames, IPs and/or CIDRs that webhook deliveries may reach even though they are internal. By default bucket webhooks can only reach public addresses: loopback, private (RFC 1918 / IPv6 ULA), link-local (incl. `169.254.169.254` cloud metadata), CGNAT `100.64.0.0/10`, multicast, unspecified and reserved ranges — and IPv4-mapped/embedded IPv6 forms of them — are refused, checked on the address actually dialed (so DNS rebinding cannot bypass it). A listed **hostname** may resolve to any address; a listed **IP/CIDR** may be reached under any name. Example: `hooks.internal,10.20.0.0/16` |
+
+Webhook deliveries never follow redirects (a 3xx counts as a failed delivery)
+and ignore `HTTP_PROXY`/`HTTPS_PROXY` (a proxy would connect on bkt's behalf,
+bypassing the address check), so a receiver must be reachable directly. Any
+user with `s3:PutBucketNotification` on a bucket can set its webhook URL, so
+keep the allowlist as narrow as possible: every such user can make bkt POST to
+the listed hosts.
+
 ## Secrets
 
 | Variable | Default | Purpose |
@@ -72,22 +85,81 @@ leak through container logs.
 
 In the **multi-container** setup these are required (no auto-generation); `setup.py`
 creates them in `.env`. Re-running `setup.py` keeps every existing value and only
-adds missing keys (it never rotates `DB_PASSWORD`, `JWT_SECRET` or
-`ENCRYPTION_KEY`; a backup of the previous `.env` is written when it changes
-anything). Existing certificates are kept unless you pass `--regenerate-certs`.
+adds missing keys. It never rotates `DB_PASSWORD` or a valid `JWT_SECRET` /
+`ENCRYPTION_KEY`; an unusable one (empty, placeholder, the old public default,
+or too short) is replaced, and the old value is kept as a decrypt-only key
+(`ENCRYPTION_KEY_PREVIOUS`, or `ENCRYPTION_LEGACY_JWT_SECRET` for a JWT secret
+that encrypted data while no `ENCRYPTION_KEY` was set). A backup of the previous
+`.env` is written whenever it changes anything. Existing certificates are kept unless you pass `--regenerate-certs`.
+
+| `ENCRYPTION_KEY_PREVIOUS` | — | Comma-separated **decrypt-only** keys you rotated away from. Never used to encrypt; exempt from the strength rules |
+| `ENCRYPTION_LEGACY_JWT_SECRET` | — | **Decrypt-only**: a former `JWT_SECRET` under which credentials were encrypted (installs that ran without `ENCRYPTION_KEY`), e.g. the old public default after you replace it. Exempt from the strength rules |
+| `ENCRYPTION_REENCRYPT_ON_STARTUP` | `true` | At startup, re-encrypt (in the background) stored credentials that are only readable through a decrypt-only key or are in the legacy v1 format |
 
 **Secret rules (every environment, not just production):** the backend refuses
 to start when `JWT_SECRET` is empty, shorter than 32 characters, the old public
 default `dev_jwt_secret_change_in_production`, or still a `<placeholder>` from
-`.env.example`. The same rules apply to `ENCRYPTION_KEY` whenever it is set.
-Generate values with `openssl rand -hex 32`.
+`.env.example` (a forgeable JWT secret is an authentication bypass). Generate
+values with `openssl rand -hex 32`.
+
+`ENCRYPTION_KEY`, when set, is refused only when it is certainly not a real key:
+the public default above, a literal `<placeholder>`, or a template value
+containing `generated_by_setup`, `change_me`, `change_in_production`,
+`replace_me` or `your_encryption_key` (case, `-`, `_`, `.` and spaces ignored).
+A **short** existing key (< 32 characters) or one containing `<`/`>` inside a
+real value only logs a **warning**: it already encrypts your stored
+credentials, and changing it outright would make them unreadable — rotate it
+instead (below).
 
 `ENCRYPTION_KEY` is **required in production**. In development it may be left
 empty: stored S3 credentials are then encrypted with a key derived from
-`JWT_SECRET` and a warning is logged. Adding an `ENCRYPTION_KEY` later is safe —
+`JWT_SECRET` and a warning is logged. Adding an `ENCRYPTION_KEY` later is safe:
 credentials written under the `JWT_SECRET` fallback stay readable (as long as
-`JWT_SECRET` is unchanged) and new ones use `ENCRYPTION_KEY`; re-save an S3
-configuration to re-encrypt it under the new key.
+`JWT_SECRET` is unchanged) and are re-encrypted under `ENCRYPTION_KEY` at the
+next startup.
+
+Decryption tries, in order: `ENCRYPTION_KEY` (or `JWT_SECRET` when it is
+unset), each `ENCRYPTION_KEY_PREVIOUS` entry, the current `JWT_SECRET` (when a
+dedicated `ENCRYPTION_KEY` is set), then `ENCRYPTION_LEGACY_JWT_SECRET`.
+Encryption always uses the first.
+
+### Rotating `ENCRYPTION_KEY`
+
+1. Generate a new key: `openssl rand -hex 32`.
+2. Set `ENCRYPTION_KEY=<new>` and `ENCRYPTION_KEY_PREVIOUS=<old>` (append to
+   any existing list, comma-separated) and restart **every** replica.
+3. At startup each replica re-encrypts access-key secrets, S3 configuration
+   credentials and bucket webhook secrets that only the old key can read
+   (one transaction per row; a value is written only after it decrypted and
+   its new ciphertext verified; values nothing can decrypt are left alone and
+   reported). Watch the log for
+   `Stored credential re-encryption: N re-encrypted ...` and then
+   `no stored credential needs a decrypt-only key any more`.
+4. Once that message appears, remove `ENCRYPTION_KEY_PREVIOUS` and restart. Keep a backup of the old
+   key until you have confirmed S3 configurations and access keys still work.
+
+### Replacing the old default `JWT_SECRET`
+
+Releases before 1.4 shipped `JWT_SECRET=dev_jwt_secret_change_in_production`
+in `docker-compose.yml`; it is now rejected (anyone can forge tokens with it).
+If you ran without `ENCRYPTION_KEY`, your stored credentials were encrypted
+under it. To upgrade without losing them:
+
+```bash
+JWT_SECRET=$(openssl rand -hex 32)
+ENCRYPTION_KEY=$(openssl rand -hex 32)
+ENCRYPTION_LEGACY_JWT_SECRET=dev_jwt_secret_change_in_production   # decrypt-only
+```
+
+Restart; credentials are re-encrypted under the new `ENCRYPTION_KEY`
+(the same log lines as above appear), after which
+`ENCRYPTION_LEGACY_JWT_SECRET` can be removed. All existing login sessions end
+(tokens were signed with the old secret). The same applies to any other
+`JWT_SECRET` you change while stored credentials depend on it.
+
+Set `ENCRYPTION_REENCRYPT_ON_STARTUP=false` to skip the startup pass (each
+examined value costs one PBKDF2 derivation; without decrypt-only keys only
+legacy-format values are examined).
 
 ## TLS & ports
 
@@ -114,7 +186,7 @@ configuration to re-encrypt it under the new key.
 | `S3_BUCKET_PREFIX` | _(empty)_ | Optional prefix for the real S3 bucket names |
 | `S3_USE_SSL` | `true` | Use HTTPS to the S3 endpoint |
 | `S3_FORCE_PATH_STYLE` | `false` | `true` for MinIO and other non-AWS S3 |
-| `S3_BUCKETS` | — | Comma-separated buckets to auto-provision (link/create) at startup |
+| `S3_BUCKETS` | — | Comma-separated buckets to auto-provision (link/create) at startup. They always use these `.env` S3 settings |
 | `S3_SSE` | `false` | Request SSE-S3 (AES256) server-side encryption on every object written through the **external S3 backend**. Local-backend bytes are NOT encrypted by bkt — use disk-level encryption (LUKS/dm-crypt) |
 | `CONTENT_TYPE_ENFORCEMENT` | `false` | Opt-in magic-byte content-type detection; rejects "unsafe" types. Off by default because S3's contract treats Content-Type as client-declared metadata |
 
@@ -133,6 +205,7 @@ configuration to re-encrypt it under the new key.
 | `OIDC_ADMIN_GROUP` / `OIDC_USER_GROUP` | — | Group that grants admin; group required for access (optional) |
 | `OIDC_POLICIES_AUTHORITATIVE` | `true` if `OIDC_POLICIES_CLAIM` is set, else `false` | A *missing* policies claim also clears the user's policies (a present claim, even empty, always replaces them) |
 | `OIDC_LINK_BY_EMAIL` | `false` | Link new subjects to existing OIDC accounts by verified, IdP-asserted email (exactly one match required) |
+| `OIDC_EXPECTED_ISSUER` | — | The issuer the discovery document and ID tokens must carry when it legitimately differs from `OIDC_ISSUER_URL` (e.g. Keycloak reached via an internal hostname while `KC_HOSTNAME` is public). Unset: must equal `OIDC_ISSUER_URL` |
 | `GOOGLE_OIDC_ENABLED` | `false` | Enable Google OIDC login |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | — | Google OAuth credentials |
 | `GOOGLE_ALLOWED_DOMAINS` | — | Comma-separated Workspace domains allowed to sign in (`hd` claim and email domain must both match). **Unset: new Google users are only auto-provisioned when `ALLOW_REGISTRATION=true`** |
@@ -142,6 +215,8 @@ configuration to re-encrypt it under the new key.
 | `VAULT_OIDC_ENABLED` | `false` | Enable generic OIDC login (any standard OIDC IdP — Vault, Keycloak, …; endpoints come from the provider's discovery document) |
 | `VAULT_OIDC_CLIENT_ID` / `VAULT_OIDC_PROVIDER_URL` / `VAULT_OIDC_REDIRECT_URL` | — | OIDC client ID, provider/issuer URL, and backend callback URL |
 | `VAULT_OIDC_SCOPES` | `openid profile` | Space-separated OIDC scopes to request |
+| `VAULT_OIDC_EXPECTED_ISSUER` | — | Issuer Vault's discovery document and ID tokens must carry when it differs from `VAULT_OIDC_PROVIDER_URL` (Vault's `api_addr` differs from the URL bkt uses, e.g. dev mode's `http://127.0.0.1:8200/...`). Unset: must equal `VAULT_OIDC_PROVIDER_URL` |
+| `VAULT_POLICIES_AUTHORITATIVE` | `false` | Vault JWT/OIDC: `false` = a `policies` claim replaces the user's policies only when it names at least one existing bkt policy (otherwise admin-assigned policies are kept); `true` = a present claim always replaces them (empty/unmatched removes all) |
 | `FRONTEND_URL` | the console: `https://localhost:<CONSOLE_PORT>` (`http://` when `TLS_ENABLED=false`) | Base URL SSO flows redirect back to. Set it to the public console URL (e.g. `https://bkt.example.com`). It must be the same origin the user starts the login from — the SSO callback only accepts tokens for a login started in that browser tab |
 
 ## Notes for the omnibus

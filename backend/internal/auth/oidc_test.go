@@ -516,3 +516,45 @@ func TestOIDCPoliciesClaimPresenceTracked(t *testing.T) {
 		t.Errorf("empty policies claim: %+v", id)
 	}
 }
+
+// Keycloak reached via an internal hostname with KC_HOSTNAME public, or Vault
+// whose api_addr differs from the URL bkt uses: the discovery issuer then
+// legitimately differs from the configured URL. That must fail closed with an
+// actionable message unless *_EXPECTED_ISSUER names the advertised issuer, in
+// which case ID tokens must carry exactly that issuer.
+func TestOIDCExpectedIssuer(t *testing.T) {
+	f := newFakeIdP(t)
+	f.issueNonce = "n"
+	public := "https://sso.example.com/realms/corp"
+	f.advIssuer = &public
+	f.extraIDClaims = map[string]interface{}{"iss": public}
+
+	h := f.handler(t, func(s *OIDCProviderSettings) {
+		s.IssuerEnv, s.ExpectedIssuerEnv = "OIDC_ISSUER_URL", "OIDC_EXPECTED_ISSUER"
+	})
+	_, err := h.authenticate(context.Background(), "good-code", "v", "n")
+	if err == nil || !strings.Contains(err.Error(), "OIDC_EXPECTED_ISSUER="+public) || !strings.Contains(err.Error(), "OIDC_ISSUER_URL") {
+		t.Fatalf("mismatch without expected issuer must fail with a hint, got %v", err)
+	}
+
+	h = f.handler(t, func(s *OIDCProviderSettings) { s.ExpectedIssuer = public })
+	if _, err := h.authenticate(context.Background(), "good-code", "v", "n"); err != nil {
+		t.Fatalf("expected issuer configured: %v", err)
+	}
+
+	// Tokens must carry the expected issuer too.
+	f.extraIDClaims = map[string]interface{}{"iss": f.srv.URL}
+	h = f.handler(t, func(s *OIDCProviderSettings) { s.ExpectedIssuer = public })
+	if _, err := h.authenticate(context.Background(), "good-code", "v", "n"); err == nil {
+		t.Fatal("ID token with a different iss must be rejected")
+	}
+
+	// A discovery issuer that differs from the expected one is rejected.
+	f.extraIDClaims = nil
+	other := "https://evil.example"
+	f.advIssuer = &other
+	h = f.handler(t, func(s *OIDCProviderSettings) { s.ExpectedIssuer = public; s.ExpectedIssuerEnv = "OIDC_EXPECTED_ISSUER" })
+	if _, err := h.authenticate(context.Background(), "good-code", "v", "n"); err == nil || !strings.Contains(err.Error(), "expected issuer") {
+		t.Fatalf("discovery issuer != expected issuer must fail, got %v", err)
+	}
+}

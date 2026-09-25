@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
@@ -242,7 +243,14 @@ func (h *BucketHandler) DeleteObjectVersionREST(c *gin.Context) {
 	unlock := lockObjectKeys(bucket.Name, key)
 	defer unlock()
 	if err := deleteSpecificVersion(backend, bucket, key, versionID); err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to delete version", Message: err.Error()})
+		switch {
+		case errors.Is(err, errVersionNotFound):
+			c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "Version not found"})
+		case errors.Is(err, errUnderRetention):
+			c.JSON(http.StatusConflict, models.ErrorResponse{Error: "Version is under retention", Message: err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to delete version", Message: err.Error()})
+		}
 		return
 	}
 	c.JSON(http.StatusOK, models.SuccessResponse{Message: "Version deleted"})

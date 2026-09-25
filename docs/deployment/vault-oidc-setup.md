@@ -137,7 +137,32 @@ FRONTEND_URL=https://your-bkt-frontend
 | `VAULT_OIDC_PROVIDER_URL` | Vault OIDC provider URL (API path) | `https://vault.example.com/v1/identity/oidc/provider/default` |
 | `VAULT_OIDC_REDIRECT_URL` | Backend callback URL (must match Vault client config) | `https://bkt.example.com:9443/api/auth/vault/callback` |
 | `VAULT_OIDC_SCOPES` | OIDC scopes to request | `openid profile` |
+| `VAULT_OIDC_EXPECTED_ISSUER` | Optional. Issuer Vault advertises when it differs from `VAULT_OIDC_PROVIDER_URL` (see below) | `http://127.0.0.1:8200/v1/identity/oidc/provider/default` |
+| `VAULT_POLICIES_AUTHORITATIVE` | Optional (default `false`). `true` = the `policies` claim always replaces the user's bkt policies; `false` = only when it names at least one existing bkt policy | `false` |
 | `FRONTEND_URL` | Frontend URL for post-auth redirect | `https://bkt.example.com` |
+
+### Issuer check (`VAULT_OIDC_EXPECTED_ISSUER`)
+
+Vault builds the `issuer` in its discovery document from its own `api_addr`
+(or the provider's `issuer` setting), not from the URL bkt uses to reach it.
+bkt requires the advertised issuer to equal `VAULT_OIDC_PROVIDER_URL` (a
+trailing slash is ignored) — otherwise a discovery document could vouch for
+tokens minted by a different issuer. When the two legitimately differ — Vault
+in dev mode advertises `http://127.0.0.1:8200/...`, or bkt reaches Vault via
+an internal service name — login fails and the backend logs, at startup:
+
+```
+ERROR: Vault SSO (vault) is enabled but its discovery check failed; ...:
+OIDC discovery issuer "http://127.0.0.1:8200/v1/identity/oidc/provider/default" != configured
+VAULT_OIDC_PROVIDER_URL "http://vault:8200/v1/identity/oidc/provider/default"; ... set
+VAULT_OIDC_EXPECTED_ISSUER=http://127.0.0.1:8200/v1/identity/oidc/provider/default
+```
+
+Either fix Vault (`vault write identity/oidc/config issuer=<public URL>` or
+set `api_addr`), or set `VAULT_OIDC_EXPECTED_ISSUER` to the advertised value.
+Discovery and every ID token's `iss` must then equal it exactly. Endpoints
+(token, JWKS) still come from the discovery document and must be reachable
+from the backend.
 
 ## Example: Any OIDC IdP (Keycloak)
 
@@ -161,7 +186,10 @@ FRONTEND_URL=https://bkt.example.com
 3. Optional — for automatic policy assignment, add a mapper that emits a
    `policies` claim (JSON array of bkt policy names) in the ID token; bkt syncs
    the user's policies to that list on every login, exactly as described for
-   Vault groups below.
+   Vault groups below (including the non-authoritative default).
+4. If bkt reaches Keycloak via an internal hostname while `KC_HOSTNAME`
+   advertises a public one, set `VAULT_OIDC_EXPECTED_ISSUER` to the public
+   realm URL (see *Issuer check* above).
 
 ## Automatic Policy Sync from Vault Groups
 
@@ -175,6 +203,16 @@ bkt can automatically assign policies to users based on their Vault group member
 4. Matching policies are automatically assigned to the user
 
 **Example**: If a user is in Vault group "my-team" and bkt has a policy named "my-team", that user will automatically get the policy on SSO login.
+
+**Replacement rules** (changed after 1.4.0): the template below always emits a
+`policies` claim — often with Vault groups that have no bkt counterpart, or
+`[]`. By default the claim replaces the user's bkt policies **only when at
+least one name matches an existing bkt policy**; if none match, the policies an
+administrator assigned in bkt are left alone. When at least one matches, the
+user's policies become exactly the matching set. Set
+`VAULT_POLICIES_AUTHORITATIVE=true` to make Vault fully authoritative (a present
+claim always replaces; no matches → all policies removed) — use it when
+removing someone from Vault groups must revoke their bkt access.
 
 ### Step 1: Update the OIDC Scope Template
 

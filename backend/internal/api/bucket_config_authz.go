@@ -39,6 +39,11 @@ const replicationAllObjectsKey = "*"
 // source -> target replication could perform the equivalent copy themselves:
 // read every object of the source, and write and delete every object of the
 // target (replication overwrites and removes target objects).
+//
+// This is only a configure-time first gate: the literal "*" key cannot see a
+// narrower Deny (e.g. on "src/secret/*" or "src/x.txt"), and permissions can
+// change later. The sweep therefore re-checks the configuring user's current
+// permissions for every key it copies or deletes (see replication.go).
 func authorizeReplication(ps *services.PolicyService, userID uuid.UUID, source, target string) error {
 	checks := []struct{ bucket, action string }{
 		{source, services.ActionGetObject},

@@ -60,7 +60,17 @@ The `policies` claim is an array of policy names that **exactly match** policy n
 - **Case-sensitive**: `team-engineering` ≠ `Team-Engineering`
 - **Exact match required**: Policy names in JWT must exist in the system
 - **Unknown policies are skipped**: If a policy doesn't exist, it's silently ignored
-- **Replaces on each login**: SSO is the source of truth; manual policy changes are overwritten
+- **What gets replaced depends on the provider** (see each section):
+  - **OIDC** (`OIDC_*`): a present claim replaces the user's direct policies
+    (empty/unmatched removes all); with `OIDC_POLICIES_AUTHORITATIVE=true` a
+    missing claim removes them too.
+  - **Vault** (JWT and `VAULT_OIDC_*`): by default a claim replaces them only
+    when it names **at least one existing bkt policy**; a claim with only
+    Vault-side names (or `[]`) keeps admin-assigned policies. Set
+    `VAULT_POLICIES_AUTHORITATIVE=true` for strict replacement.
+  - **Google Workspace**: only *Workspace-mapped* policies (those some
+    Workspace group maps to) are added/removed; manually assigned policies
+    are kept.
 
 ### Multiple Policies
 
@@ -108,8 +118,19 @@ OIDC_LINK_BY_EMAIL=false      # link a new subject to an existing OIDC account w
 ```
 
 The discovery document's `issuer` must equal `OIDC_ISSUER_URL` (a trailing
-slash is ignored); otherwise login fails. UserInfo responses are only used
-when they carry a `sub` equal to the ID token's subject.
+slash is ignored); otherwise login fails and the startup log says so
+(`discovery issuer X != configured OIDC_ISSUER_URL Y; ... set
+OIDC_EXPECTED_ISSUER=X`). When bkt legitimately reaches the provider under a
+different URL than its public issuer — e.g. Keycloak via an internal hostname
+(`http://keycloak:8080/realms/myrealm`) while `KC_HOSTNAME` makes it advertise
+`https://sso.example.com/realms/myrealm` — set
+`OIDC_EXPECTED_ISSUER=https://sso.example.com/realms/myrealm`. Discovery and
+every ID token's `iss` must then equal that value exactly; note the endpoints
+(token, JWKS, UserInfo) are still taken from the discovery document, so they
+must be reachable from the backend (Keycloak: `KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true`).
+The check runs once at startup (logged as `discovery OK` or `ERROR: ...
+discovery check failed`) and on every discovery refresh. UserInfo responses
+are only used when they carry a `sub` equal to the ID token's subject.
 
 `OIDC_ENABLED` is implied when the issuer and client ID are both set; set
 `OIDC_ENABLED=false` to keep a configured provider switched off.
@@ -136,14 +157,17 @@ when they carry a `sub` equal to the ID token's subject.
   (a mapper is missing) or *not a member* — and the denial is audit-logged.
 - **Policies**: the `OIDC_POLICIES_CLAIM` claim (JSON array, or a space/comma
   separated string) is synced to the user's bkt policies on every login; the
-  IdP is the source of truth. Names must match bkt policies exactly. Whenever
-  the claim is present its contents *replace* the user's direct policies —
-  an empty claim (or one naming no existing policy) removes them all, so
-  offboarding in the IdP takes effect at the next login. If your IdP omits
-  the claim entirely when a user has no policies, set
+  IdP is the source of truth (unchanged in this release). Names must match
+  bkt policies exactly. Whenever the claim is present its contents *replace*
+  the user's direct policies — an empty claim (or one naming no existing
+  policy) removes them all, **including policies an administrator assigned
+  in bkt**, so offboarding in the IdP takes effect at the next login. If your
+  IdP omits the claim entirely when a user has no policies, set
   `OIDC_POLICIES_AUTHORITATIVE=true` (the default when `OIDC_POLICIES_CLAIM`
   is set explicitly) so a missing claim also clears them. With neither, a
-  missing claim leaves admin-assigned policies untouched.
+  missing claim leaves admin-assigned policies untouched. If you want to
+  manage some users' policies by hand in bkt, don't emit the claim for them
+  and leave `OIDC_POLICIES_CLAIM`/`OIDC_POLICIES_AUTHORITATIVE` unset.
 - **Account linking** (`OIDC_LINK_BY_EMAIL=true`) is for IdP migrations where
   every user receives a new `sub`: an unknown subject whose `email_verified`
   address matches the **IdP-asserted** address (`sso_email`, never the
@@ -253,9 +277,16 @@ VAULT_JWT_AUDIENCE=objectstore
 VAULT_JWT_ISSUER=https://vault.company.com:8200/v1/identity/oidc
 ```
 
-When the token carries a `policies` claim it replaces the user's policies on
-every login — an empty list removes them all. A token without the claim leaves
-the user's policies as an administrator assigned them.
+Vault policy sync (JWT login and the `VAULT_OIDC_*` slot) is
+**non-authoritative by default**: the documented Vault token template always
+emits a `policies` claim, usually listing Vault-side policy names or `[]`. A
+claim therefore replaces the user's bkt policies **only when at least one of
+its names matches an existing bkt policy**; otherwise the policies an
+administrator assigned in bkt are kept. A token without the claim also leaves
+them untouched. Set `VAULT_POLICIES_AUTHORITATIVE=true` to make Vault the
+source of truth: a present claim then always replaces the user's policies
+(an empty or unmatched claim removes them all — use this when offboarding in
+Vault must revoke bkt access).
 
 ### Vault JWT Auth Method Setup
 
@@ -456,9 +487,20 @@ GOOGLE_POLICY_SYNC_MODE=direct
 GOOGLE_POLICY_GROUP_PREFIX=bkt-
 ```
 
-Workspace is the source of truth once enabled: the mapped policies replace the
-user's policies on every login (an empty result removes them all), and if the
-group lookup fails the login is refused rather than keeping stale policies.
+Once enabled, Workspace manages **only the mapped policies** — the bkt
+policies that some Workspace group in the domain maps to (per
+`GOOGLE_POLICY_SYNC_MODE` / `GOOGLE_POLICY_GROUP_PREFIX`). On every login they
+are added or removed to match the user's current groups (leaving a group
+revokes its policy); policies an administrator assigned by hand that no group
+maps to are **left untouched**. (In `direct` mode without a prefix, a bkt
+policy that has the same name as any Workspace group counts as mapped.) The
+domain's group list is fetched with the same Directory API scope and cached
+for 10 minutes.
+
+If the Directory API lookup fails (outage, revoked delegation), **bkt admins**
+still log in (their access does not depend on groups; no sync happens and an
+`auth.policy_sync` failure is audit-logged). Everyone else is refused with
+`policy_sync_failed` rather than keeping stale, possibly revoked policies.
 
 ### Step 1: Create Service Account
 

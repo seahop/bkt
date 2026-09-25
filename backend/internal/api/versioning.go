@@ -177,6 +177,19 @@ func retentionBlocks(bucket *models.Bucket, t time.Time) bool {
 	return time.Since(t) < time.Duration(bucket.RetentionDays)*24*time.Hour
 }
 
+// errVersionNotFound is returned by deleteSpecificVersion when the key has no
+// such version (S3 treats that delete as a successful no-op).
+var errVersionNotFound = errors.New("version not found")
+
+// errUnderRetention is matched (errors.Is) by every retentionError.
+var errUnderRetention = errors.New("under retention")
+
+// retentionError reports that WORM retention forbids a permanent delete.
+type retentionError struct{ msg string }
+
+func (e *retentionError) Error() string        { return e.msg }
+func (e *retentionError) Is(target error) bool { return target == errUnderRetention }
+
 func deleteSpecificVersion(backend storage.StorageBackend, bucket *models.Bucket, key, versionID string) error {
 	// Current version addressed by id?
 	var current models.Object
@@ -187,7 +200,7 @@ func deleteSpecificVersion(backend storage.StorageBackend, bucket *models.Bucket
 		}
 		if versionID == curID {
 			if retentionBlocks(bucket, current.UpdatedAt) {
-				return fmt.Errorf("object is under retention for %d days and cannot be permanently deleted yet", bucket.RetentionDays)
+				return &retentionError{fmt.Sprintf("object is under retention for %d days and cannot be permanently deleted yet", bucket.RetentionDays)}
 			}
 			if err := backend.DeleteObject(bucket.Name, key); err != nil {
 				return fmt.Errorf("failed to delete current version bytes: %w", err)
@@ -202,11 +215,11 @@ func deleteSpecificVersion(backend storage.StorageBackend, bucket *models.Bucket
 	var ver models.ObjectVersion
 	if err := database.DB.Where("bucket_id = ? AND key = ? AND version_id = ?", bucket.ID, key, versionID).
 		First(&ver).Error; err != nil {
-		return fmt.Errorf("version not found")
+		return errVersionNotFound
 	}
 	if !ver.IsDeleteMarker {
 		if retentionBlocks(bucket, ver.ContentModifiedAt) {
-			return fmt.Errorf("version is under retention for %d days and cannot be permanently deleted yet", bucket.RetentionDays)
+			return &retentionError{fmt.Sprintf("version is under retention for %d days and cannot be permanently deleted yet", bucket.RetentionDays)}
 		}
 		if err := backend.DeleteObjectVersion(bucket.Name, key, ver.VersionID); err != nil {
 			return err

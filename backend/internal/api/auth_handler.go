@@ -2,8 +2,8 @@ package api
 
 import (
 	"net/http"
-	"strings"
 	"time"
+	"unicode/utf8"
 
 	"bkt/internal/auth"
 	"bkt/internal/config"
@@ -16,6 +16,34 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
+
+// maxAuthBodyBytes caps the JSON body of the unauthenticated auth endpoints
+// (login, register, refresh, logout); real payloads are well under 1 KiB.
+const maxAuthBodyBytes = 64 << 10
+
+// limitAuthBody bounds how much of the request body the JSON binder will read.
+func limitAuthBody(c *gin.Context) {
+	if c.Request.Body != nil {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAuthBodyBytes)
+	}
+}
+
+// maxAuditUsernameLen bounds attacker-supplied usernames written to the audit
+// log.
+const maxAuditUsernameLen = 255
+
+// truncateForAudit cuts s to at most maxAuditUsernameLen bytes without
+// splitting a UTF-8 sequence.
+func truncateForAudit(s string) string {
+	if len(s) <= maxAuditUsernameLen {
+		return s
+	}
+	cut := maxAuditUsernameLen
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
 
 type AuthHandler struct {
 	config       *config.Config
@@ -54,6 +82,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
+	limitAuthBody(c)
 	var req models.RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{
@@ -142,6 +171,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 // @Failure 500 {object} models.ErrorResponse
 // @Router /api/auth/login [post]
 func (h *AuthHandler) Login(c *gin.Context) {
+	limitAuthBody(c)
 	var req models.LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{
@@ -151,14 +181,15 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	guardKey := strings.ToLower(strings.TrimSpace(req.Username))
 	// Lockout is keyed on username + source IP (ClientIP honours the trusted
 	// proxy list), so failures from one source can't lock the account for
-	// everyone; a higher per-username ceiling throttles distributed guessing.
+	// everyone; a higher per-username ceiling throttles distributed guessing
+	// but never blocks a correct password (see loginGuard).
 	clientIP := c.ClientIP()
 
-	// Refuse if this source is temporarily locked out due to repeated failures.
-	if h.loginGuard.blocked(guardKey, clientIP) {
+	// Refuse outright if this source is hard-locked due to repeated failures.
+	decision := h.loginGuard.check(req.Username, clientIP)
+	if decision == guardLocked {
 		metrics.AuthFailuresTotal.WithLabelValues("lockout").Inc()
 		c.JSON(http.StatusTooManyRequests, models.ErrorResponse{
 			Error:   "Too many attempts",
@@ -183,17 +214,28 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	if !found || !passwordOK {
 		metrics.AuthFailuresTotal.WithLabelValues("invalid_credentials").Inc()
-		if h.loginGuard.fail(guardKey, clientIP) {
+		if h.loginGuard.fail(req.Username, clientIP) {
 			metrics.AuthFailuresTotal.WithLabelValues("lockout").Inc()
 		}
 		if found {
 			_ = h.auditService.LogFailure(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, "invalid password", nil)
 		} else {
 			// Unknown usernames matter for forensics too (spraying, typo'd
-			// service accounts). Zero-UUID actor; attempted name in metadata.
-			_ = h.auditService.LogFailure(c, uuid.Nil, req.Username, "auth.login", "user", "", "", "unknown username", map[string]interface{}{
-				"attempted_username": req.Username,
+			// service accounts). Zero-UUID actor; attempted name in metadata
+			// (bounded — the binding caps it too).
+			attempted := truncateForAudit(req.Username)
+			_ = h.auditService.LogFailure(c, uuid.Nil, attempted, "auth.login", "user", "", "", "unknown username", map[string]interface{}{
+				"attempted_username": attempted,
 			})
+		}
+		// While the per-username throttle is active a wrong password gets
+		// 429 (a correct one still logs in below).
+		if decision == guardThrottled {
+			c.JSON(http.StatusTooManyRequests, models.ErrorResponse{
+				Error:   "Too many attempts",
+				Message: "Too many failed login attempts. Please try again later.",
+			})
+			return
 		}
 		c.JSON(http.StatusUnauthorized, models.ErrorResponse{
 			Error:   "Invalid credentials",
@@ -214,9 +256,14 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	// Successful authentication — clear the failure counter and audit it.
-	h.loginGuard.reset(guardKey, clientIP)
-	_ = h.auditService.LogSuccess(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, nil)
+	// Successful authentication — clear this source's failure counter, mark
+	// it trusted, and audit it (noting a login through an active throttle).
+	h.loginGuard.succeed(req.Username, clientIP)
+	var successMeta map[string]interface{}
+	if decision == guardThrottled {
+		successMeta = map[string]interface{}{"login_throttle_active": true}
+	}
+	_ = h.auditService.LogSuccess(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, successMeta)
 
 	// Generate the access+refresh pair (access carries the refresh JTI so
 	// logout can revoke the sibling refresh token).
@@ -251,6 +298,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 // @Failure 500 {object} models.ErrorResponse
 // @Router /api/auth/refresh [post]
 func (h *AuthHandler) RefreshToken(c *gin.Context) {
+	limitAuthBody(c)
 	var req struct {
 		RefreshToken string `json:"refresh_token" binding:"required"`
 	}
@@ -412,6 +460,7 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	}
 
 	// Optionally revoke the refresh token too (client should send it on logout)
+	limitAuthBody(c)
 	var body struct {
 		RefreshToken string `json:"refresh_token"`
 	}

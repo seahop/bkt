@@ -145,10 +145,15 @@ This generates:
 - SSL/TLS certificates in `certs/`
 
 Re-running it is safe: an existing `.env` keeps all its values (only missing
-keys are added — secrets are never rotated, which would break the Postgres
+keys are added — valid secrets are never rotated, which would break the Postgres
 volume or stored S3 credentials), and existing certificates are kept unless you
 pass `--regenerate-certs`. The backend refuses to start with an empty, short
-(< 32 chars), placeholder, or old default `JWT_SECRET`/`ENCRYPTION_KEY`.
+(< 32 chars), placeholder, or old default `JWT_SECRET` (and a placeholder or
+old default `ENCRYPTION_KEY`; a short one only logs a warning). setup.py
+replaces any such value, short `ENCRYPTION_KEY`s included, and moves the old
+one to a decrypt-only variable (`ENCRYPTION_KEY_PREVIOUS` or
+`ENCRYPTION_LEGACY_JWT_SECRET`), so S3 credentials an older release encrypted
+with it stay readable and are re-encrypted under the new key at startup.
 
 **Save the admin credentials displayed by the setup script.**
 
@@ -176,6 +181,32 @@ docker compose down
 docker compose down -v
 rm -rf data/
 ```
+
+### Upgrading from v1.4.0 or earlier
+
+- **The backend now runs as the unprivileged uid/gid 10001** (releases up to
+  v1.4.0 ran it as root). Bucket data those releases wrote is owned by root —
+  often mode 0600 — so the new image cannot write to or read it. The backend
+  checks this at startup and exits with instructions instead of failing every
+  upload. The omnibus image (`ghcr.io/seahop/bkt`), `docker-compose.prod.yml`
+  (its `init-perms` service) and the Helm chart (`fsGroup`) fix ownership
+  automatically. For everything else — a custom compose file, `docker run -v`
+  with the `bkt-backend` image, Helm on hostPath/NFS — chown the data **once**
+  before starting the new version:
+
+  ```bash
+  # host directory (bind mount)
+  sudo chown -R 10001:10001 /path/to/data/buckets
+  # named Docker volume
+  docker run --rm -v <volume>:/data alpine chown -R 10001:10001 /data
+  ```
+
+  (Alternatively run the container as root with `user: "0:0"` — not
+  recommended.)
+- **Re-run `python3 setup.py`** for compose deployments: if `.env` still holds
+  a placeholder or the old default secret, it is replaced and the old value is
+  kept as a decrypt-only key (see above). Back up `.env` first; setup.py also
+  saves `.env.bak.<timestamp>`.
 
 ## S3 Filesystem Mounting
 

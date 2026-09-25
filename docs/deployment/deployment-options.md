@@ -76,6 +76,14 @@ docker compose -f docker-compose.prod.yml up -d
   service runs before it on every `up`: it re-owns `./data/buckets` if an older
   (root-run) release created it, and copies `certs/backend` into a volume only
   uid 10001 can read (the private key stays 0600).
+- **Upgrading from v1.4.0 or earlier with your own compose file or
+  `docker run -v`** (no `init-perms`): releases up to v1.4.0 ran the backend as
+  root, so existing bucket data is root-owned. Chown it once before starting
+  the new image — `sudo chown -R 10001:10001 ./data/buckets`, or for a named
+  volume `docker run --rm -v <volume>:/data alpine chown -R 10001:10001 /data`.
+  If you skip this, the backend refuses to start and prints exactly that
+  command (it probes that it can write to `STORAGE_ROOT` and read existing
+  objects).
 - `JWT_SECRET` and `ENCRYPTION_KEY` are required (`docker compose` stops with an
   error if either is missing from `.env`).
 
@@ -102,6 +110,10 @@ helm install bkt ./charts/bkt \
 - **Scaling**: with `STORAGE_BACKEND=local`, `replicaCount` must stay **1** unless the
   backend PVC is `ReadWriteMany` (the chart refuses to render otherwise). With
   `STORAGE_BACKEND=s3` the pods are stateless and scale freely.
+- **Pod security**: the backend runs as uid/gid 10001; `fsGroup` re-owns a PVC
+  written by an older root-run release. Volumes that ignore `fsGroup`
+  (hostPath, many NFS setups) must be chowned to `10001:10001` by hand or by a
+  root init container — otherwise the backend exits at startup saying so.
 - Extras: self-signed TLS auto-generated (or `backend.tls.existingSecret` /
   cert-manager), optional S3-API ingress on its own hostname, a Prometheus
   ServiceMonitor, and config-checksum-driven pod rolls.

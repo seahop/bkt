@@ -38,6 +38,8 @@ data:
   TRUSTED_PROXIES: {{ include "bkt.trustedProxies" . | quote }}
   S3_RATE_LIMIT: {{ .Values.backend.env.S3_RATE_LIMIT | default "0" | quote }}
   AUDIT_RETENTION_DAYS: {{ .Values.backend.env.AUDIT_RETENTION_DAYS | default "90" | quote }}
+  WEBHOOK_ALLOWED_HOSTS: {{ .Values.backend.env.WEBHOOK_ALLOWED_HOSTS | default "" | quote }}
+  ENCRYPTION_REENCRYPT_ON_STARTUP: {{ .Values.backend.env.ENCRYPTION_REENCRYPT_ON_STARTUP | default "" | toString | quote }}
   OIDC_ENABLED: {{ .Values.backend.env.OIDC_ENABLED | default "" | quote }}
   OIDC_ISSUER_URL: {{ .Values.backend.env.OIDC_ISSUER_URL | default "" | quote }}
   OIDC_CLIENT_ID: {{ .Values.backend.env.OIDC_CLIENT_ID | default "" | quote }}
@@ -51,15 +53,19 @@ data:
   OIDC_POLICIES_CLAIM: {{ .Values.backend.env.OIDC_POLICIES_CLAIM | default "" | quote }}
   OIDC_LINK_BY_EMAIL: {{ .Values.backend.env.OIDC_LINK_BY_EMAIL | default "false" | quote }}
   OIDC_POLICIES_AUTHORITATIVE: {{ .Values.backend.env.OIDC_POLICIES_AUTHORITATIVE | default "" | quote }}
+  OIDC_EXPECTED_ISSUER: {{ .Values.backend.env.OIDC_EXPECTED_ISSUER | default "" | quote }}
   GOOGLE_OIDC_ENABLED: {{ .Values.backend.env.GOOGLE_OIDC_ENABLED | default "false" | quote }}
   GOOGLE_CLIENT_ID: {{ .Values.backend.env.GOOGLE_CLIENT_ID | default "" | quote }}
   GOOGLE_REDIRECT_URL: {{ .Values.backend.env.GOOGLE_REDIRECT_URL | default "" | quote }}
   GOOGLE_ALLOWED_DOMAINS: {{ .Values.backend.env.GOOGLE_ALLOWED_DOMAINS | default "" | quote }}
+  VAULT_ADDR: {{ .Values.backend.env.VAULT_ADDR | default "" | quote }}
   VAULT_OIDC_ENABLED: {{ .Values.backend.env.VAULT_OIDC_ENABLED | default "false" | quote }}
   VAULT_OIDC_CLIENT_ID: {{ .Values.backend.env.VAULT_OIDC_CLIENT_ID | default "" | quote }}
   VAULT_OIDC_PROVIDER_URL: {{ .Values.backend.env.VAULT_OIDC_PROVIDER_URL | default "" | quote }}
   VAULT_OIDC_REDIRECT_URL: {{ .Values.backend.env.VAULT_OIDC_REDIRECT_URL | default "" | quote }}
   VAULT_OIDC_SCOPES: {{ .Values.backend.env.VAULT_OIDC_SCOPES | default "openid profile" | quote }}
+  VAULT_OIDC_EXPECTED_ISSUER: {{ .Values.backend.env.VAULT_OIDC_EXPECTED_ISSUER | default "" | quote }}
+  VAULT_POLICIES_AUTHORITATIVE: {{ .Values.backend.env.VAULT_POLICIES_AUTHORITATIVE | default "" | toString | quote }}
   VAULT_SSO_ENABLED: {{ .Values.backend.env.VAULT_SSO_ENABLED | default "false" | quote }}
   VAULT_JWT_AUDIENCE: {{ .Values.backend.env.VAULT_JWT_AUDIENCE | default "" | quote }}
   VAULT_JWT_ISSUER: {{ .Values.backend.env.VAULT_JWT_ISSUER | default "" | quote }}

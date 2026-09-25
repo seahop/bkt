@@ -726,13 +726,23 @@ curl -k -X POST https://localhost:9443/api/buckets/my-bucket/objects \
   -F "file=@report.pdf"
 ```
 
-2. **Explicit Creation** - Create a `.keep` marker file:
+2. **Explicit Creation** - Create a `.keep` marker file (what the web
+   console does):
 ```bash
 curl -k -X POST https://localhost:9443/api/buckets/my-bucket/objects \
   -H "Authorization: Bearer $TOKEN" \
   -F "key=empty-folder/.keep" \
   -F "file=@/dev/null"
 ```
+
+3. **S3 folder marker** - An empty object whose key ends in `/` (created by
+   s3fs `mkdir`, Cyberduck/rclone "new folder", or
+   `aws s3api put-object --bucket my-bucket --key empty-folder/`). Supported
+   on both backends; on the local backend it is stored as
+   `empty-folder/.bkt-folder`, so `.bkt-folder` is a reserved key segment
+   there. Deleting the marker never deletes the folder's contents. Renaming a
+   marker (`/objects/rename`) renames only the marker (`a/dir/` →
+   `a/<new_name>/`); use the folder move to move the contents.
 
 ### Listing Objects in a Folder
 

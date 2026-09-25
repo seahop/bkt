@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -115,7 +116,8 @@ type DeleteRequest struct {
 }
 
 type DeleteObject struct {
-	Key string `xml:"Key"`
+	Key       string `xml:"Key"`
+	VersionId string `xml:"VersionId"` //nolint:revive // S3 XML element name
 }
 
 type DeleteResult struct {
@@ -127,14 +129,16 @@ type DeleteResult struct {
 
 type DeletedObject struct {
 	Key                   string `xml:"Key"`
+	VersionId             string `xml:"VersionId,omitempty"` //nolint:revive // S3 XML element name
 	DeleteMarker          bool   `xml:"DeleteMarker,omitempty"`
-	DeleteMarkerVersionId string `xml:"DeleteMarkerVersionId,omitempty"`
+	DeleteMarkerVersionId string `xml:"DeleteMarkerVersionId,omitempty"` //nolint:revive // S3 XML element name
 }
 
 type DeleteError struct {
-	Key     string `xml:"Key"`
-	Code    string `xml:"Code"`
-	Message string `xml:"Message"`
+	Key       string `xml:"Key"`
+	VersionId string `xml:"VersionId,omitempty"` //nolint:revive // S3 XML element name
+	Code      string `xml:"Code"`
+	Message   string `xml:"Message"`
 }
 
 // ListBuckets handles GET / (list all buckets)
@@ -824,9 +828,17 @@ func (h *S3APIHandler) DeleteObject(c *gin.Context) {
 
 	// Version-addressed delete: permanently removes that one version.
 	if vid := c.Query("versionId"); vid != "" {
-		if err := deleteSpecificVersion(storageBackend, &bucket, objectKey, vid); err != nil {
+		wasMarker, err := deleteVersionLocked(storageBackend, &bucket, objectKey, vid)
+		if err != nil {
+			if errors.Is(err, errUnderRetention) {
+				h.s3Error(c, "AccessDenied", err.Error(), objectKey, http.StatusForbidden)
+				return
+			}
 			h.s3Error(c, "InternalError", "Failed to delete version", objectKey, http.StatusInternalServerError)
 			return
+		}
+		if wasMarker {
+			c.Header("x-amz-delete-marker", "true")
 		}
 		c.Header("x-amz-version-id", vid)
 		c.Header("x-amz-request-id", uuid.New().String())
@@ -1079,13 +1091,15 @@ func (h *S3APIHandler) CopyObject(c *gin.Context, copySource string) {
 		return
 	}
 
-	// Serialize with other writers of the destination (and, within one
-	// bucket, of the source so it is read in a stable state).
+	// Serialize with other writers of the destination, and of the source so
+	// it is read in a stable state (a concurrent overwrite/delete/archive of
+	// the source must not swap its bytes out mid-copy). Both helpers use the
+	// same global lock order, so this cannot deadlock.
 	var unlock func()
 	if srcBucket == destBucket {
 		unlock = lockObjectKeys(destBucket, srcKey, destKey)
 	} else {
-		unlock = lockObjectKeys(destBucket, destKey)
+		unlock = lockKeysAcrossBuckets(srcBucket, srcKey, destBucket, destKey)
 	}
 	defer unlock()
 
@@ -1166,9 +1180,19 @@ func (h *S3APIHandler) CopyObject(c *gin.Context, copySource string) {
 			writeFailed("InternalError", "Failed to read source object", srcKey)
 			return
 		}
-		perr := destStorage.PutObject(destBucket, destKey, io.LimitReader(reader, srcObj.Size), srcObj.Size, destContentType, destMeta)
+		// The streamed source must be exactly srcObj.Size bytes: a short
+		// read fails the write (instead of committing a truncated copy),
+		// and so does a source longer than its metadata says.
+		src := newGuardedBody(reader, srcObj.Size, 0, nil)
+		perr := destStorage.PutObject(destBucket, destKey, src, srcObj.Size, destContentType, destMeta)
 		_ = reader.Close()
-		if perr != nil {
+		if perr != nil || !src.Complete() {
+			if perr == nil {
+				// The backend reported success on an unverified body.
+				discardFailedWrite(destStorage, &destBucketModel, destKey, archivedVID, hadPrior)
+				h.s3Error(c, "InternalError", "Source object length does not match its metadata", srcKey, http.StatusInternalServerError)
+				return
+			}
 			writeFailed("InternalError", "Failed to write destination object", destKey)
 			return
 		}
@@ -1254,12 +1278,21 @@ func (h *S3APIHandler) DeleteObjects(c *gin.Context) {
 	result := DeleteResult{Xmlns: "http://s3.amazonaws.com/doc/2006-03-01/"}
 
 	for _, obj := range deleteReq.Objects {
+		// Same authorization as the single DeleteObject (with or without
+		// ?versionId): bkt's policy model has no separate
+		// s3:DeleteObjectVersion action.
 		allowed, _ := h.policyService.CheckObjectAccess(userUUID, bucketName, obj.Key, services.ActionDeleteObject)
 		if !allowed {
-			result.Errors = append(result.Errors, DeleteError{Key: obj.Key, Code: "AccessDenied", Message: "Access Denied"})
+			result.Errors = append(result.Errors, DeleteError{Key: obj.Key, VersionId: obj.VersionId, Code: "AccessDenied", Message: "Access Denied"})
 			continue
 		}
-		deleted, errEntry := h.deleteOneForBatch(storageBackend, &bucket, obj.Key)
+		var deleted DeletedObject
+		var errEntry *DeleteError
+		if obj.VersionId != "" {
+			deleted, errEntry = h.deleteVersionForBatch(storageBackend, &bucket, obj.Key, obj.VersionId)
+		} else {
+			deleted, errEntry = h.deleteOneForBatch(storageBackend, &bucket, obj.Key)
+		}
 		if errEntry != nil {
 			result.Errors = append(result.Errors, *errEntry)
 			continue
@@ -1310,6 +1343,47 @@ func (h *S3APIHandler) deleteOneForBatch(storageBackend storage.StorageBackend, 
 	return DeletedObject{Key: key}, nil
 }
 
+// deleteVersionLocked permanently deletes one version of key (the caller
+// holds the key's write lock), reporting whether that version was a delete
+// marker. A version that does not exist is a successful no-op, as on S3;
+// retention violations are returned as errUnderRetention.
+func deleteVersionLocked(backend storage.StorageBackend, bucket *models.Bucket, key, versionID string) (wasMarker bool, err error) {
+	var n int64
+	database.DB.Model(&models.ObjectVersion{}).
+		Where("bucket_id = ? AND key = ? AND version_id = ? AND is_delete_marker = ?", bucket.ID, key, versionID, true).
+		Count(&n)
+	if err := deleteSpecificVersion(backend, bucket, key, versionID); err != nil {
+		if errors.Is(err, errVersionNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// deleteVersionForBatch is DeleteObjects' version-addressed delete: the same
+// lock, retention rules and semantics as DELETE /{bucket}/{key}?versionId=.
+func (h *S3APIHandler) deleteVersionForBatch(backend storage.StorageBackend, bucket *models.Bucket, key, versionID string) (DeletedObject, *DeleteError) {
+	if validation.IsReservedObjectKey(key) {
+		return DeletedObject{Key: key, VersionId: versionID}, nil
+	}
+	unlock := lockObjectKeys(bucket.Name, key)
+	defer unlock()
+	wasMarker, err := deleteVersionLocked(backend, bucket, key, versionID)
+	if err != nil {
+		if errors.Is(err, errUnderRetention) {
+			return DeletedObject{}, &DeleteError{Key: key, VersionId: versionID, Code: "AccessDenied", Message: err.Error()}
+		}
+		return DeletedObject{}, &DeleteError{Key: key, VersionId: versionID, Code: "InternalError", Message: "Failed to delete version"}
+	}
+	d := DeletedObject{Key: key, VersionId: versionID}
+	if wasMarker {
+		d.DeleteMarker = true
+		d.DeleteMarkerVersionId = versionID
+	}
+	return d, nil
+}
+
 // s3Error sends an S3-compatible XML error response
 func (h *S3APIHandler) s3Error(c *gin.Context, code, message, resource string, status int) {
 	errorResponse := Error{
@@ -1321,8 +1395,13 @@ func (h *S3APIHandler) s3Error(c *gin.Context, code, message, resource string, s
 	c.XML(status, errorResponse)
 }
 
-// CreateBucket handles PUT /{bucket} (create bucket)
-// NOTE: For now, we don't allow bucket creation via S3 API (only via web UI)
+// CreateBucket handles PUT /{bucket} (create bucket).
+//
+// Buckets are created through the web UI only, but tools such as rclone and
+// SDK helpers probe-create the bucket they are about to write to. For an
+// existing bucket this answers like AWS does: 409 BucketAlreadyOwnedByYou
+// when the caller has access to it (clients treat that as success), 409
+// BucketAlreadyExists otherwise. Creating a new bucket stays AccessDenied.
 func (h *S3APIHandler) CreateBucket(c *gin.Context) {
 	if _, ok := c.GetQuery("versioning"); ok {
 		h.PutBucketVersioning(c)
@@ -1333,5 +1412,37 @@ func (h *S3APIHandler) CreateBucket(c *gin.Context) {
 		return
 	}
 
+	bucketName := c.Param("bucket")
+	var bucket models.Bucket
+	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err == nil {
+		if h.callerHasBucketAccess(c, bucketName) {
+			h.s3Error(c, "BucketAlreadyOwnedByYou", "Your previous request to create the named bucket succeeded and you already own it.", bucketName, http.StatusConflict)
+			return
+		}
+		h.s3Error(c, "BucketAlreadyExists", "The requested bucket name is not available. The bucket namespace is shared by all users of the system. Please select a different name and try again.", bucketName, http.StatusConflict)
+		return
+	}
+
 	h.s3Error(c, "AccessDenied", "Bucket creation via S3 API is not supported. Use web UI.", "", http.StatusForbidden)
+}
+
+// callerHasBucketAccess reports whether the caller is an admin or may list
+// or write objects in the bucket (write-only credentials also probe-create).
+func (h *S3APIHandler) callerHasBucketAccess(c *gin.Context, bucketName string) bool {
+	if isAdmin, _ := c.Get("is_admin"); isAdmin == true {
+		return true
+	}
+	userID, ok := c.Get("user_id")
+	if !ok {
+		return false
+	}
+	userUUID, ok := userID.(uuid.UUID)
+	if !ok {
+		return false
+	}
+	if allowed, _ := h.policyService.CheckBucketAccess(userUUID, bucketName, services.ActionListBucket); allowed {
+		return true
+	}
+	allowed, _ := h.policyService.CheckObjectAccess(userUUID, bucketName, "*", services.ActionPutObject)
+	return allowed
 }

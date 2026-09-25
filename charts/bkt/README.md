@@ -61,7 +61,10 @@ chart's database, storing metadata ephemerally.
   filesystem, all capabilities dropped and `RuntimeDefault` seccomp (PSS
   "restricted"). `fsGroup: 10001` with `fsGroupChangePolicy: OnRootMismatch`
   re-owns a PVC written by an older root-run release once. Volume types that
-  ignore `fsGroup` (NFS, hostPath) must be chowned to `10001:10001` by hand.
+  ignore `fsGroup` (NFS, hostPath) must be chowned to `10001:10001` by hand
+  (or by an init container running as root). The backend probes the storage
+  root at startup and exits with that instruction if it cannot write there or
+  read existing objects, instead of starting and failing every upload.
   `/tmp` is an `emptyDir` (upload staging) — size it with
   `backend.tmpDir.sizeLimit`.
 - **Database TLS**: `externalDatabase.sslMode` (default `require`; use
@@ -123,6 +126,10 @@ The Swagger UI (`/api/docs/`) is off in production; set
 | Value | Default | Meaning |
 |---|---|---|
 | `backend.env.JWT_SECRET` / `ENCRYPTION_KEY` / `ADMIN_PASSWORD` | — | **Required.** Stored in a Secret. `JWT_SECRET`/`ENCRYPTION_KEY` must be ≥ 32 chars (`openssl rand -hex 32`) |
+| `backend.env.ENCRYPTION_KEY_PREVIOUS` / `ENCRYPTION_LEGACY_JWT_SECRET` | `""` | Decrypt-only keys for rotating `ENCRYPTION_KEY` (comma-separated retired keys) or a retired `JWT_SECRET` that encrypted credentials before `ENCRYPTION_KEY` existed. Stored in the Secret; no strength checks. Credentials are re-encrypted at startup — remove once the log says they are unused |
+| `backend.env.WEBHOOK_ALLOWED_HOSTS` | `""` | Hostnames/IPs/CIDRs webhooks may reach despite being private (SSRF guard) |
+| `backend.env.OIDC_EXPECTED_ISSUER` / `VAULT_OIDC_EXPECTED_ISSUER` | `""` | Issuer the IdP/Vault advertises when it differs from the URL bkt reaches it at |
+| `backend.env.VAULT_POLICIES_AUTHORITATIVE` | `""` (false) | Vault `policies` claim always replaces bkt policies |
 | `backend.tls.enabled` / `backend.tls.terminatedUpstream` | `true` / `false` | Backend TLS; set `false`/`true` to terminate TLS at the ingress |
 | `backend.env.TRUSTED_PROXIES` | auto with ingress | CIDRs whose `X-Forwarded-For` is trusted (see above) |
 | `backend.env.AUTH_RATE_LIMIT` / `AUTH_REFRESH_RATE_LIMIT` | `20` / `30` | Per-IP per-minute login / token-refresh budgets |

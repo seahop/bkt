@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"bkt/internal/database"
 	"bkt/internal/models"
@@ -120,14 +121,22 @@ func (h *BucketHandler) SetBucketSettings(c *gin.Context) {
 
 	if req.WebhookURL != nil {
 		u := strings.TrimSpace(*req.WebhookURL)
-		if u != "" && !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
-			c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "webhook_url must be an http(s) URL"})
-			return
+		if u != "" {
+			// SSRF guard (first line; deliveries re-check every dialed IP).
+			if err := services.ValidateWebhookURL(u); err != nil {
+				c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "Invalid webhook_url", Message: err.Error()})
+				return
+			}
 		}
 		updates["webhook_url"] = u
 	}
 	if req.WebhookSecret != nil {
-		updates["webhook_secret"] = *req.WebhookSecret
+		sealed, err := services.SealWebhookSecret(*req.WebhookSecret)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to encrypt webhook secret"})
+			return
+		}
+		updates["webhook_secret"] = sealed
 	}
 	if req.WebhookEvents != nil {
 		for _, ev := range strings.Split(*req.WebhookEvents, ",") {
@@ -171,6 +180,17 @@ func (h *BucketHandler) SetBucketSettings(c *gin.Context) {
 				})
 				return
 			}
+			// Record who configured replication (the sweep re-checks this
+			// user's CURRENT permissions per key) and pin the target by ID so
+			// a deleted and re-created same-name bucket is never written to.
+			now := time.Now().UTC()
+			updates["replication_configured_by"] = userUUID
+			updates["replication_configured_at"] = now
+			updates["replicate_to_id"] = targetBucket.ID
+		} else {
+			updates["replication_configured_by"] = nil
+			updates["replication_configured_at"] = nil
+			updates["replicate_to_id"] = nil
 		}
 		updates["replicate_to"] = target
 	}
@@ -186,9 +206,15 @@ func (h *BucketHandler) SetBucketSettings(c *gin.Context) {
 
 	meta := map[string]interface{}{}
 	for k := range updates {
-		if k == "webhook_secret" {
+		switch k {
+		case "webhook_secret":
 			meta[k] = "(updated)"
 			continue
+		case "webhook_url":
+			meta[k] = services.RedactWebhookURL(fmt.Sprint(updates[k])) // paths/queries often carry tokens
+			continue
+		case "replication_configured_by", "replication_configured_at", "replicate_to_id":
+			continue // internal provenance; the audit row already names the actor
 		}
 		meta[k] = updates[k]
 	}

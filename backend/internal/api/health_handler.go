@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"log"
 	"net/http"
 	"time"
 
@@ -16,6 +18,19 @@ type HealthResponse struct {
 	Checks    map[string]string `json:"checks"`
 }
 
+// dbUnavailable is the only database failure detail returned to (unauthenticated)
+// health-check clients; the underlying error — which can reveal hostnames,
+// ports, users or driver internals — is logged server-side instead.
+const dbUnavailable = "database unavailable"
+
+// healthDBTimeout bounds each database probe so a hung DB cannot pin health
+// requests.
+const healthDBTimeout = 3 * time.Second
+
+func logHealthDBError(probe string, err error) {
+	log.Printf("health: %s database check failed: %v", probe, err)
+}
+
 // HealthHandler handles health check requests
 func HealthHandler(c *gin.Context) {
 	checks := make(map[string]string)
@@ -25,13 +40,17 @@ func HealthHandler(c *gin.Context) {
 	if database.DB != nil {
 		sqlDB, err := database.DB.DB()
 		if err != nil {
-			checks["database"] = "error: " + err.Error()
+			logHealthDBError("health", err)
+			checks["database"] = dbUnavailable
 			overallStatus = "unhealthy"
 		} else {
 			// Ping with timeout
-			err = sqlDB.Ping()
+			ctx, cancel := context.WithTimeout(c.Request.Context(), healthDBTimeout)
+			err = sqlDB.PingContext(ctx)
+			cancel()
 			if err != nil {
-				checks["database"] = "error: " + err.Error()
+				logHealthDBError("health", err)
+				checks["database"] = dbUnavailable
 				overallStatus = "unhealthy"
 			} else {
 				checks["database"] = "connected"
@@ -66,18 +85,23 @@ func ReadinessHandler(c *gin.Context) {
 	if database.DB != nil {
 		sqlDB, err := database.DB.DB()
 		if err != nil {
-			checks["database"] = "error: " + err.Error()
+			logHealthDBError("readiness", err)
+			checks["database"] = dbUnavailable
 			ready = false
 		} else {
-			err = sqlDB.Ping()
+			ctx, cancel := context.WithTimeout(c.Request.Context(), healthDBTimeout)
+			defer cancel()
+			err = sqlDB.PingContext(ctx)
 			if err != nil {
-				checks["database"] = "error: " + err.Error()
+				logHealthDBError("readiness", err)
+				checks["database"] = dbUnavailable
 				ready = false
 			} else {
 				// Check we can actually query
 				var result int
-				if err := database.DB.Raw("SELECT 1").Scan(&result).Error; err != nil {
-					checks["database"] = "query error: " + err.Error()
+				if err := database.DB.WithContext(ctx).Raw("SELECT 1").Scan(&result).Error; err != nil {
+					logHealthDBError("readiness query", err)
+					checks["database"] = dbUnavailable
 					ready = false
 				} else {
 					checks["database"] = "ready"

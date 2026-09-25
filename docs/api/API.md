@@ -753,7 +753,7 @@ Mints a short-lived S3 access key pair for the caller. Temporary keys are **excl
 | region | string | Yes | AWS region (e.g., "us-east-1") |
 | is_public | boolean | No | Public access (default: false) |
 | storage_backend | string | No | "local" or "s3" (default: "local") |
-| s3_config_id | UUID | No | S3 configuration ID (if using S3 backend) |
+| s3_config_id | UUID | No | S3 configuration ID (if using S3 backend). Must exist (400 otherwise). If omitted, the current default S3 configuration is pinned to the bucket; with no default, the bucket uses the `.env` S3 settings. The bucket's routing never changes afterwards. |
 
 **Bucket Naming Rules:**
 - 3-63 characters
@@ -1119,6 +1119,17 @@ Recursively move all objects with a prefix.
   "moved_count": 15
 }
 ```
+
+A move handles at most 10,000 objects. It requires `s3:GetObject` +
+`s3:DeleteObject` on every source key and `s3:PutObject` on every destination
+key, and never overwrites existing destination objects. It emits at most
+1,000 webhook events (created/removed pairs for the first 500 objects); the
+rest are skipped and the skip is logged.
+
+**Error Codes:**
+- `409` - A destination object exists, the source changed during the move,
+  or some of the folder's objects are being written right now ("Objects
+  busy" — the move waits at most 10 s for them; retry)
 
 </details>
 
@@ -1731,9 +1742,20 @@ Manage external S3-compatible storage backends (admin only).
 |-----------|------|-------------|
 | id | UUID | Configuration ID |
 
-**Request Body:** Same as create (all fields optional)
+**Request Body:** Same as create (all fields optional). Omitted fields are
+unchanged; `bucket_prefix: ""` clears the prefix. An `access_key_id` equal to
+the stored (encrypted) value returned by GET is treated as unchanged.
+
+Changing `endpoint`, `region`, `bucket_prefix`, `use_ssl` or
+`force_path_style` is refused while any bucket uses the configuration (it
+would silently re-route those buckets' data). Rotating credentials, renaming
+and changing `is_default` are always allowed; `is_default` only affects
+buckets created afterwards.
 
 **Response (200 OK):** Updated configuration object
+
+**Error Codes:**
+- `409` - A location setting was changed while buckets use the configuration (the message lists them)
 
 </details>
 
@@ -1798,7 +1820,7 @@ Optional per-IP rate limiting on this listener is available via `S3_RATE_LIMIT` 
 | Versioning | `?versioning` (GET/PUT), `?versions` (ListObjectVersions), `?versionId` on GET/HEAD/DELETE |
 | Lifecycle | `?lifecycle` (GET/PUT/DELETE, single rule) |
 
-**Not implemented:** the AWS STS API (`AssumeRole` etc. — see bkt-STS above for temporary credentials), object-lock headers/API (bkt retention is a bucket setting), bucket notifications via MQTT/Kafka, multi-rule lifecycle, and bucket creation via the S3 API (buckets are created in the console).
+**Not implemented:** the AWS STS API (`AssumeRole` etc. — see bkt-STS above for temporary credentials), object-lock headers/API (bkt retention is a bucket setting), bucket notifications via MQTT/Kafka, multi-rule lifecycle, and bucket creation via the S3 API (buckets are created in the console). `PUT /:bucket` on an **existing** bucket answers like AWS — `409 BucketAlreadyOwnedByYou` when the caller is an admin or has `s3:ListBucket`/`s3:PutObject` on it (rclone and the SDKs treat this as success), `409 BucketAlreadyExists` otherwise; for a new name it returns `403 AccessDenied`.
 
 <details>
 <summary><code>GET /</code> - List buckets (S3)</summary>
@@ -1848,7 +1870,7 @@ Supports both ListObjects V1 and V2 (`list-type=2`).
 **Response (200 OK):** XML ListBucketResult
 
 **Subresources on the same path:**
-- `GET /:bucket?versions` - ListObjectVersions (Version and DeleteMarker entries with `IsLatest`; supports `prefix`)
+- `GET /:bucket?versions` - ListObjectVersions (Version and DeleteMarker entries, keys ascending and newest first per key, `IsLatest` on each key's newest entry; supports `prefix`, `max-keys` (≤1000), `key-marker` / `version-id-marker` pagination with `IsTruncated`, `NextKeyMarker`, `NextVersionIdMarker`)
 - `GET /:bucket?uploads` - ListMultipartUploads (supports `prefix`; non-admins see only their own uploads)
 - `GET /:bucket?versioning` - Current versioning status
 - `GET /:bucket?lifecycle` - Lifecycle configuration
@@ -1868,12 +1890,16 @@ Supports both ListObjects V1 and V2 (`list-type=2`).
 - `x-amz-tagging`: Object tags, URL-query encoded (max 10 tags; key <= 128 chars, value <= 256)
 - `x-amz-copy-source`: Makes this a **CopyObject**; combine with `x-amz-metadata-directive: COPY|REPLACE` and `x-amz-tagging-directive`
 - `?partNumber=N&uploadId=ID` query: **UploadPart**; with `x-amz-copy-source` (plus optional `x-amz-copy-source-range: bytes=start-end`) it's **UploadPartCopy** (bad range returns `InvalidRange` 416)
+- `Content-MD5`, `x-amz-checksum-crc32|crc32c|crc64nvme|sha1|sha256`: verified against the received bytes (PutObject and UploadPart), as are checksum trailers announced in `X-Amz-Trailer` for `STREAMING-UNSIGNED-PAYLOAD-TRAILER` / `STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER` bodies. A mismatch returns `400 BadDigest` and nothing is stored; a malformed value returns `400 InvalidDigest`/`InvalidRequest`.
+
+An upload body that delivers no bytes for **60 seconds** is aborted (the key's write lock and quota reservation are released); slow but steadily progressing uploads are not time-limited. CopyObject verifies that the streamed source has exactly its recorded size.
 
 **Response Headers:**
 - `ETag`: MD5 hash of uploaded object
 - `x-amz-version-id`: On versioning-enabled buckets
 
 **Error Codes:**
+- `400` - `BadDigest` (checksum mismatch), `IncompleteBody`
 - `403` - `QuotaExceeded` when the write would exceed the bucket quota
 - `411` - Missing Content-Length
 - `413` - Entity too large
@@ -1914,7 +1940,9 @@ Supports `?versionId`.
 - `uploadId` - AbortMultipartUpload
 - `tagging` - Delete object tags
 
-On a **versioning-enabled** bucket, a plain DELETE creates a **delete marker** (`x-amz-delete-marker: true`; the object is hidden, data kept). Deleting a marker by `versionId` resurrects the object; deleting the current version by id promotes the next-newest version.
+On a **versioning-enabled** bucket, a plain DELETE creates a **delete marker** (`x-amz-delete-marker: true`; the object is hidden, data kept). Deleting a marker by `versionId` resurrects the object; deleting the current version by id promotes the next-newest version. Deleting a version that does not exist succeeds (`204`); a version still under WORM retention returns `403 AccessDenied`.
+
+`POST /:bucket?delete` (DeleteObjects) honors `<VersionId>` per entry with the same authorization (`s3:DeleteObject`) and retention rules, and reports `VersionId`, `DeleteMarker` and `DeleteMarkerVersionId` in each `<Deleted>` entry like AWS.
 
 </details>
 

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -36,7 +37,15 @@ type OIDCProviderSettings struct {
 	DisplayName string // audit metadata / error copy
 	AuditName   string // metadata "provider" value in the audit log
 
-	IssuerURL    string
+	IssuerURL string
+	// ExpectedIssuer, when set, is the issuer the discovery document (and
+	// therefore every ID token's "iss") must carry instead of IssuerURL —
+	// for providers reached via a URL other than their public issuer.
+	ExpectedIssuer string
+	// IssuerEnv / ExpectedIssuerEnv name the settings in error messages.
+	IssuerEnv         string
+	ExpectedIssuerEnv string
+
 	ClientID     string
 	ClientSecret string // optional: confidential client. PKCE is always used regardless.
 	RedirectURL  string
@@ -55,7 +64,12 @@ type OIDCProviderSettings struct {
 	// Without it, an absent claim leaves policies untouched; a present claim
 	// (including an empty one) always replaces them.
 	PoliciesAuthoritative bool
-	LinkByEmail           bool
+	// PoliciesReplaceOnlyOnMatch (Vault default): a present policies claim
+	// replaces the user's policies only when at least one claimed name
+	// matches an existing bkt policy; otherwise policies are left as an
+	// administrator set them. Ignored when PoliciesAuthoritative is set.
+	PoliciesReplaceOnlyOnMatch bool
+	LinkByEmail                bool
 
 	// VaultLegacyURLs enables the Vault UI-URL fallback for providers whose
 	// discovery document omits endpoints (older Vault releases).
@@ -135,11 +149,14 @@ func NewOIDCHandler(cfg *config.Config) *OIDCHandler {
 	if !o.Enabled {
 		o.IssuerURL = "" // explicit OIDC_ENABLED=false keeps a configured provider off
 	}
-	return newOIDCHandler(cfg, OIDCProviderSettings{
+	h := newOIDCHandler(cfg, OIDCProviderSettings{
 		Key:                   "oidc",
 		DisplayName:           o.ProviderName,
 		AuditName:             "oidc",
 		IssuerURL:             o.IssuerURL,
+		ExpectedIssuer:        o.ExpectedIssuer,
+		IssuerEnv:             "OIDC_ISSUER_URL",
+		ExpectedIssuerEnv:     "OIDC_EXPECTED_ISSUER",
 		ClientID:              o.ClientID,
 		ClientSecret:          o.ClientSecret,
 		RedirectURL:           o.RedirectURL,
@@ -154,6 +171,62 @@ func NewOIDCHandler(cfg *config.Config) *OIDCHandler {
 		PoliciesAuthoritative: o.PoliciesAuthoritative,
 		LinkByEmail:           o.LinkByEmail,
 	})
+	h.startupDiscoveryCheck()
+	return h
+}
+
+// startupDiscoveryCheck fetches the discovery document once in the background
+// at startup so a misconfiguration (unreachable provider, issuer mismatch)
+// is logged loudly right away instead of surfacing only at the first login.
+func (h *OIDCHandler) startupDiscoveryCheck() {
+	if !h.Enabled() {
+		return
+	}
+	go func() {
+		if _, err := h.discover(); err != nil {
+			log.Printf("ERROR: %s SSO (%s) is enabled but its discovery check failed; logins will fail until this is fixed: %v",
+				h.s.DisplayName, h.s.Key, err)
+			return
+		}
+		log.Printf("%s SSO (%s): discovery OK, issuer %q", h.s.DisplayName, h.s.Key, h.expectedIssuer())
+	}()
+}
+
+// expectedIssuer is the issuer discovery and ID tokens must carry.
+func (h *OIDCHandler) expectedIssuer() string {
+	if h.s.ExpectedIssuer != "" {
+		return h.s.ExpectedIssuer
+	}
+	return h.s.IssuerURL
+}
+
+// checkDiscoveryIssuer enforces OIDC Discovery §4.3: the advertised issuer
+// must be identical to the expected one — otherwise a document served for
+// one issuer could vouch for tokens minted by another. The expected issuer
+// is the explicitly configured *_EXPECTED_ISSUER, or the configured issuer
+// URL itself.
+func (h *OIDCHandler) checkDiscoveryIssuer(advertised string) error {
+	if h.s.ExpectedIssuer != "" {
+		if !issuerMatches(advertised, h.s.ExpectedIssuer) {
+			return fmt.Errorf("OIDC discovery issuer %q != expected issuer %q (%s)", advertised, h.s.ExpectedIssuer, envOr(h.s.ExpectedIssuerEnv, "expected issuer"))
+		}
+		return nil
+	}
+	if !issuerMatches(advertised, h.s.IssuerURL) {
+		hint := ""
+		if h.s.ExpectedIssuerEnv != "" && advertised != "" {
+			hint = fmt.Sprintf("; if the provider is intentionally reached via a URL other than its issuer (internal hostname, Keycloak KC_HOSTNAME, Vault api_addr), set %s=%s", h.s.ExpectedIssuerEnv, advertised)
+		}
+		return fmt.Errorf("OIDC discovery issuer %q != configured %s %q%s", advertised, envOr(h.s.IssuerEnv, "issuer URL"), h.s.IssuerURL, hint)
+	}
+	return nil
+}
+
+func envOr(name, fallback string) string {
+	if name != "" {
+		return name
+	}
+	return fallback
 }
 
 func newOIDCHandler(cfg *config.Config, s OIDCProviderSettings) *OIDCHandler {
@@ -210,11 +283,10 @@ func (h *OIDCHandler) discover() (*oidcDiscovery, error) {
 	if d.JWKSURI == "" {
 		return nil, fmt.Errorf("OIDC discovery missing jwks_uri")
 	}
-	// OIDC Discovery §4.3: the advertised issuer MUST be identical to the
-	// configured issuer URL — otherwise a document served for one issuer could
-	// vouch for tokens minted by another. It also pins ID-token "iss".
-	if !issuerMatches(d.Issuer, h.s.IssuerURL) {
-		return nil, fmt.Errorf("OIDC discovery issuer %q does not match the configured issuer URL %q", d.Issuer, h.s.IssuerURL)
+	// The advertised issuer must be the expected one (it also pins ID-token
+	// "iss", see verifyIDToken).
+	if err := h.checkDiscoveryIssuer(d.Issuer); err != nil {
+		return nil, err
 	}
 	h.disc, h.discAt = &d, time.Now()
 	return h.disc, nil
@@ -384,8 +456,14 @@ func (h *OIDCHandler) Callback(c *gin.Context) {
 	// Policies: when the IdP is the source of truth, replace — including with
 	// the empty set, so removing someone from every group in the IdP actually
 	// revokes their access at next login (offboarding must not fail open).
+	// Vault (non-authoritative by default) only replaces when the claim names
+	// at least one existing bkt policy.
 	if identity.HasPolicies || h.s.PoliciesAuthoritative {
-		if err := syncUserPoliciesByName(user, identity.Policies); err != nil {
+		sync := syncUserPoliciesByName
+		if h.s.PoliciesReplaceOnlyOnMatch && !h.s.PoliciesAuthoritative {
+			sync = syncUserPoliciesIfAnyMatch
+		}
+		if err := sync(user, identity.Policies); err != nil {
 			_ = audit.LogFailure(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, "policy sync failed: "+err.Error(), h.auditMeta(identity))
 			h.redirectWithError(c, "policy_sync_failed", "Could not apply your access policies; please try again or contact an administrator.")
 			return
@@ -853,6 +931,25 @@ func syncUserPoliciesByName(user *models.User, policyNames []string) error {
 	}
 	if len(policies) == 0 {
 		return database.DB.Model(user).Association("Policies").Clear()
+	}
+	return database.DB.Model(user).Association("Policies").Replace(policies)
+}
+
+// syncUserPoliciesIfAnyMatch is the non-authoritative variant used for Vault:
+// the user's direct policies are replaced by the named bkt policies only when
+// at least one name matches an existing policy. A claim with no bkt matches
+// (Vault-side policy names only, or []) leaves the policies an administrator
+// assigned untouched.
+func syncUserPoliciesIfAnyMatch(user *models.User, policyNames []string) error {
+	if len(policyNames) == 0 {
+		return nil
+	}
+	policies := []models.Policy{}
+	if err := database.DB.Where("name IN ?", policyNames).Find(&policies).Error; err != nil {
+		return fmt.Errorf("failed to look up policies: %w", err)
+	}
+	if len(policies) == 0 {
+		return nil
 	}
 	return database.DB.Model(user).Association("Policies").Replace(policies)
 }

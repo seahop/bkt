@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -57,6 +59,38 @@ func NewS3Storage(endpoint, region, accessKeyID, secretAccessKey, bucketPrefix s
 	}, nil
 }
 
+// Upstream call deadlines. Non-streaming calls (HEAD, DELETE, list pages,
+// multipart bookkeeping) get s3MetadataTimeout so a hung upstream cannot pin a
+// request — and the per-key object lock it holds — forever. Server-side copies
+// and CompleteMultipartUpload do real work proportional to object size on the
+// upstream (AWS documents minutes for large completes), so they get
+// s3LongOpTimeout. Streaming PutObject/UploadPart/GetObject have no total
+// deadline (a large transfer may legitimately take hours); they abort when the
+// client body errors (the upload idle timeout in the API layer bounds a stalled
+// client) or when the reader is closed.
+const (
+	s3MetadataTimeout = 60 * time.Second
+	s3LongOpTimeout   = 15 * time.Minute
+)
+
+func s3MetaCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), s3MetadataTimeout)
+}
+
+func s3LongCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), s3LongOpTimeout)
+}
+
+// s3HTTPStatus returns the HTTP status of an upstream S3 error response (0
+// when err is not an HTTP response error, e.g. a network failure).
+func s3HTTPStatus(err error) int {
+	var re *awshttp.ResponseError
+	if errors.As(err, &re) {
+		return re.HTTPStatusCode()
+	}
+	return 0
+}
+
 // getBucketName adds prefix to bucket name if configured
 func (s3s *S3Storage) getBucketName(bucketName string) string {
 	if s3s.bucketPrefix != "" {
@@ -67,7 +101,8 @@ func (s3s *S3Storage) getBucketName(bucketName string) string {
 
 // CreateBucket creates a new bucket in S3
 func (s3s *S3Storage) CreateBucket(bucketName, region string) error {
-	ctx := context.Background()
+	ctx, cancel := s3MetaCtx()
+	defer cancel()
 	actualBucketName := s3s.getBucketName(bucketName)
 
 	// Check if bucket already exists
@@ -101,7 +136,8 @@ func (s3s *S3Storage) CreateBucket(bucketName, region string) error {
 
 // DeleteBucket removes a bucket from S3 (bucket must be empty)
 func (s3s *S3Storage) DeleteBucket(bucketName string) error {
-	ctx := context.Background()
+	ctx, cancel := s3MetaCtx()
+	defer cancel()
 	actualBucketName := s3s.getBucketName(bucketName)
 
 	_, err := s3s.client.DeleteBucket(ctx, &s3.DeleteBucketInput{
@@ -116,7 +152,8 @@ func (s3s *S3Storage) DeleteBucket(bucketName string) error {
 
 // BucketExists checks if a bucket exists and is accessible in S3
 func (s3s *S3Storage) BucketExists(bucketName string) (bool, error) {
-	ctx := context.Background()
+	ctx, cancel := s3MetaCtx()
+	defer cancel()
 	actualBucketName := s3s.getBucketName(bucketName)
 
 	_, err := s3s.client.HeadBucket(ctx, &s3.HeadBucketInput{
@@ -143,16 +180,17 @@ func (s3s *S3Storage) PutObject(bucketName, objectKey string, data io.Reader, si
 	if err := checkS3UserKey(objectKey); err != nil {
 		return err
 	}
-	ctx := context.Background()
 	actualBucketName := s3s.getBucketName(bucketName)
 
 	// Ensure bucket exists
-	_, err := s3s.client.HeadBucket(ctx, &s3.HeadBucketInput{
+	mctx, cancel := s3MetaCtx()
+	defer cancel()
+	_, err := s3s.client.HeadBucket(mctx, &s3.HeadBucketInput{
 		Bucket: aws.String(actualBucketName),
 	})
 	if err != nil {
 		// Bucket doesn't exist, attempt to create it
-		_, err = s3s.client.CreateBucket(ctx, &s3.CreateBucketInput{
+		_, err = s3s.client.CreateBucket(mctx, &s3.CreateBucketInput{
 			Bucket: aws.String(actualBucketName),
 		})
 		if err != nil {
@@ -193,7 +231,8 @@ func (s3s *S3Storage) PutObject(bucketName, objectKey string, data io.Reader, si
 	if s3s.sse {
 		putInput.ServerSideEncryption = types.ServerSideEncryptionAes256
 	}
-	_, err = s3s.client.PutObject(ctx, putInput)
+	// Streaming: no total deadline; aborts when the body reader errors.
+	_, err = s3s.client.PutObject(context.Background(), putInput)
 	if err != nil {
 		return fmt.Errorf("failed to upload object: %w", err)
 	}
@@ -206,7 +245,7 @@ func (s3s *S3Storage) GetObject(bucketName, objectKey string) (io.ReadCloser, er
 	if err := checkS3UserKey(objectKey); err != nil {
 		return nil, err
 	}
-	ctx := context.Background()
+	ctx := context.Background() // streaming read: the body outlives this call, so no total deadline
 	actualBucketName := s3s.getBucketName(bucketName)
 
 	result, err := s3s.client.GetObject(ctx, &s3.GetObjectInput{
@@ -225,7 +264,8 @@ func (s3s *S3Storage) DeleteObject(bucketName, objectKey string) error {
 	if err := checkS3UserKey(objectKey); err != nil {
 		return err
 	}
-	ctx := context.Background()
+	ctx, cancel := s3MetaCtx()
+	defer cancel()
 	actualBucketName := s3s.getBucketName(bucketName)
 
 	_, err := s3s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
@@ -242,7 +282,6 @@ func (s3s *S3Storage) DeleteObject(bucketName, objectKey string) error {
 // ListObjects lists all objects in a bucket with the given prefix
 // Limited to 10,000 objects to prevent memory exhaustion on huge buckets
 func (s3s *S3Storage) ListObjects(bucketName, prefix string) ([]ObjectInfo, error) {
-	ctx := context.Background()
 	actualBucketName := s3s.getBucketName(bucketName)
 	objects := make([]ObjectInfo, 0)
 
@@ -250,9 +289,11 @@ func (s3s *S3Storage) ListObjects(bucketName, prefix string) ([]ObjectInfo, erro
 	// transient failure (throttling, network, expired credentials) must NOT be
 	// reported as "bucket is empty", because the caller reconciles the DB index
 	// against this listing and would otherwise mass-delete valid metadata.
-	_, err := s3s.client.HeadBucket(ctx, &s3.HeadBucketInput{
+	hctx, hcancel := s3MetaCtx()
+	_, err := s3s.client.HeadBucket(hctx, &s3.HeadBucketInput{
 		Bucket: aws.String(actualBucketName),
 	})
+	hcancel()
 	if err != nil {
 		return nil, fmt.Errorf("failed to access bucket %q: %w", bucketName, err)
 	}
@@ -267,7 +308,9 @@ func (s3s *S3Storage) ListObjects(bucketName, prefix string) ([]ObjectInfo, erro
 	})
 
 	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
+		pctx, pcancel := s3MetaCtx() // per page: a large listing may take longer overall
+		page, err := paginator.NextPage(pctx)
+		pcancel()
 		if err != nil {
 			return nil, fmt.Errorf("failed to list objects: %w", err)
 		}
@@ -311,7 +354,8 @@ func (s3s *S3Storage) ObjectExists(bucketName, objectKey string) (bool, error) {
 	if err := checkS3UserKey(objectKey); err != nil {
 		return false, err
 	}
-	ctx := context.Background()
+	ctx, cancel := s3MetaCtx()
+	defer cancel()
 	actualBucketName := s3s.getBucketName(bucketName)
 
 	_, err := s3s.client.HeadObject(ctx, &s3.HeadObjectInput{
@@ -338,7 +382,8 @@ func (s3s *S3Storage) GetObjectInfo(bucketName, objectKey string) (*ObjectInfo, 
 	if err := checkS3UserKey(objectKey); err != nil {
 		return nil, err
 	}
-	ctx := context.Background()
+	ctx, cancel := s3MetaCtx()
+	defer cancel()
 	actualBucketName := s3s.getBucketName(bucketName)
 
 	result, err := s3s.client.HeadObject(ctx, &s3.HeadObjectInput{
@@ -386,7 +431,8 @@ func (s3s *S3Storage) CopyObject(bucketName, srcKey, dstKey string) error {
 	if err := checkS3UserKey(dstKey); err != nil {
 		return err
 	}
-	ctx := context.Background()
+	ctx, cancel := s3LongCtx() // server-side copy: time grows with object size
+	defer cancel()
 	actualBucketName := s3s.getBucketName(bucketName)
 
 	input := &s3.CopyObjectInput{
@@ -408,7 +454,8 @@ func (s3s *S3Storage) CreateMultipartUpload(bucketName, objectKey, contentType s
 	if err := checkS3UserKey(objectKey); err != nil {
 		return "", err
 	}
-	ctx := context.Background()
+	ctx, cancel := s3MetaCtx()
+	defer cancel()
 	mpuInput := &s3.CreateMultipartUploadInput{
 		Bucket:      aws.String(s3s.getBucketName(bucketName)),
 		Key:         aws.String(objectKey),
@@ -436,7 +483,7 @@ func (s3s *S3Storage) UploadPart(bucketName, objectKey, uploadID string, partNum
 	if err := checkS3UserKey(objectKey); err != nil {
 		return "", err
 	}
-	ctx := context.Background()
+	ctx := context.Background() // streaming: no total deadline; aborts when the body errors
 	input := &s3.UploadPartInput{
 		Bucket:     aws.String(s3s.getBucketName(bucketName)),
 		Key:        aws.String(objectKey),
@@ -458,7 +505,8 @@ func (s3s *S3Storage) CompleteMultipartUpload(bucketName, objectKey, uploadID st
 	if err := checkS3UserKey(objectKey); err != nil {
 		return err
 	}
-	ctx := context.Background()
+	ctx, cancel := s3LongCtx() // upstream assembly can take minutes for large objects
+	defer cancel()
 	awsParts := make([]types.CompletedPart, len(parts))
 	for i, p := range parts {
 		// Handlers already enforce the S3 part-number range; guard here so the
@@ -490,7 +538,8 @@ func (s3s *S3Storage) AbortMultipartUpload(bucketName, objectKey, uploadID strin
 	if err := checkS3UserKey(objectKey); err != nil {
 		return err
 	}
-	ctx := context.Background()
+	ctx, cancel := s3MetaCtx()
+	defer cancel()
 	_, err := s3s.client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
 		Bucket:   aws.String(s3s.getBucketName(bucketName)),
 		Key:      aws.String(objectKey),
@@ -506,7 +555,8 @@ func (s3s *S3Storage) ListParts(bucketName, objectKey, uploadID string) ([]PartI
 	if err := checkS3UserKey(objectKey); err != nil {
 		return nil, err
 	}
-	ctx := context.Background()
+	ctx, cancel := s3MetaCtx()
+	defer cancel()
 	out, err := s3s.client.ListParts(ctx, &s3.ListPartsInput{
 		Bucket:   aws.String(s3s.getBucketName(bucketName)),
 		Key:      aws.String(objectKey),
@@ -561,7 +611,6 @@ func (s3s *S3Storage) PartSizes(bucketName, objectKey, uploadID string) (map[int
 	if err := checkS3UserKey(objectKey); err != nil {
 		return nil, err
 	}
-	ctx := context.Background()
 	paginator := s3.NewListPartsPaginator(s3s.client, &s3.ListPartsInput{
 		Bucket:   aws.String(s3s.getBucketName(bucketName)),
 		Key:      aws.String(objectKey),
@@ -569,7 +618,9 @@ func (s3s *S3Storage) PartSizes(bucketName, objectKey, uploadID string) (map[int
 	})
 	sizes := make(map[int]int64)
 	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
+		pctx, pcancel := s3MetaCtx()
+		page, err := paginator.NextPage(pctx)
+		pcancel()
 		if err != nil {
 			return nil, fmt.Errorf("failed to list parts: %w", err)
 		}

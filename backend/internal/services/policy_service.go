@@ -154,22 +154,36 @@ func (ps *PolicyService) CheckObjectAccess(userID uuid.UUID, bucketName, objectK
 		return false, nil
 	}
 
+	var bucketPolicy *models.BucketPolicy
+	var bp models.BucketPolicy
+	if database.DB.Where("bucket_id = ?", bucket.ID).First(&bp).Error == nil {
+		bucketPolicy = &bp
+	}
+	return ps.objectAccessDecision(&user, bucketName, bucketPolicy, objectKey, action), nil
+}
+
+// objectAccessDecision is the in-memory core of CheckObjectAccess for a
+// non-admin user whose bucket exists: user (identity) and bucket (resource)
+// policies are evaluated and combined so an explicit Deny from either wins.
+// bucketPolicy may be nil (no bucket policy). AccessEvaluator must stay
+// equivalent to this (see TestAccessEvaluatorMatchesCheckObjectAccess).
+func (ps *PolicyService) objectAccessDecision(user *models.User, bucketName string, bucketPolicy *models.BucketPolicy, objectKey, action string) bool {
+	if user.IsAdmin {
+		return true
+	}
 	// Build resource ARN - for objects, include the key
 	resourceARN := fmt.Sprintf("arn:aws:s3:::%s/%s", bucketName, objectKey)
 
-	// Evaluate user (identity) and bucket (resource) policies, then combine so an
-	// explicit Deny from either source wins.
-	userResult := ps.evaluateUserPolicies(&user, action, resourceARN)
+	userResult := ps.evaluateUserPolicies(user, action, resourceARN)
 
 	bucketResult := security.PolicyNoMatch
-	var bucketPolicy models.BucketPolicy
-	if database.DB.Where("bucket_id = ?", bucket.ID).First(&bucketPolicy).Error == nil {
-		if br, perr := ps.evaluateBucketPolicy(&bucketPolicy, action, resourceARN, user.Username); perr == nil {
+	if bucketPolicy != nil {
+		if br, perr := ps.evaluateBucketPolicy(bucketPolicy, action, resourceARN, user.Username); perr == nil {
 			bucketResult = br
 		}
 	}
 
-	return decide(userResult, bucketResult), nil
+	return decide(userResult, bucketResult)
 }
 
 // evaluateUserPolicies evaluates all attached user policies and returns a

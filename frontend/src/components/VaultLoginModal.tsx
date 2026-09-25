@@ -3,6 +3,7 @@ import { X } from 'lucide-react';
 import { loginWithVault } from '../services/sso';
 import { useNavigate } from 'react-router-dom';
 import { getErrorMessage } from '../utils/errors';
+import { useAuthStore } from '../store/authStore';
 
 interface VaultLoginModalProps {
   isOpen: boolean;
@@ -14,6 +15,7 @@ const VaultLoginModal: React.FC<VaultLoginModalProps> = ({ isOpen, onClose }) =>
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const navigate = useNavigate();
+  const setAuth = useAuthStore((s) => s.setAuth);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -23,15 +25,21 @@ const VaultLoginModal: React.FC<VaultLoginModalProps> = ({ isOpen, onClose }) =>
     try {
       const response = await loginWithVault(token);
 
-      // Store the access token. We intentionally do NOT store a refresh token:
-      // it is never used, and the old camelCase 'refreshToken' key was never
-      // cleared on logout, leaving an orphaned secret behind.
-      localStorage.setItem('token', response.token);
+      // Go through the auth store exactly like password/SSO login: writing
+      // only localStorage.token left isAuthenticated false, so PrivateRoute
+      // bounced straight back to /login. setAuth persists the access token
+      // (never the refresh token) and marks the session fresh.
+      setAuth({
+        token: response.token,
+        refresh_token: response.refresh_token,
+        user: response.user,
+      });
+      setToken('');
 
       // Close modal and redirect
       onClose();
       navigate('/');
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Vault login error:', err);
       setError(getErrorMessage(err, 'Failed to login with Vault token'));
     } finally {

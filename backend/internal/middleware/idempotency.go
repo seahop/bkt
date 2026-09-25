@@ -47,6 +47,10 @@ func (w *responseWriter) WriteHeader(statusCode int) {
 	w.ResponseWriter.WriteHeader(statusCode)
 }
 
+// Unwrap exposes the underlying writer so http.NewResponseController can
+// reach the connection (deadlines, full-duplex) through this wrapper.
+func (w *responseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 // IdempotencyMiddleware handles idempotency key processing
 func IdempotencyMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {

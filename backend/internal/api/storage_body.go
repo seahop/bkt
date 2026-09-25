@@ -3,15 +3,21 @@ package api
 import (
 	"bufio"
 	"crypto/hmac"
+	"crypto/md5"  //nolint:gosec // Content-MD5 integrity check mandated by the S3 API, not a security primitive
+	"crypto/sha1" //nolint:gosec // x-amz-checksum-sha1 integrity check mandated by the S3 API
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash"
+	"hash/crc32"
+	"hash/crc64"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -100,6 +106,7 @@ type awsChunkedReader struct {
 	remaining int64
 	expectSig string
 	hasher    hash.Hash
+	trailers  map[string]string // trailing headers (lower-case names), set at the end
 	done      bool
 	err       error
 }
@@ -253,6 +260,10 @@ func (a *awsChunkedReader) readTrailers() error {
 			trailerSig = value
 			continue
 		}
+		if a.trailers == nil {
+			a.trailers = map[string]string{}
+		}
+		a.trailers[name] = value
 		canonical.WriteString(name + ":" + value + "\n")
 	}
 	if a.mode == chunkModeSignedTrailer {
@@ -484,7 +495,12 @@ func parseDecodedLength(v string) (int64, bool) {
 //   - otherwise: Content-Length (required).
 //
 // The declared length is enforced against the actual bytes by guardedBody.
+// Content-MD5 and x-amz-checksum-* values (request headers, or checksum
+// trailers announced in X-Amz-Trailer for *-TRAILER payloads) are verified
+// against the decoded bytes before EOF is reported (BadDigest on mismatch).
+// The body also gets the upload inactivity bound (applyUploadIdleTimeout).
 func prepareUploadBody(c *gin.Context, maxSize int64) (*uploadBody, *s3BodyError) {
+	applyUploadIdleTimeout(c)
 	payloadHash := c.GetHeader("X-Amz-Content-Sha256")
 	streaming := strings.HasPrefix(payloadHash, "STREAMING-")
 	if streaming || hasAWSChunkedEncoding(c.Request.Header) {
@@ -515,7 +531,12 @@ func prepareUploadBody(c *gin.Context, maxSize int64) (*uploadBody, *s3BodyError
 			}
 			sig = s
 		}
-		return &uploadBody{reader: newAWSChunkedReaderMode(c.Request.Body, mode, sig), declared: declared}, nil
+		chunked := newAWSChunkedReaderMode(c.Request.Body, mode, sig)
+		r, cerr := wrapChecksums(c.Request.Header, chunked, chunked)
+		if cerr != nil {
+			return nil, cerr
+		}
+		return &uploadBody{reader: r, declared: declared}, nil
 	}
 
 	declared := c.Request.ContentLength
@@ -530,7 +551,11 @@ func prepareUploadBody(c *gin.Context, maxSize int64) (*uploadBody, *s3BodyError
 	if maxSize > 0 && declared > maxSize {
 		return nil, &s3BodyError{"EntityTooLarge", "Your proposed upload exceeds the maximum allowed object size", http.StatusRequestEntityTooLarge}
 	}
-	return &uploadBody{reader: c.Request.Body, declared: declared}, nil
+	r, cerr := wrapChecksums(c.Request.Header, c.Request.Body, nil)
+	if cerr != nil {
+		return nil, cerr
+	}
+	return &uploadBody{reader: r, declared: declared}, nil
 }
 
 // bodyFailure maps a guardedBody failure to an S3 error (ok=false when the
@@ -552,6 +577,10 @@ func bodyFailure(g *guardedBody) (code, msg string, status int, ok bool) {
 		return "SignatureDoesNotMatch", "The request signature we calculated does not match the signature you provided", http.StatusForbidden, true
 	case errors.Is(err, errChunkMalformed):
 		return "InvalidRequest", "Malformed aws-chunked request body", http.StatusBadRequest, true
+	case errors.Is(err, errChecksumMismatch):
+		return "BadDigest", err.Error(), http.StatusBadRequest, true
+	case errors.Is(err, errChecksumMalformed):
+		return "InvalidRequest", err.Error(), http.StatusBadRequest, true
 	default:
 		// Includes the SigV4 middleware's payload-hash mismatch error.
 		return "BadDigest", fmt.Sprintf("Request body could not be verified: %v", err), http.StatusBadRequest, true
@@ -575,4 +604,249 @@ func readBoundedBody(r io.Reader, max int64) ([]byte, error) {
 		return nil, errRequestBodyTooLarge
 	}
 	return data, nil
+}
+
+// ── Upload inactivity bound ─────────────────────────────────────────────────
+
+// uploadIdleTimeout bounds how long an upload body may go without delivering
+// any bytes. Object writes hold the key's write lock (and a quota
+// reservation) for the whole transfer; without this bound a stalled or
+// trickling client would hold them — and stall lifecycle/replication sweeps
+// and moves of that key — indefinitely. There is deliberately no total
+// deadline: a large upload on a slow but live link keeps extending it.
+const uploadIdleTimeout = 60 * time.Second
+
+// idleDeadlineBody extends the connection read deadline before every Read of
+// the request body, so a client that stops sending fails the Read with a
+// timeout after uploadIdleTimeout. The deadline is cleared once the body is
+// finished (EOF, error or Close) so it cannot affect the connection after
+// the upload — net/http starts a background read at body EOF, and a stale
+// deadline there would cancel the request context.
+type idleDeadlineBody struct {
+	io.ReadCloser
+	rc      *http.ResponseController
+	idle    time.Duration
+	enabled bool
+	cleared bool
+}
+
+func (b *idleDeadlineBody) Read(p []byte) (int, error) {
+	if b.enabled {
+		if err := b.rc.SetReadDeadline(time.Now().Add(b.idle)); err != nil {
+			// e.g. http.ErrNotSupported behind a ResponseWriter wrapper
+			// without Unwrap, or a test recorder: no bound, but no failure.
+			b.enabled = false
+		}
+	}
+	n, err := b.ReadCloser.Read(p)
+	if err != nil {
+		b.clear()
+	}
+	return n, err
+}
+
+func (b *idleDeadlineBody) Close() error {
+	b.clear()
+	return b.ReadCloser.Close()
+}
+
+func (b *idleDeadlineBody) clear() {
+	if b.enabled && !b.cleared {
+		b.cleared = true
+		_ = b.rc.SetReadDeadline(time.Time{})
+	}
+}
+
+// applyUploadIdleTimeout wraps c.Request.Body so an upload that delivers no
+// bytes for uploadIdleTimeout fails with a read timeout (releasing the object
+// lock and quota reservation its handler holds). Call it before the body is
+// read — the S3 PutObject/UploadPart path does so in prepareUploadBody; the
+// console upload path should call it before parsing the multipart form.
+// Idempotent. Response writers inserted by middleware must implement
+// Unwrap() http.ResponseWriter for the deadline to reach the connection;
+// otherwise the body is left unbounded (never an error).
+func applyUploadIdleTimeout(c *gin.Context) {
+	applyUploadIdleTimeoutDuration(c, uploadIdleTimeout)
+}
+
+func applyUploadIdleTimeoutDuration(c *gin.Context, idle time.Duration) {
+	if c.Request == nil || c.Request.Body == nil || c.Request.Body == http.NoBody {
+		return
+	}
+	if _, done := c.Request.Body.(*idleDeadlineBody); done {
+		return
+	}
+	c.Request.Body = &idleDeadlineBody{
+		ReadCloser: c.Request.Body,
+		rc:         http.NewResponseController(c.Writer),
+		idle:       idle,
+		enabled:    true,
+	}
+}
+
+// ── Payload checksums (Content-MD5, x-amz-checksum-*) ───────────────────────
+
+var (
+	errChecksumMismatch  = errors.New("payload checksum does not match")
+	errChecksumMalformed = errors.New("malformed or undeclared payload checksum")
+)
+
+// checksumMismatchError names the checksum that failed (for the S3 message).
+type checksumMismatchError struct{ name string }
+
+func (e *checksumMismatchError) Error() string {
+	return fmt.Sprintf("the %s you specified did not match the calculated checksum", e.name)
+}
+func (e *checksumMismatchError) Unwrap() error { return errChecksumMismatch }
+
+// crc64NVMETable is CRC-64/NVME (poly 0xAD93D23594C93659, reflected form
+// 0x9A6C9329AC4BC9B5, init/xorout all-ones — which is what hash/crc64
+// applies). Verified against the catalogue check value in tests.
+var crc64NVMETable = crc64.MakeTable(0x9a6c9329ac4bc9b5)
+
+// checksumAlgorithms maps the lower-case x-amz-checksum-* header name to its
+// hash constructor and display name.
+var checksumAlgorithms = map[string]struct {
+	display string
+	newHash func() hash.Hash
+}{
+	"x-amz-checksum-crc32":     {"CRC32", func() hash.Hash { return crc32.NewIEEE() }},
+	"x-amz-checksum-crc32c":    {"CRC32C", func() hash.Hash { return crc32.New(crc32.MakeTable(crc32.Castagnoli)) }},
+	"x-amz-checksum-crc64nvme": {"CRC64NVME", func() hash.Hash { return crc64.New(crc64NVMETable) }},
+	"x-amz-checksum-sha1":      {"SHA1", sha1.New},
+	"x-amz-checksum-sha256":    {"SHA256", sha256.New},
+}
+
+// bodyChecksum is one checksum computed over the decoded body.
+type bodyChecksum struct {
+	header  string // lower-case header / trailer name ("content-md5" for MD5)
+	display string
+	h       hash.Hash
+	want    []byte // nil until known (trailer checksums arrive at the end)
+}
+
+// checksumReader hashes the decoded body and, when the source reaches EOF,
+// compares every checksum against the expected value (from request headers,
+// or from the aws-chunked trailers). A mismatch is returned INSTEAD of EOF,
+// so the guardedBody wrapping it never releases the final byte and the
+// backend cannot commit the object.
+type checksumReader struct {
+	src      io.Reader
+	sums     []*bodyChecksum
+	trailers *awsChunkedReader // source of trailer values (nil = none)
+	declared map[string]bool   // checksum trailers announced in X-Amz-Trailer
+	err      error
+}
+
+func (r *checksumReader) Read(p []byte) (int, error) {
+	if r.err != nil {
+		return 0, r.err
+	}
+	n, err := r.src.Read(p)
+	if n > 0 {
+		for _, s := range r.sums {
+			s.h.Write(p[:n])
+		}
+	}
+	if errors.Is(err, io.EOF) {
+		if verr := r.verify(); verr != nil {
+			r.err = verr
+			return n, verr
+		}
+	}
+	return n, err
+}
+
+func (r *checksumReader) verify() error {
+	if r.trailers != nil {
+		for name := range r.trailers.trailers {
+			if strings.HasPrefix(name, "x-amz-checksum-") && !r.declared[name] {
+				return fmt.Errorf("%w: trailer %s was not declared in X-Amz-Trailer", errChecksumMalformed, name)
+			}
+		}
+		for _, s := range r.sums {
+			if s.want != nil {
+				continue
+			}
+			v, ok := r.trailers.trailers[s.header]
+			if !ok {
+				return fmt.Errorf("%w: declared trailer %s is missing", errChecksumMalformed, s.header)
+			}
+			want, derr := decodeChecksumValue(v, s.h.Size())
+			if derr != nil {
+				return fmt.Errorf("%w: %s", errChecksumMalformed, s.header)
+			}
+			s.want = want
+		}
+	}
+	for _, s := range r.sums {
+		if s.want == nil || !hmac.Equal(s.h.Sum(nil), s.want) {
+			return &checksumMismatchError{name: s.display}
+		}
+	}
+	return nil
+}
+
+func decodeChecksumValue(v string, size int) ([]byte, error) {
+	b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(v))
+	if err != nil || len(b) != size {
+		return nil, errChecksumMalformed
+	}
+	return b, nil
+}
+
+// wrapChecksums adds Content-MD5 / x-amz-checksum-* verification (header
+// values, and in trailer modes the checksum trailers announced in
+// X-Amz-Trailer) around the decoded body. chunked is the aws-chunked decoder
+// when the body is aws-chunked (nil otherwise).
+func wrapChecksums(h http.Header, decoded io.Reader, chunked *awsChunkedReader) (io.Reader, *s3BodyError) {
+	var sums []*bodyChecksum
+	if v := h.Get("Content-MD5"); v != "" {
+		want, err := decodeChecksumValue(v, md5.Size)
+		if err != nil {
+			return nil, &s3BodyError{"InvalidDigest", "The Content-MD5 you specified was invalid.", http.StatusBadRequest}
+		}
+		sums = append(sums, &bodyChecksum{header: "content-md5", display: "Content-MD5", h: md5.New(), want: want}) //nolint:gosec // G401: Content-MD5 is the S3 wire format, integrity only
+	}
+	for name, alg := range checksumAlgorithms {
+		v := h.Get(name)
+		if v == "" {
+			continue
+		}
+		hh := alg.newHash()
+		want, err := decodeChecksumValue(v, hh.Size())
+		if err != nil {
+			return nil, &s3BodyError{"InvalidRequest", fmt.Sprintf("Value for %s header is invalid.", name), http.StatusBadRequest}
+		}
+		sums = append(sums, &bodyChecksum{header: name, display: alg.display, h: hh, want: want})
+	}
+	var declared map[string]bool
+	if chunked != nil && chunked.hasTrailer() {
+		declared = map[string]bool{}
+		for _, v := range h.Values("X-Amz-Trailer") {
+			for _, tok := range strings.Split(v, ",") {
+				name := strings.ToLower(strings.TrimSpace(tok))
+				if !strings.HasPrefix(name, "x-amz-checksum-") {
+					continue
+				}
+				alg, ok := checksumAlgorithms[name]
+				if !ok {
+					return nil, &s3BodyError{"InvalidRequest", fmt.Sprintf("Unsupported checksum trailer %s", name), http.StatusBadRequest}
+				}
+				if declared[name] {
+					continue
+				}
+				declared[name] = true
+				sums = append(sums, &bodyChecksum{header: name, display: alg.display, h: alg.newHash()})
+			}
+		}
+	} else {
+		chunked = nil
+	}
+	if len(sums) == 0 && chunked == nil {
+		return decoded, nil
+	}
+	// Trailer mode always goes through the reader so undeclared checksum
+	// trailers are rejected rather than silently ignored.
+	return &checksumReader{src: decoded, sums: sums, trailers: chunked, declared: declared}, nil
 }

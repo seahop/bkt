@@ -48,7 +48,7 @@ type StorageBackend interface {
 	CopyObject(bucketName, srcKey, dstKey string) error
 
 	// Versioning operations. Version storage is a hidden area per backend
-	// (local: <root>/.versions/<bucket>/<key>/<versionID>; S3: the
+	// (local: <root>/.objversions/<bucket>/<sha256(key)>/<versionID>; S3: the
 	// ".bkt-versions/" prefix inside the real bucket, excluded from listings).
 	// ArchiveObjectVersion MOVES the current object's bytes into version
 	// storage — after it returns, the current object no longer exists.

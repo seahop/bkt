@@ -10,7 +10,6 @@ import (
 	"bkt/internal/logger"
 	"bkt/internal/models"
 	"bkt/internal/storage"
-	"bkt/internal/validation"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -212,18 +211,6 @@ func discardFailedWrite(backend storage.StorageBackend, bucket *models.Bucket, k
 			"bucket": bucket.Name, "key": key,
 		})
 	}
-}
-
-// validateKeyForBucket applies validation.ValidateObjectKey plus the key
-// rules of the bucket's storage backend: on the local filesystem backend,
-// non-canonical spellings ("a//b", "./a", "a/./b") alias other keys and the
-// folder-marker file name is reserved (validation.ValidateLocalObjectKey);
-// on S3-backed buckets those are distinct, valid keys.
-func validateKeyForBucket(bucket *models.Bucket, key string) error {
-	if bucket.StorageBackend != "s3" {
-		return validation.ValidateLocalObjectKey(key)
-	}
-	return validation.ValidateObjectKey(key)
 }
 
 // newCurrentVersionID returns the version id for a new current version ("" =

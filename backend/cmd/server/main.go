@@ -92,6 +92,13 @@ func main() {
 	if err := storage.ProbeWritable(cfg.Storage.RootPath); err != nil {
 		log.Fatalf("Storage root check failed: %v", err)
 	}
+	// One-time conversion of local bucket storage from the legacy key-as-path
+	// layout to the blob layout. Must finish before anything serves or
+	// touches objects; it is resumable, so a failure stops startup and a
+	// restart after fixing the cause continues where it stopped.
+	if err := storage.MigrateLocalLayout(cfg.Storage.RootPath); err != nil {
+		log.Fatalf("Local storage layout migration failed (resumable: fix the cause and restart): %v", err)
+	}
 
 	// Start Prometheus storage metrics collector (runs every 60s)
 	metrics.StartStorageMetricsCollector()

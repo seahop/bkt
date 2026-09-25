@@ -26,6 +26,7 @@ restore it — using the helper scripts in [`scripts/`](../../scripts).
 ## Contents
 
 - [What's in a backup](#whats-in-a-backup)
+- [On-disk layout (local backend)](#on-disk-layout-local-backend)
 - [Taking a backup](#taking-a-backup)
 - [Restoring a backup](#restoring-a-backup)
 - [Deployment layouts](#deployment-layouts)
@@ -47,6 +48,75 @@ restore it — using the helper scripts in [`scripts/`](../../scripts).
 
 The artifact is written mode `600` because it contains secrets. **Treat it like
 a private key.**
+
+## On-disk layout (local backend)
+
+The local backend does not store objects under their key names. Every object
+lives under the SHA-256 (lowercase hex) of its raw key bytes, `h`:
+
+```text
+<STORAGE_ROOT>/
+  .objects/<bucket>/<h[0:2]>/<h[2:4]>/<h>        current object bytes
+  .objects/<bucket>/<h[0:2]>/<h[2:4]>/<h>.key    the object's key (UTF-8)
+  .objects/<bucket>/.layout-v2                   migration completion marker
+  .objversions/<bucket>/<h>/<version-id>         archived version bytes
+  .objversions/<bucket>/<h>/.key                 the key those versions belong to
+  .multipart/<upload-id>/part.NNNNN, meta.json   in-progress multipart uploads
+```
+
+This is what lets keys be arbitrary S3 keys (`p` next to `p/q`, `..`, a
+leading `/`, very long names) — see
+[object keys](../guides/features.md#object-keys-and-uploads). Consequences for
+operators:
+
+- **Back up the whole data directory** (`data/buckets` / `STORAGE_ROOT`,
+  hidden directories included — `scripts/backup.sh` and a plain
+  `tar -C <parent> buckets` do). Partial copies by bucket or by object path are
+  not possible from the file names alone.
+- The files are **not human-browsable**: a `<h>.key` file next to each object
+  (and `.key` in each version directory) holds the key in plain UTF-8, which
+  is enough to identify or recover single objects by hand
+  (`grep -rl --include='*.key' -x 'photos/cat.jpg' .objects/<bucket>`); for
+  anything else use the S3 API or console.
+- Content type, user metadata, tags and version order live in Postgres (as
+  before); the bytes and the database must be restored as a pair.
+- Files named `.tmp-upload-*`, `.tmp-assemble-*` and `.tmp-key-*` are
+  interrupted writes and are safe to delete while bkt is stopped.
+
+### Upgrading from the key-as-path layout
+
+Releases before the blob layout stored each object at `<STORAGE_ROOT>/<bucket>/<key>`
+and versions under `<STORAGE_ROOT>/.versions/`. The first start of a newer
+release **migrates** that data automatically, before it serves any request:
+
+- **Back up the data volume (and the database) first.**
+- Stop every bkt instance that uses the volume; only the upgraded one may run
+  during the migration.
+- Every legacy file is renamed (same filesystem, atomic; nothing is copied)
+  into the blob layout after its key file was written; emptied legacy
+  directories are removed and `.objects/<bucket>/.layout-v2` marks the bucket
+  as done. Progress and a per-bucket summary are logged
+  (`Local storage: ...` lines, with a start and a finish line).
+- It is **resumable**: if it stops (crash, full disk, permission error) bkt
+  exits with the reason; fix it and start again — the migration continues
+  where it stopped without losing or duplicating anything.
+- Files it cannot place are **left in the legacy directory and logged**, never
+  deleted: interrupted-upload temp files, symlinks/special files, archived
+  versions with an unexpected name, and (only possible after a crash or manual
+  copying) a key that already exists in the blob layout with *different*
+  bytes (the blob-layout copy wins; an identical legacy copy is removed).
+- Folder markers `dir/` (stored as `dir/.bkt-folder`) become the object
+  `dir/`. Releases before folder-marker support stored a marker `dir/` as an
+  empty file `dir`, which cannot be told apart from an empty object `dir`; it
+  becomes the object `dir` (an empty marker whose metadata row says `dir/` then
+  reads as missing — re-create the folder if needed). The same applies to
+  version files of such markers.
+- Restoring a backup taken **before** the upgrade is supported: restore it,
+  then restart bkt (as `scripts/restore.sh` instructs) so the migration runs
+  again. Replace the data directory rather than extracting an old archive over
+  a migrated one (`scripts/restore.sh` does): a bucket whose
+  `.objects/<bucket>/.layout-v2` marker survives is not migrated again, and
+  its legacy files are only reported.
 
 ## Taking a backup
 

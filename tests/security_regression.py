@@ -259,14 +259,25 @@ check("admin folder move still works (control)", st == 200 and s3_body(LB, "move
 api("POST", f"/api/buckets/{LB}/folders/move", ADMIN, js={"source_prefix": "moved/", "destination_prefix": "public/"})
 
 # ── 2. Key aliasing ──────────────────────────────────────────────────────────
-section("Non-canonical keys rejected (no ./ // aliasing onto real files)")
+# Keys are opaque (the local backend stores objects under the SHA-256 of the
+# key): path-like spellings are distinct, valid S3 keys that never alias the
+# canonical object.
+section("Path-like key spellings are distinct keys (no ./ // aliasing onto real files)")
+# A scratch object stands in for the canonical key, so a client library that
+# resolves dot-segments in the URL path can only make this check fail, never
+# damage the fixtures later sections use. ("x/../y" is valid too; it is
+# covered by the Go integration tests because clients may rewrite it.)
+s3.put_object(Bucket=LB, Key="alias/f.txt", Body=b"canonical")
 st, b, _ = api("POST", f"/api/buckets/{LB}/objects", ADMIN,
-               form={"key": "./secret/s1.txt", "file": ("x.txt", b"OVERWRITTEN", "text/plain")})
-check("REST upload './secret/s1.txt' rejected", st == 400, (st, b))
-for k in ("secret//s1.txt", "secret/./s1.txt"):
+               form={"key": "./alias/f.txt", "file": ("x.txt", b"OVERWRITTEN", "text/plain")})
+check("REST upload './alias/f.txt' stored as its own key", st in (200, 201), (st, b))
+ALIAS_KEYS = ("alias//f.txt", "alias/./f.txt", "/alias/f.txt")
+for k in ALIAS_KEYS:
     ok, code = s3err(s3.put_object, Bucket=LB, Key=k, Body=b"OVERWRITTEN")
-    check(f"S3 PutObject '{k}' rejected", not ok, code)
-check("…secret/s1.txt content unchanged", s3_body(LB, "secret/s1.txt") == b"top secret")
+    check(f"S3 PutObject '{k}' stored as its own key", ok and s3_body(LB, k) == b"OVERWRITTEN", code)
+check("…alias/f.txt content unchanged", s3_body(LB, "alias/f.txt") == b"canonical")
+for k in ("./alias/f.txt", "alias/f.txt") + ALIAS_KEYS:
+    s3err(s3.delete_object, Bucket=LB, Key=k)
 
 # ── 3. Reserved version keyspace ─────────────────────────────────────────────
 section("Reserved .bkt-versions/ prefix unreachable")
@@ -492,10 +503,14 @@ ok2, code2 = s3err(s3.put_object, Bucket=LB, Key="mk/child.txt", Body=b"child")
 check("local: 'mk/' marker and 'mk/child.txt' coexist", ok and ok2 and s3_body(LB, "mk/") == b"" and s3_body(LB, "mk/child.txt") == b"child", (code, code2))
 ok, code = s3err(s3.delete_object, Bucket=LB, Key="mk/")
 check("local: deleting marker leaves children", ok and s3_body(LB, "mk/child.txt") == b"child" and s3_body(LB, "mk/") is None, code)
+ok, code = s3err(s3.put_object, Bucket=LB, Key="mk", Body=b"file")
+check("local: object 'mk' coexists with 'mk/child.txt'", ok and s3_body(LB, "mk") == b"file" and s3_body(LB, "mk/child.txt") == b"child", code)
 ok, code = s3err(s3.put_object, Bucket=LB, Key="mk/.bkt-folder", Body=b"x")
-check("local: reserved '.bkt-folder' segment rejected", not ok, code)
+check("local: '.bkt-folder' is an ordinary key segment", ok and s3_body(LB, "mk/.bkt-folder") == b"x", code)
 ok, code = s3err(s3.put_object, Bucket=LB, Key="dbl//slash.txt", Body=b"x")
-check("local: 'a//b' still rejected", not ok, code)
+check("local: 'a//b' is a valid distinct key", ok and s3_body(LB, "dbl//slash.txt") == b"x" and s3_body(LB, "dbl/slash.txt") is None, code)
+for k in ("mk", "mk/.bkt-folder", "dbl//slash.txt"):
+    s3err(s3.delete_object, Bucket=LB, Key=k)
 if S3_BUCKET:
     k = f"e2e-sec-{TS}/dbl//slash.txt"
     ok, code = s3err(s3.put_object, Bucket=S3_BUCKET, Key=k, Body=b"s3 ok")

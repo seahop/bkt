@@ -305,6 +305,18 @@ func registerAPIRoutes(router *gin.Engine, cfg *config.Config) {
 				buckets.GET("/:name/objects/*key", bucketHandler.DownloadObject)
 				buckets.DELETE("/:name/objects/*key", bucketHandler.DeleteObject)
 				buckets.HEAD("/:name/objects/*key", bucketHandler.HeadObject)
+				// The same object operations with the key in ?key= (what the
+				// console uses): a key in the URL path is not addressable
+				// byte-for-byte ("."/".." segments are resolved by clients,
+				// "%" sequences are decoded).
+				buckets.GET("/:name/object", withQueryObjectKey(bucketHandler.DownloadObject))
+				buckets.DELETE("/:name/object", withQueryObjectKey(bucketHandler.DeleteObject))
+				buckets.HEAD("/:name/object", withQueryObjectKey(bucketHandler.HeadObject))
+				// Folder summary / recursive delete (?prefix=P/) and the
+				// deleted-but-recoverable listing of versioned buckets.
+				buckets.GET("/:name/folders", bucketHandler.GetFolderSummary)
+				buckets.DELETE("/:name/folders", bucketHandler.DeleteFolder)
+				buckets.GET("/:name/deleted-objects", bucketHandler.ListDeletedObjects)
 			}
 
 			// Upload status routes (for async uploads)

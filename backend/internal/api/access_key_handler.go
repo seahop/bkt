@@ -217,20 +217,24 @@ func (h *AccessKeyHandler) ListAccessKeys(c *gin.Context) {
 		return
 	}
 
-	// Only active keys: revoked keys are soft-deleted for the audit trail, but
-	// surfacing them forever in the user's own list just accumulates clutter
-	// (admins still see the full history via /api/users/:id/access-keys).
+	// Revoked keys are soft-deleted for the audit trail, but surfacing them
+	// forever in the user's own list just accumulates clutter (admins still
+	// see the full history via /api/users/:id/access-keys). Working STS
+	// credentials ARE listed, marked temporary, so the user's view matches
+	// what can actually sign requests (and what admins see).
 	accessKeys := make([]models.AccessKey, 0)
-	if err := database.DB.Where("user_id = ? AND is_active = ? AND temporary = ?", userID, true, false).Order("created_at DESC").Find(&accessKeys).Error; err != nil {
+	if err := database.DB.Where("user_id = ? AND is_active = ?", userID, true).Order("created_at DESC").Find(&accessKeys).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to list access keys",
 			Message: err.Error(),
 		})
 		return
 	}
+	uid, _ := userID.(uuid.UUID)
+	annotateKeyStatuses(accessKeys, userTokenVersion(uid))
 
 	// Never return secret key hashes
-	c.JSON(http.StatusOK, accessKeys)
+	c.JSON(http.StatusOK, ownKeyListing(accessKeys))
 }
 
 // RevokeAccessKey deactivates an access key (soft delete for audit trail)
@@ -352,13 +356,27 @@ func (h *AccessKeyHandler) GetAccessKeyStats(c *gin.Context) {
 		return
 	}
 
-	var activeCount, totalCount int64
-	database.DB.Model(&models.AccessKey{}).Where("user_id = ? AND is_active = ?", userID, true).Count(&activeCount)
-	database.DB.Model(&models.AccessKey{}).Where("user_id = ?", userID).Count(&totalCount)
+	// Counts use the same status rules as the key lists.
+	var keys []models.AccessKey
+	database.DB.Where("user_id = ?", userID).Find(&keys)
+	uid, _ := userID.(uuid.UUID)
+	annotateKeyStatuses(keys, userTokenVersion(uid))
+	var activeKeys, activeTemporary int
+	for _, k := range keys {
+		if k.Status != keyStatusActive {
+			continue
+		}
+		if k.Temporary {
+			activeTemporary++
+		} else {
+			activeKeys++
+		}
+	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"active_keys": activeCount,
-		"total_keys":  totalCount,
-		"max_keys":    5,
+		"active_keys":           activeKeys,      // long-lived keys that work (counted against max_keys)
+		"active_temporary_keys": activeTemporary, // working STS credentials
+		"total_keys":            len(keys),
+		"max_keys":              5,
 	})
 }

@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -1284,8 +1283,8 @@ func (h *BucketHandler) UploadObject(c *gin.Context) {
 		return
 	}
 
-	// Validate object key to prevent path traversal and other attacks
-	if err := validateKeyForBucket(&bucket, objectKey); err != nil {
+	// S3 key rules (length, UTF-8, NUL) and the reserved version keyspace.
+	if err := validation.ValidateObjectKey(objectKey); err != nil {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error:   "Invalid object key",
 			Message: err.Error(),
@@ -1658,8 +1657,7 @@ func (h *BucketHandler) DownloadObject(c *gin.Context) {
 
 	// Set content disposition based on query parameter
 	if c.Query("download") == "true" {
-		filename := filepath.Base(objectKey)
-		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+		c.Header("Content-Disposition", attachmentDisposition(objectKey))
 	} else {
 		c.Header("Content-Disposition", "inline")
 	}
@@ -1960,13 +1958,6 @@ func (h *BucketHandler) moveSingleObject(c *gin.Context, srcKey, dstKey, success
 		})
 		return
 	}
-	if err := validateKeyForBucket(&bucket, dstKey); err != nil {
-		c.JSON(http.StatusBadRequest, models.ErrorResponse{
-			Error:   "Invalid destination key",
-			Message: err.Error(),
-		})
-		return
-	}
 
 	checks := []struct {
 		key, action, denied string
@@ -2254,7 +2245,7 @@ func (h *BucketHandler) MoveFolder(c *gin.Context) {
 	lockKeys := make([]string, 0, 2*len(sourceObjects))
 	for i, obj := range sourceObjects {
 		newKey := dstPrefix + strings.TrimPrefix(obj.Key, srcPrefix)
-		if err := validateKeyForBucket(&bucket, newKey); err != nil {
+		if err := validation.ValidateObjectKey(newKey); err != nil {
 			c.JSON(http.StatusBadRequest, models.ErrorResponse{
 				Error:   "Invalid destination key",
 				Message: fmt.Sprintf("%s: %v", newKey, err),

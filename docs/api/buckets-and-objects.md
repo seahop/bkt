@@ -626,7 +626,7 @@ Objects store the following metadata:
 - **Content Type:** MIME type
 - **ETag:** MD5 hash (for caching/validation)
 - **SHA256:** SHA-256 hash (for integrity verification)
-- **Storage Path:** Internal file system path (not exposed)
+- **Storage Path:** Informational copy of the key (not exposed, not used to locate bytes — the local backend stores objects under the SHA-256 of the key)
 - **Created At:** Upload timestamp
 - **Updated At:** Last modification timestamp
 
@@ -653,7 +653,8 @@ Objects store the following metadata:
 ### Object Keys
 
 - Use forward slashes (/) for hierarchy
-- Avoid leading slashes
+- Avoid leading slashes (they are valid S3 keys, but many tools and URL
+  handlers treat `//` or `..` in a path specially)
 - Use descriptive names
 - Include file extensions
 - No need to encode versions in key names — enable [bucket versioning](#object-versioning) instead
@@ -738,9 +739,9 @@ curl -k -X POST https://localhost:9443/api/buckets/my-bucket/objects \
 3. **S3 folder marker** - An empty object whose key ends in `/` (created by
    s3fs `mkdir`, Cyberduck/rclone "new folder", or
    `aws s3api put-object --bucket my-bucket --key empty-folder/`). Supported
-   on both backends; on the local backend it is stored as
-   `empty-folder/.bkt-folder`, so `.bkt-folder` is a reserved key segment
-   there. Deleting the marker never deletes the folder's contents. Renaming a
+   on both backends as an ordinary object (it coexists with the folder's
+   contents and with an object `empty-folder`). Deleting the marker never
+   deletes the folder's contents. Renaming a
    marker (`/objects/rename`) renames only the marker (`a/dir/` →
    `a/<new_name>/`); use the folder move to move the contents.
 

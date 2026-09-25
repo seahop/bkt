@@ -2,11 +2,12 @@ package storage
 
 import (
 	"crypto/md5" //nolint:gosec // MD5 is the S3 ETag algorithm (content fingerprint, not a security control)
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"mime"
 	"os"
 	"path"
@@ -14,12 +15,48 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
-	"bkt/internal/validation"
+	"bkt/internal/logger"
 
 	"github.com/google/uuid"
+)
+
+// On-disk layout of the local backend ("blob layout", see
+// docs/deployment/backup-restore.md):
+//
+//	<root>/.objects/<bucket>/<h[0:2]>/<h[2:4]>/<h>        current object bytes
+//	<root>/.objects/<bucket>/<h[0:2]>/<h[2:4]>/<h>.key    raw object key
+//	<root>/.objversions/<bucket>/<h>/<versionID>          archived version bytes
+//	<root>/.objversions/<bucket>/<h>/.key                 raw object key
+//	<root>/.multipart/<uploadID>/meta.json, part.NNNNN    multipart staging
+//
+// h is the lowercase hex SHA-256 of the raw object key bytes. Object keys are
+// therefore never used as filesystem paths: every S3-valid key ("p" next to
+// "p/q", "m/" next to "m", "../x", "/abs", "a\\b", "a//b", 300-byte segments,
+// ...) maps to a fixed-shape path of hex characters, and no key can address
+// another key's bytes, another bucket or anything outside the root.
+//
+// The ".key" sidecars hold the key for listings (ListObjects) and for disaster
+// recovery; reads and writes never need them. A sidecar is written atomically
+// before its blob is first committed, its content never changes for a given h,
+// and it is removed together with the blob (see dropSidecarUnlessBlob).
+//
+// Bucket names cannot start with '.', so the dot-directories can never collide
+// with a bucket; <root>/<bucket> and <root>/.versions are the legacy
+// (key-as-path) layout, migrated once at startup (see MigrateLocalLayout).
+const (
+	objectsDirName     = ".objects"
+	objVersionsDirName = ".objversions"
+	legacyVersionsDir  = ".versions"
+	multipartDirName   = ".multipart"
+	keySidecarSuffix   = ".key" // object sidecar: <h>.key next to the blob
+	versionSidecarName = ".key" // version sidecar: .objversions/<bucket>/<h>/.key
+	layoutMarkerName   = ".layout-v2"
+
+	uploadTempPrefix   = ".tmp-upload-"
+	assembleTempPrefix = ".tmp-assemble-"
+	sidecarTempPrefix  = ".tmp-key-"
 )
 
 // LocalStorage implements StorageBackend using local filesystem
@@ -34,168 +71,162 @@ func NewLocalStorage(rootPath string) *LocalStorage {
 	}
 }
 
-// resolve joins the given path segments under the storage root and asserts the
-// result stays inside the root. filepath.Join calls Clean, so ".." segments
-// resolve *upward* rather than being rejected — without this containment check a
-// crafted bucket/object/uploadID could read or write (or, via os.RemoveAll,
-// delete) arbitrary paths on the host. Every filesystem sink in this backend
-// must go through resolve.
-func (ls *LocalStorage) resolve(parts ...string) (string, error) {
-	for _, p := range parts {
-		if p == "" {
-			return "", fmt.Errorf("invalid empty path segment")
-		}
-		// Reject any ".." path element. This blocks not only escapes above the
-		// storage root but also cross-bucket traversal (e.g. a key "../other/x"
-		// that would otherwise land inside a sibling bucket's directory).
-		for _, seg := range strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' }) {
-			if seg == ".." {
-				return "", fmt.Errorf("path may not contain '..' segments")
-			}
-		}
-	}
-	joined := filepath.Join(append([]string{ls.rootPath}, parts...)...)
-	rel, err := filepath.Rel(ls.rootPath, joined)
-	if err != nil {
-		return "", fmt.Errorf("invalid path")
-	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("path escapes storage root")
-	}
-	return joined, nil
+// keyHash is the blob name of an object key: lowercase hex SHA-256 of its raw
+// bytes.
+func keyHash(objectKey string) string {
+	sum := sha256.Sum256([]byte(objectKey))
+	return hex.EncodeToString(sum[:])
 }
 
-// checkLocalObjectKey rejects object keys that the filesystem would alias to
-// a different key. filepath.Join (inside resolve) cleans its input, so "a//b",
-// "./a" and "a/./b" would all land on the same file as their canonical form —
-// letting a caller reach an object through a spelling that policy rules and
-// the metadata index treat as a different key. Only canonical keys are
-// accepted, plus exactly one trailing "/" for S3 folder-marker objects, which
-// are stored as a reserved marker file inside the folder (see localKeyRel).
-// The marker file name may not be used as a key segment.
-func checkLocalObjectKey(bucketName, objectKey string) error {
-	if strings.HasPrefix(bucketName, ".") {
-		return fmt.Errorf("invalid bucket name")
+// isBlobName reports whether name has the shape of a keyHash.
+func isBlobName(name string) bool {
+	if len(name) != sha256.Size*2 {
+		return false
 	}
-	if objectKey == "" {
-		return fmt.Errorf("invalid empty object key")
-	}
-	if strings.ContainsAny(objectKey, "\\\x00") || strings.HasPrefix(objectKey, "/") {
-		return fmt.Errorf("non-canonical object key")
-	}
-	body := strings.TrimSuffix(objectKey, "/")
-	for _, seg := range strings.Split(body, "/") {
-		switch seg {
-		case "", ".", "..":
-			return fmt.Errorf("non-canonical object key")
-		case validation.LocalFolderMarkerName:
-			return fmt.Errorf("object key uses the reserved name %q", validation.LocalFolderMarkerName)
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
 		}
 	}
-	if path.Clean(body) != body {
-		return fmt.Errorf("non-canonical object key")
+	return true
+}
+
+// checkBucketName is the storage layer's defense in depth for the one
+// caller-supplied value that is still used as a path segment. Real bucket
+// names are validated (validation.ValidateBucketName) long before they get
+// here; this only guarantees a single, non-hidden path segment.
+func checkBucketName(bucketName string) error {
+	if bucketName == "" || strings.HasPrefix(bucketName, ".") || strings.ContainsAny(bucketName, "/\\\x00") {
+		return fmt.Errorf("invalid bucket name")
 	}
 	return nil
 }
 
-// isFolderMarkerKey reports whether key is an S3 folder-marker key ("a/b/").
-func isFolderMarkerKey(objectKey string) bool {
-	return strings.HasSuffix(objectKey, "/")
-}
-
-// localKeyRel maps an object key to its bucket-relative file path. Regular
-// keys map to themselves; a folder-marker key "a/b/" maps to the reserved
-// marker file "a/b/.bkt-folder" INSIDE the folder, so the marker coexists
-// with the folder's contents ("a/b/file.txt") instead of occupying the path
-// the folder needs.
-func localKeyRel(objectKey string) string {
-	if isFolderMarkerKey(objectKey) {
-		return objectKey + validation.LocalFolderMarkerName
+func checkObjectKey(objectKey string) error {
+	if objectKey == "" {
+		return fmt.Errorf("invalid empty object key")
 	}
-	return objectKey
+	return nil
 }
 
-// objectPath resolves the on-disk path of an object after checking that the
-// key is canonical (see checkLocalObjectKey). Every object-level filesystem
-// sink goes through here rather than calling resolve directly.
-func (ls *LocalStorage) objectPath(bucketName, objectKey string) (string, error) {
-	if err := checkLocalObjectKey(bucketName, objectKey); err != nil {
+// objectLoc is where one key's current bytes live.
+type objectLoc struct {
+	dir     string // fan-out directory (created on demand, never pruned)
+	blob    string // object bytes
+	sidecar string // raw key
+}
+
+func (ls *LocalStorage) objectsBucketDir(bucketName string) (string, error) {
+	if err := checkBucketName(bucketName); err != nil {
 		return "", err
 	}
-	return ls.resolve(bucketName, localKeyRel(objectKey))
+	return filepath.Join(ls.rootPath, objectsDirName, bucketName), nil
 }
 
-// legacyMarkerPath is where releases before folder-marker support stored a
-// folder-marker key "a/b/": filepath.Join cleaned it onto the plain file
-// "a/b". Only a zero-length regular file there is treated as such a legacy
-// marker (see readablePath / DeleteObject).
-func (ls *LocalStorage) legacyMarkerPath(bucketName, objectKey string) (string, bool) {
-	if !isFolderMarkerKey(objectKey) || checkLocalObjectKey(bucketName, objectKey) != nil {
-		return "", false
+func (ls *LocalStorage) objectLocation(bucketName, objectKey string) (objectLoc, error) {
+	if err := checkObjectKey(objectKey); err != nil {
+		return objectLoc{}, err
 	}
-	p, err := ls.resolve(bucketName, strings.TrimSuffix(objectKey, "/"))
+	bucketDir, err := ls.objectsBucketDir(bucketName)
 	if err != nil {
-		return "", false
+		return objectLoc{}, err
 	}
-	if info, err := os.Lstat(p); err != nil || !info.Mode().IsRegular() || info.Size() != 0 {
-		return "", false
-	}
-	return p, true
+	return objectLocIn(bucketDir, objectKey), nil
 }
 
-// readablePath resolves the path an existing object's bytes are read from:
-// the object path, or — for a folder-marker key whose marker file is absent —
-// a legacy zero-length marker file (see legacyMarkerPath).
-func (ls *LocalStorage) readablePath(bucketName, objectKey string) (string, error) {
-	p, err := ls.objectPath(bucketName, objectKey)
+func objectLocIn(bucketDir, objectKey string) objectLoc {
+	h := keyHash(objectKey)
+	dir := filepath.Join(bucketDir, h[0:2], h[2:4])
+	blob := filepath.Join(dir, h)
+	return objectLoc{dir: dir, blob: blob, sidecar: blob + keySidecarSuffix}
+}
+
+// writeSmallFileAtomic writes content to p (temp file in dir, fsync, rename).
+func writeSmallFileAtomic(dir, p, content string) error {
+	tmp, err := os.CreateTemp(dir, sidecarTempPrefix+"*")
 	if err != nil {
-		return "", err
+		return err
 	}
-	if isFolderMarkerKey(objectKey) {
-		if _, serr := os.Lstat(p); os.IsNotExist(serr) || isNotDirErr(serr) {
-			if legacy, ok := ls.legacyMarkerPath(bucketName, objectKey); ok {
-				return legacy, nil
-			}
+	name := tmp.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tmp.Close()
+			_ = os.Remove(name)
 		}
+	}()
+	if _, err := tmp.WriteString(content); err != nil {
+		return err
 	}
-	return p, nil
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(name, p); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
-// isNotDirErr reports an ENOTDIR-style failure: a path component that should
-// be a directory is a file (e.g. a legacy marker file "a/b" in the way of
-// "a/b/.bkt-folder").
-func isNotDirErr(err error) bool {
-	return err != nil && errors.Is(err, syscall.ENOTDIR)
+// ensureSidecar writes the key sidecar p unless it already exists. Its content
+// is a pure function of its path (h = sha256(key)), so concurrent writers are
+// harmless. Errors wrap the underlying *PathError (ENOENT stays detectable for
+// withDirRetry).
+func ensureSidecar(dir, p, key string) error {
+	if _, err := os.Lstat(p); err == nil {
+		return nil
+	} else if !isNotExist(err) {
+		return fmt.Errorf("failed to check key sidecar: %w", err)
+	}
+	if err := writeSmallFileAtomic(dir, p, key); err != nil {
+		return fmt.Errorf("failed to write key sidecar: %w", err)
+	}
+	return nil
 }
 
-// statObjectFile stats p and treats a directory (a folder that has contents
-// or a marker, never an object's bytes) as "not found".
-func statObjectFile(p string) (os.FileInfo, error) {
-	info, err := os.Stat(p)
-	if err != nil {
-		if os.IsNotExist(err) || isNotDirErr(err) {
-			return nil, os.ErrNotExist
-		}
-		return nil, err
+// prepareObject creates the key's fan-out directory and its sidecar, ahead of
+// committing bytes to loc.blob.
+func prepareObject(loc objectLoc, key string) error {
+	if err := os.MkdirAll(loc.dir, 0750); err != nil {
+		return fmt.Errorf("failed to create object directory: %w", err)
 	}
-	if info.IsDir() {
-		return nil, os.ErrNotExist
+	return ensureSidecar(loc.dir, loc.sidecar, key)
+}
+
+// finishObject runs after a blob was committed (renamed into place): it
+// re-asserts the sidecar, which a racing delete of the same key may have
+// removed between prepareObject and the commit (see dropSidecarUnlessBlob).
+func finishObject(loc objectLoc, key string) error {
+	return ensureSidecar(loc.dir, loc.sidecar, key)
+}
+
+// dropSidecarUnlessBlob removes the key sidecar of a blob that is gone
+// (deleted, archived, or never committed after a failed write), so deleted
+// keys leave nothing behind. If a racing writer committed the blob meanwhile,
+// the sidecar is restored: together with finishObject this keeps "blob exists
+// ⇒ sidecar exists" under any interleaving of one writer and one remover.
+func dropSidecarUnlessBlob(loc objectLoc, key string) {
+	if _, err := os.Lstat(loc.blob); err == nil {
+		return
 	}
-	return info, nil
+	if err := os.Remove(loc.sidecar); err != nil && !isNotExist(err) {
+		return
+	}
+	if _, err := os.Lstat(loc.blob); err == nil {
+		_ = ensureSidecar(loc.dir, loc.sidecar, key)
+	}
 }
 
 // openObjectFile opens an object's bytes for reading ("object not found" for
-// a missing path or a directory).
+// a missing blob).
 func openObjectFile(p string) (*os.File, error) {
-	if _, err := statObjectFile(p); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("object not found")
-		}
-		return nil, fmt.Errorf("failed to open file: %w", err)
-	}
-	f, err := os.Open(p) //nolint:gosec // path validated by objectPath()/resolve() containment
+	f, err := os.Open(p) //nolint:gosec // p is <root>/.objects/<bucket>/<sha256 fan-out>, never derived from key text
 	if err != nil {
-		if os.IsNotExist(err) {
+		if isNotExist(err) {
 			return nil, fmt.Errorf("object not found")
 		}
 		return nil, fmt.Errorf("failed to open file: %w", err)
@@ -203,19 +234,30 @@ func openObjectFile(p string) (*os.File, error) {
 	return f, nil
 }
 
-// writeAtomic streams data into a temp file in dir and renames it into place
-// only after a successful Sync+Close, so a failed or interrupted write never
-// leaves a truncated object at the live key. It returns the hex MD5 of the
-// bytes written (computed in the same pass — no second read).
-//
-// The directory is (re)created race-safely against concurrent pruning (see
-// createTempIn). Once the temp file exists the directory is non-empty and can
-// no longer be pruned, so the final rename cannot lose its directory. On
-// failure, directories left empty are pruned up to (excluding) pruneRoot.
-func writeAtomic(pruneRoot, dir, finalPath string, data io.Reader) (string, error) {
-	tmp, err := createTempIn(dir, ".tmp-upload-*")
+// statObject stats a blob, reporting os.ErrNotExist for a missing one.
+func statObject(p string) (os.FileInfo, error) {
+	info, err := os.Stat(p)
 	if err != nil {
-		return "", err
+		if isNotExist(err) {
+			return nil, os.ErrNotExist
+		}
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, os.ErrNotExist
+	}
+	return info, nil
+}
+
+// writeAtomic streams data into a temp file in dir (which must exist) and
+// renames it into place only after a successful Sync+Close, so a failed or
+// interrupted write never leaves a truncated object at the live path. It
+// returns the hex MD5 of the bytes written (computed in the same pass — no
+// second read).
+func writeAtomic(dir, finalPath string, data io.Reader) (string, error) {
+	tmp, err := os.CreateTemp(dir, uploadTempPrefix+"*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file: %w", err)
 	}
 	tmpName := tmp.Name()
 	committed := false
@@ -223,7 +265,6 @@ func writeAtomic(pruneRoot, dir, finalPath string, data io.Reader) (string, erro
 		if !committed {
 			_ = tmp.Close()
 			_ = os.Remove(tmpName)
-			pruneEmptyDirs(pruneRoot, dir)
 		}
 	}()
 
@@ -244,174 +285,155 @@ func writeAtomic(pruneRoot, dir, finalPath string, data io.Reader) (string, erro
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-// createTempIn creates dir (and its parents) and a temp file in it, retrying
-// when a concurrent delete prunes the freshly created directory before the
-// temp file exists (see withDirRetry / pruneEmptyDirs).
-func createTempIn(dir, pattern string) (*os.File, error) {
-	var tmp *os.File
-	err := withDirRetry(dir, func() error {
-		f, cerr := os.CreateTemp(dir, pattern)
-		if cerr != nil {
-			return cerr
-		}
-		tmp = f
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create temp file: %w", err)
+// writeObject commits data as key's current bytes (temp file in the key's
+// fan-out directory, fsync, rename).
+func writeObject(loc objectLoc, key string, data io.Reader) error {
+	if err := prepareObject(loc, key); err != nil {
+		return err
 	}
-	return tmp, nil
+	if _, err := writeAtomic(loc.dir, loc.blob, data); err != nil {
+		dropSidecarUnlessBlob(loc, key)
+		return err
+	}
+	return finishObject(loc, key)
 }
 
-// CreateBucket creates a bucket directory in the local filesystem
+// CreateBucket creates the bucket's object directory.
 func (ls *LocalStorage) CreateBucket(bucketName, region string) error {
-	bucketPath, err := ls.resolve(bucketName)
+	bucketDir, err := ls.objectsBucketDir(bucketName)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(bucketPath, 0750); err != nil {
+	if err := os.MkdirAll(bucketDir, 0750); err != nil {
 		return fmt.Errorf("failed to create bucket directory: %w", err)
 	}
 	return nil
 }
 
-// DeleteBucket removes a bucket directory from the local filesystem,
-// including its archived version storage.
+// DeleteBucket removes a bucket's objects and archived versions, including
+// anything left in the legacy (pre-blob-layout) locations.
 func (ls *LocalStorage) DeleteBucket(bucketName string) error {
-	bucketPath, err := ls.resolve(bucketName)
-	if err != nil {
+	if err := checkBucketName(bucketName); err != nil {
 		return err
 	}
-	if err := os.RemoveAll(bucketPath); err != nil {
-		return fmt.Errorf("failed to delete bucket directory: %w", err)
+	var firstErr error
+	for _, p := range []string{
+		filepath.Join(ls.rootPath, objectsDirName, bucketName),
+		filepath.Join(ls.rootPath, objVersionsDirName, bucketName),
+		filepath.Join(ls.rootPath, bucketName),
+		filepath.Join(ls.rootPath, legacyVersionsDir, bucketName),
+	} {
+		if err := os.RemoveAll(p); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("failed to delete bucket directory: %w", err)
+		}
 	}
-	if verPath, verr := ls.resolve(".versions", bucketName); verr == nil {
-		_ = os.RemoveAll(verPath)
-	}
-	return nil
+	return firstErr
 }
 
-// BucketExists checks if a bucket directory exists in the local filesystem
+// BucketExists reports whether the bucket has a directory, in the blob layout
+// or (for a bucket the startup migration has not converted) the legacy one.
 func (ls *LocalStorage) BucketExists(bucketName string) (bool, error) {
-	bucketPath, err := ls.resolve(bucketName)
-	if err != nil {
+	if err := checkBucketName(bucketName); err != nil {
 		return false, err
 	}
-	info, err := os.Stat(bucketPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
+	for _, p := range []string{
+		filepath.Join(ls.rootPath, objectsDirName, bucketName),
+		filepath.Join(ls.rootPath, bucketName),
+	} {
+		info, err := os.Stat(p)
+		if err == nil {
+			if info.IsDir() {
+				return true, nil
+			}
+			continue
 		}
-		return false, fmt.Errorf("failed to check bucket: %w", err)
+		if !isNotExist(err) {
+			return false, fmt.Errorf("failed to check bucket: %w", err)
+		}
 	}
-	return info.IsDir(), nil
+	return false, nil
 }
 
-// PutObject stores an object in the local filesystem atomically.
+// PutObject stores an object atomically.
 func (ls *LocalStorage) PutObject(bucketName, objectKey string, data io.Reader, size int64, contentType string, metadata map[string]string) error {
 	_ = metadata // user metadata is served from the database for the local backend
-	objectPath, err := ls.objectPath(bucketName, objectKey)
+	loc, err := ls.objectLocation(bucketName, objectKey)
 	if err != nil {
 		return err
 	}
-	ls.upgradeLegacyMarker(bucketName, objectKey)
-	bucketDir, err := ls.bucketDir(bucketName)
-	if err != nil {
-		return err
-	}
-	if _, err := writeAtomic(bucketDir, filepath.Dir(objectPath), objectPath, data); err != nil {
-		return err
-	}
-	return nil
+	return writeObject(loc, objectKey, data)
 }
 
-// upgradeLegacyMarker removes a legacy zero-length marker file "a/b" before a
-// folder-marker key "a/b/" is (re)written, so the folder directory — and the
-// new in-folder marker — can be created in its place.
-func (ls *LocalStorage) upgradeLegacyMarker(bucketName, objectKey string) {
-	if legacy, ok := ls.legacyMarkerPath(bucketName, objectKey); ok {
-		_ = os.Remove(legacy)
-	}
-}
-
-// GetObject retrieves an object from the local filesystem
+// GetObject retrieves an object's bytes.
 func (ls *LocalStorage) GetObject(bucketName, objectKey string) (io.ReadCloser, error) {
-	objectPath, err := ls.readablePath(bucketName, objectKey)
+	loc, err := ls.objectLocation(bucketName, objectKey)
 	if err != nil {
 		return nil, err
 	}
-	return openObjectFile(objectPath)
+	return openObjectFile(loc.blob)
 }
 
-// DeleteObject removes an object from the local filesystem. Deleting a
-// folder-marker key removes only the marker file, never the folder's
-// contents; a legacy marker file (see legacyMarkerPath) is removed instead
-// when no in-folder marker exists. A directory at a regular key's path is a
-// folder, not the object, and is left alone.
+// DeleteObject removes an object (a missing object is not an error).
 func (ls *LocalStorage) DeleteObject(bucketName, objectKey string) error {
-	objectPath, err := ls.readablePath(bucketName, objectKey)
+	loc, err := ls.objectLocation(bucketName, objectKey)
 	if err != nil {
 		return err
 	}
-	info, err := os.Lstat(objectPath)
-	if err != nil {
-		if os.IsNotExist(err) || isNotDirErr(err) {
-			return nil
-		}
+	if err := os.Remove(loc.blob); err != nil && !isNotExist(err) {
 		return fmt.Errorf("failed to delete file: %w", err)
 	}
-	if info.IsDir() {
-		return nil
-	}
-	if err := os.Remove(objectPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to delete file: %w", err)
-	}
-	// Don't leave the key's now-empty directory chain behind (a folder that
-	// still holds its ".bkt-folder" marker or other objects is kept).
-	ls.pruneObjectParents(bucketName, objectPath)
+	dropSidecarUnlessBlob(loc, objectKey)
 	return nil
 }
 
-// ListObjects lists all objects in a bucket with the given prefix
+// ListObjects lists all objects in a bucket with the given prefix, sorted by
+// key. Keys come from the ".key" sidecars. (The local backend's listings are
+// served from the database; this is used for reconciliation.)
 func (ls *LocalStorage) ListObjects(bucketName, prefix string) ([]ObjectInfo, error) {
-	bucketPath, err := ls.resolve(bucketName)
+	bucketDir, err := ls.objectsBucketDir(bucketName)
 	if err != nil {
 		return nil, err
 	}
 	objects := make([]ObjectInfo, 0)
 
-	walkErr := filepath.Walk(bucketPath, func(path string, info os.FileInfo, err error) error {
+	walkErr := filepath.WalkDir(bucketDir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			// A file deleted — or an emptied directory pruned — by a
-			// concurrent request between readdir and lstat is simply no
-			// longer part of the listing; it must not fail the whole walk.
-			if path != bucketPath && isNotExist(err) {
+			// A file deleted by a concurrent request between readdir and
+			// lstat is simply no longer part of the listing.
+			if p != bucketDir && isNotExist(err) {
 				return nil
 			}
 			return err
 		}
-		if info.IsDir() {
-			return nil
+		if d.IsDir() || !isBlobName(d.Name()) {
+			return nil // fan-out dirs, sidecars, temp files, the layout marker
 		}
-		relPath, err := filepath.Rel(bucketPath, path)
+		info, err := d.Info()
 		if err != nil {
+			if isNotExist(err) {
+				return nil
+			}
 			return err
 		}
-		key := filepath.ToSlash(relPath)
-
-		// Skip internal temp files from interrupted atomic writes.
-		base := filepath.Base(key)
-		if strings.HasPrefix(base, ".tmp-upload-") || strings.HasPrefix(base, ".tmp-assemble-") {
+		if !info.Mode().IsRegular() {
 			return nil
 		}
-		// A folder-marker file "a/b/.bkt-folder" is the object "a/b/".
-		if base == validation.LocalFolderMarkerName {
-			key = strings.TrimSuffix(key, validation.LocalFolderMarkerName)
-			if key == "" {
-				return nil // never a valid key ("/" is not an object key)
+		raw, err := os.ReadFile(p + keySidecarSuffix) //nolint:gosec // path built from a walked blob name under the bucket dir
+		if err != nil {
+			if isNotExist(err) {
+				// Deleted concurrently (blob and sidecar go together).
+				if _, serr := os.Lstat(p); serr == nil {
+					logger.Warn("Local object without key sidecar skipped in listing", map[string]interface{}{"bucket": bucketName, "blob": p})
+				}
+				return nil
 			}
+			return err
 		}
-
+		key := string(raw)
+		if key == "" || keyHash(key) != d.Name() {
+			logger.Warn("Local object key sidecar does not match its blob; skipped in listing", map[string]interface{}{"bucket": bucketName, "blob": p})
+			return nil
+		}
 		if prefix != "" && !strings.HasPrefix(key, prefix) {
 			return nil
 		}
@@ -419,40 +441,43 @@ func (ls *LocalStorage) ListObjects(bucketName, prefix string) ([]ObjectInfo, er
 		// Use mod time + size as an ETag surrogate for listing (avoids an
 		// expensive MD5 on every file). The real content MD5 is computed
 		// on-demand via GetObjectInfo.
-		etag := fmt.Sprintf("%x-%x", info.ModTime().Unix(), info.Size())
-
-		contentType := mime.TypeByExtension(filepath.Ext(path))
-		if contentType == "" {
-			contentType = "application/octet-stream"
-		}
-
 		objects = append(objects, ObjectInfo{
 			Key:          key,
 			Size:         info.Size(),
-			ContentType:  contentType,
+			ContentType:  contentTypeForKey(key),
 			LastModified: info.ModTime().Format(time.RFC3339),
-			ETag:         etag,
+			ETag:         fmt.Sprintf("%x-%x", info.ModTime().Unix(), info.Size()),
 		})
 		return nil
 	})
 
 	if walkErr != nil {
-		if os.IsNotExist(walkErr) {
+		if isNotExist(walkErr) {
 			return objects, nil // Empty list if bucket dir doesn't exist yet
 		}
 		return nil, fmt.Errorf("failed to list objects: %w", walkErr)
 	}
+	sort.Slice(objects, func(i, j int) bool { return objects[i].Key < objects[j].Key })
 	return objects, nil
+}
+
+// contentTypeForKey guesses a content type from the key's extension (the
+// database holds the real one for the local backend).
+func contentTypeForKey(key string) string {
+	if ct := mime.TypeByExtension(path.Ext(key)); ct != "" {
+		return ct
+	}
+	return "application/octet-stream"
 }
 
 // ObjectExists checks if an object exists in a bucket
 func (ls *LocalStorage) ObjectExists(bucketName, objectKey string) (bool, error) {
-	objectPath, err := ls.readablePath(bucketName, objectKey)
+	loc, err := ls.objectLocation(bucketName, objectKey)
 	if err != nil {
 		return false, err
 	}
-	if _, err := statObjectFile(objectPath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+	if _, err := statObject(loc.blob); err != nil {
+		if isNotExist(err) {
 			return false, nil
 		}
 		return false, fmt.Errorf("failed to check object: %w", err)
@@ -460,37 +485,29 @@ func (ls *LocalStorage) ObjectExists(bucketName, objectKey string) (bool, error)
 	return true, nil
 }
 
-// GetObjectInfo gets metadata about an object
+// GetObjectInfo gets metadata about an object (ETag = content MD5).
 func (ls *LocalStorage) GetObjectInfo(bucketName, objectKey string) (*ObjectInfo, error) {
-	objectPath, err := ls.readablePath(bucketName, objectKey)
+	loc, err := ls.objectLocation(bucketName, objectKey)
 	if err != nil {
 		return nil, err
 	}
-	info, err := statObjectFile(objectPath)
+	info, err := statObject(loc.blob)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if isNotExist(err) {
 			return nil, fmt.Errorf("object not found")
 		}
 		return nil, fmt.Errorf("failed to get object info: %w", err)
 	}
 
-	etag, err := calculateMD5(objectPath)
+	etag, err := calculateMD5(loc.blob)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute object etag: %w", err)
-	}
-
-	contentType := mime.TypeByExtension(path.Ext(objectKey))
-	if isFolderMarkerKey(objectKey) {
-		contentType = ""
-	}
-	if contentType == "" {
-		contentType = "application/octet-stream"
 	}
 
 	return &ObjectInfo{
 		Key:          objectKey,
 		Size:         info.Size(),
-		ContentType:  contentType,
+		ContentType:  contentTypeForKey(objectKey),
 		LastModified: info.ModTime().Format(time.RFC3339),
 		ETag:         etag,
 	}, nil
@@ -498,50 +515,41 @@ func (ls *LocalStorage) GetObjectInfo(bucketName, objectKey string) (*ObjectInfo
 
 // CopyObject copies an object within the same bucket.
 func (ls *LocalStorage) CopyObject(bucketName, srcKey, dstKey string) error {
-	srcPath, err := ls.readablePath(bucketName, srcKey)
+	src, err := ls.objectLocation(bucketName, srcKey)
 	if err != nil {
 		return err
 	}
-	dstPath, err := ls.objectPath(bucketName, dstKey)
+	dst, err := ls.objectLocation(bucketName, dstKey)
 	if err != nil {
 		return err
 	}
 
 	// Copying an object onto itself (e.g. a metadata-only REPLACE copy) is a
-	// no-op for the bytes. Short-circuit — otherwise the atomic write below
-	// still handles it safely, but this avoids needless IO.
+	// no-op for the bytes.
 	if srcKey == dstKey {
-		if _, err := statObjectFile(srcPath); err != nil {
+		if _, err := statObject(src.blob); err != nil {
 			return fmt.Errorf("source object not found")
 		}
 		return nil
 	}
 
-	// Stream through a temp file + rename so the source is fully read before
-	// the destination is committed. This is safe even if src and dst alias.
-	src, err := openObjectFile(srcPath)
+	f, err := openObjectFile(src.blob)
 	if err != nil {
 		if err.Error() == "object not found" {
 			return fmt.Errorf("source object not found")
 		}
 		return fmt.Errorf("failed to open source file: %w", err)
 	}
-	defer src.Close() //nolint:errcheck // best-effort close of read-only file
+	defer f.Close() //nolint:errcheck // best-effort close of read-only file
 
-	ls.upgradeLegacyMarker(bucketName, dstKey)
-	bucketDir, err := ls.bucketDir(bucketName)
-	if err != nil {
-		return err
-	}
-	if _, err := writeAtomic(bucketDir, filepath.Dir(dstPath), dstPath, src); err != nil {
-		return err
-	}
-	return nil
+	// Temp file + rename: the destination is only committed once the source
+	// has been fully read.
+	return writeObject(dst, dstKey, f)
 }
 
 // calculateMD5 calculates the MD5 hash of a file
 func calculateMD5(filePath string) (string, error) {
-	file, err := os.Open(filePath) //nolint:gosec // path validated by resolve() containment in callers
+	file, err := os.Open(filePath) //nolint:gosec // storage-internal path (blob, part file), never derived from key text
 	if err != nil {
 		return "", err
 	}
@@ -554,15 +562,24 @@ func calculateMD5(filePath string) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-// multipartDir returns the temp directory path for a multipart upload. The
+// multipartDir returns the staging directory for a multipart upload. The
 // uploadID is validated as a UUID before it is ever used to build a path, so a
 // crafted value (e.g. "../..") can never escape the multipart staging area —
 // critical because AbortMultipartUpload calls os.RemoveAll on this path.
 func (ls *LocalStorage) multipartDir(uploadID string) (string, error) {
-	if _, err := uuid.Parse(uploadID); err != nil {
+	if !isCanonicalUUID(uploadID) {
 		return "", fmt.Errorf("invalid upload id")
 	}
-	return ls.resolve(".multipart", uploadID)
+	return filepath.Join(ls.rootPath, multipartDirName, uploadID), nil
+}
+
+// isCanonicalUUID reports whether s is a UUID in its canonical lowercase
+// 8-4-4-4-12 form — the only form bkt generates for upload and version ids.
+// (uuid.Parse alone also accepts "{...}" — without checking the braces —,
+// "urn:uuid:..." and upper-case spellings, which would name other files.)
+func isCanonicalUUID(s string) bool {
+	id, err := uuid.Parse(s)
+	return err == nil && id.String() == s
 }
 
 type multipartMeta struct {
@@ -573,7 +590,7 @@ type multipartMeta struct {
 
 func (ls *LocalStorage) CreateMultipartUpload(bucketName, objectKey, contentType string, metadata map[string]string) (string, error) {
 	_ = metadata // applied from the tracking row at complete; DB is source of truth locally
-	if err := checkLocalObjectKey(bucketName, objectKey); err != nil {
+	if _, err := ls.objectLocation(bucketName, objectKey); err != nil {
 		return "", err
 	}
 	uploadID := uuid.New().String()
@@ -603,7 +620,7 @@ func (ls *LocalStorage) UploadPart(bucketName, objectKey, uploadID string, partN
 	partPath := filepath.Join(dir, fmt.Sprintf("part.%05d", partNumber))
 	// Atomic part write: concurrent retries of the same part number can't
 	// produce a torn file with a valid-looking MD5.
-	etag, err := writeAtomic(dir, dir, partPath, data)
+	etag, err := writeAtomic(dir, partPath, data)
 	if err != nil {
 		return "", err
 	}
@@ -633,21 +650,19 @@ func (ls *LocalStorage) CompleteMultipartUpload(bucketName, objectKey, uploadID 
 		}
 	}
 
-	finalPath, err := ls.objectPath(bucketName, objectKey)
+	loc, err := ls.objectLocation(bucketName, objectKey)
 	if err != nil {
 		return err
 	}
-	ls.upgradeLegacyMarker(bucketName, objectKey)
-	bucketDir, err := ls.bucketDir(bucketName)
-	if err != nil {
+	if err := prepareObject(loc, objectKey); err != nil {
 		return err
 	}
 
-	// Assemble into a temp file in the object's directory, then rename into
-	// place. A failure part-way through never leaves a partial object at the
-	// live key (nor, after pruning, an empty directory chain).
-	tmp, err := createTempIn(filepath.Dir(finalPath), ".tmp-assemble-*")
+	// Assemble into a temp file in the key's fan-out directory, then rename
+	// into place: a failure part-way through never leaves a partial object.
+	tmp, err := os.CreateTemp(loc.dir, assembleTempPrefix+"*")
 	if err != nil {
+		dropSidecarUnlessBlob(loc, objectKey)
 		return fmt.Errorf("failed to create temp object: %w", err)
 	}
 	tmpName := tmp.Name()
@@ -656,13 +671,13 @@ func (ls *LocalStorage) CompleteMultipartUpload(bucketName, objectKey, uploadID 
 		if !committed {
 			_ = tmp.Close()
 			_ = os.Remove(tmpName)
-			pruneEmptyDirs(bucketDir, filepath.Dir(finalPath))
+			dropSidecarUnlessBlob(loc, objectKey)
 		}
 	}()
 
 	for _, part := range sorted {
 		partPath := filepath.Join(dir, fmt.Sprintf("part.%05d", part.PartNumber))
-		f, err := os.Open(partPath) //nolint:gosec // dir validated by multipartDir()/resolve() containment; part name is fixed-format
+		f, err := os.Open(partPath) //nolint:gosec // dir validated by multipartDir(); part name is fixed-format
 		if err != nil {
 			return fmt.Errorf("failed to open part %d: %w", part.PartNumber, err)
 		}
@@ -678,10 +693,13 @@ func (ls *LocalStorage) CompleteMultipartUpload(bucketName, objectKey, uploadID 
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("failed to close assembled object: %w", err)
 	}
-	if err := os.Rename(tmpName, finalPath); err != nil {
+	if err := os.Rename(tmpName, loc.blob); err != nil {
 		return fmt.Errorf("failed to commit assembled object: %w", err)
 	}
 	committed = true
+	if err := finishObject(loc, objectKey); err != nil {
+		return err
+	}
 
 	_ = os.RemoveAll(dir)
 	return nil
@@ -740,11 +758,11 @@ func (ls *LocalStorage) GetObjectRange(bucketName, objectKey string, start, leng
 	if start < 0 || length < 0 {
 		return nil, fmt.Errorf("invalid range")
 	}
-	p, err := ls.readablePath(bucketName, objectKey)
+	loc, err := ls.objectLocation(bucketName, objectKey)
 	if err != nil {
 		return nil, err
 	}
-	f, err := openObjectFile(p)
+	f, err := openObjectFile(loc.blob)
 	if err != nil {
 		return nil, err
 	}

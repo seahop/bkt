@@ -298,11 +298,8 @@ func validateResource(resource string) error {
 		return validateARN(resource)
 	}
 
-	// Simple format validation - no path traversal
-	if strings.Contains(resource, "..") {
-		return fmt.Errorf("resource cannot contain '..'")
-	}
-
+	// Simple "bucket/object" format. No ".." check: resources are matched as
+	// strings (never used as filesystem paths), and ".." is legal in S3 keys.
 	return nil
 }
 

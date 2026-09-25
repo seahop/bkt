@@ -2,7 +2,9 @@ import { useState, useCallback } from 'react';
 import { Settings, Users, Shield, Trash2, X, UserPlus, Lock, Unlock, Key, Plus } from 'lucide-react';
 import api, { userApi, groupApi } from '../services/api';
 import { listPolicies, attachPolicyToUser, detachPolicyFromUser, Policy } from '../services/policy';
-import type { User, Group } from '../types';
+import type { User, Group, AccessKeyStatus } from '../types';
+import AccessKeyBadges from '../components/AccessKeyBadges';
+import { keyIsActive } from '../utils/accessKeys';
 import { getErrorMessage } from '../utils/errors';
 import { useAsyncLoad } from '../utils/useAsyncLoad';
 
@@ -10,6 +12,9 @@ interface AccessKey {
   id: string;
   access_key: string;
   is_active: boolean;
+  temporary?: boolean;
+  expires_at?: string;
+  status?: AccessKeyStatus;
   last_used_at?: string;
   created_at: string;
 }
@@ -675,14 +680,18 @@ function AccessKeysModal({ user, onClose }: { user: User; onClose: () => void })
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-2">
                     <code className="kbd-mono">{key.access_key}</code>
-                    {key.is_active ? (
-                      <span className="badge-green">Active</span>
-                    ) : (
-                      <span className="badge-red">Inactive</span>
-                    )}
+                    <AccessKeyBadges
+                      status={key.status}
+                      isActive={key.is_active}
+                      temporary={key.temporary}
+                      expiresAt={key.expires_at}
+                    />
                   </div>
-                  <div className="flex gap-4 text-xs text-dark-textSecondary tabular-nums">
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-dark-textSecondary tabular-nums">
                     <span>Created: {formatDate(key.created_at)}</span>
+                    {key.expires_at && (
+                      <span>{key.status === 'expired' ? 'Expired' : 'Expires'}: {formatDate(key.expires_at)}</span>
+                    )}
                     {key.last_used_at && (
                       <span>Last used: {formatDate(key.last_used_at)}</span>
                     )}
@@ -703,7 +712,8 @@ function AccessKeysModal({ user, onClose }: { user: User; onClose: () => void })
         <div className="flex justify-between items-center mt-6">
           <p className="text-sm text-dark-textSecondary tabular-nums">
             Total: {accessKeys.length} key{accessKeys.length !== 1 ? 's' : ''}
-            {' '}({accessKeys.filter(k => k.is_active).length} active)
+            {' '}({accessKeys.filter(keyIsActive).length} active
+            {accessKeys.some(k => k.temporary) && `, ${accessKeys.filter(k => k.temporary && keyIsActive(k)).length} temporary`})
           </p>
           <button onClick={onClose} className="btn-secondary">
             Close

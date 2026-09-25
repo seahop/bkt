@@ -64,11 +64,18 @@ export interface Object {
   updated_at: string
 }
 
+export type AccessKeyStatus = 'active' | 'expired' | 'revoked'
+
 export interface AccessKey {
   id: string
   user_id: string
   access_key: string
+  name?: string
   is_active: boolean
+  temporary?: boolean
+  expires_at?: string
+  // Computed by the server: whether the key actually works right now.
+  status?: AccessKeyStatus
   last_used_at?: string
   created_at: string
 }

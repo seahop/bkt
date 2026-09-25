@@ -811,7 +811,8 @@ func (h *UserHandler) ListUserAccessKeys(c *gin.Context) {
 		return
 	}
 
-	// Get all access keys for the user
+	// Get all access keys for the user (full history for admins), each with
+	// the same computed status the user's own view uses.
 	var accessKeys []models.AccessKey
 	if err := database.DB.Where("user_id = ?", userID).Order("created_at DESC").Find(&accessKeys).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
@@ -820,6 +821,7 @@ func (h *UserHandler) ListUserAccessKeys(c *gin.Context) {
 		})
 		return
 	}
+	annotateKeyStatuses(accessKeys, user.TokenVersion)
 
 	c.JSON(http.StatusOK, accessKeys)
 }

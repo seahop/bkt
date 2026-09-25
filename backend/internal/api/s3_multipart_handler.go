@@ -111,8 +111,8 @@ func (h *S3APIHandler) CreateMultipartUpload(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 	userUUID := userID.(uuid.UUID)
 
-	// Same key validation as PutObject: without it a bad key is only caught by
-	// path containment at Complete time, after the client uploaded every part.
+	// Same key validation as PutObject: without it a bad key would only be
+	// caught at Complete time, after the client uploaded every part.
 	if err := validation.ValidateObjectKey(objectKey); err != nil {
 		h.s3Error(c, "InvalidArgument", err.Error(), objectKey, http.StatusBadRequest)
 		return
@@ -126,10 +126,6 @@ func (h *S3APIHandler) CreateMultipartUpload(c *gin.Context) {
 	var bucket models.Bucket
 	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
 		h.s3Error(c, "NoSuchBucket", "The specified bucket does not exist", bucketName, http.StatusNotFound)
-		return
-	}
-	if err := validateKeyForBucket(&bucket, objectKey); err != nil {
-		h.s3Error(c, "InvalidArgument", err.Error(), objectKey, http.StatusBadRequest)
 		return
 	}
 

@@ -10,42 +10,42 @@ import (
 	"bkt/internal/validation"
 )
 
-func TestLocalRejectsAliasingKeys(t *testing.T) {
+// Spellings that a filesystem path would have aliased ("a//b" and "./a/b"
+// onto "a/b") are distinct keys in the blob layout: writing, copying onto or
+// deleting any of them never touches the canonical object.
+func TestLocalPathSpellingsAreDistinctKeys(t *testing.T) {
 	ls := newTestLocal(t)
 	_ = ls.CreateBucket("b", "")
 	data := []byte("secret")
 	if err := ls.PutObject("b", "dir/file", bytes.NewReader(data), int64(len(data)), "", nil); err != nil {
 		t.Fatal(err)
 	}
-	// Every one of these would resolve (filepath.Join cleans) onto dir/file or
-	// dir; none may be usable to read, write or delete it. (Folder-marker keys
-	// such as "dir/" are valid: they map to "dir/.bkt-folder", see
-	// local_folder_marker_test.go.)
-	aliases := []string{"dir//file", "./dir/file", "dir/./file", "dir/.", "dir//", "dir/./", "dir/.bkt-folder"}
+	aliases := []string{"dir//file", "./dir/file", "dir/./file", "dir/.", "dir//", "dir/./", "dir/.bkt-folder", "dir/sub/../file", "/dir/file", "dir\\file"}
 	for _, k := range aliases {
 		if _, err := ls.GetObject("b", k); err == nil {
-			t.Errorf("GetObject(%q) succeeded, want rejection", k)
+			t.Errorf("GetObject(%q) found an object before it was written", k)
 		}
-		if err := ls.PutObject("b", k, bytes.NewReader([]byte("x")), 1, "", nil); err == nil {
-			t.Errorf("PutObject(%q) succeeded, want rejection", k)
+		if err := ls.PutObject("b", k, bytes.NewReader([]byte("x-"+k)), int64(len(k)+2), "", nil); err != nil {
+			t.Errorf("PutObject(%q): %v", k, err)
 		}
-		if err := ls.DeleteObject("b", k); err == nil {
-			t.Errorf("DeleteObject(%q) succeeded, want rejection", k)
+		if got := readString(t, ls, k); got != "x-"+k {
+			t.Errorf("GetObject(%q) = %q", k, got)
 		}
-		if err := ls.CopyObject("b", "dir/file", k); err == nil {
-			t.Errorf("CopyObject(-> %q) succeeded, want rejection", k)
+		if err := ls.CopyObject("b", "dir/file", k); err != nil {
+			t.Errorf("CopyObject(-> %q): %v", k, err)
 		}
-		if _, err := ls.CreateMultipartUpload("b", k, "", nil); err == nil {
-			t.Errorf("CreateMultipartUpload(%q) succeeded, want rejection", k)
+		if got := readString(t, ls, k); got != "secret" {
+			t.Errorf("after copy GetObject(%q) = %q", k, got)
+		}
+		if err := ls.DeleteObject("b", k); err != nil {
+			t.Errorf("DeleteObject(%q): %v", k, err)
+		}
+		if got := readString(t, ls, "dir/file"); got != "secret" {
+			t.Fatalf("canonical object changed through %q: %q", k, got)
 		}
 	}
-	rc, err := ls.GetObject("b", "dir/file")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rc.Close()
-	if got, _ := io.ReadAll(rc); !bytes.Equal(got, data) {
-		t.Errorf("canonical object modified through an alias: %q", got)
+	if got := listKeys(t, ls, ""); len(got) != 1 || got[0] != "dir/file" {
+		t.Errorf("listing = %q", got)
 	}
 }
 
@@ -89,19 +89,43 @@ func TestLocalArchiveNeverOverwritesExistingVersion(t *testing.T) {
 	}
 }
 
-func TestLocalVersionStorageUnreachableFromKeys(t *testing.T) {
+// Keys that look like paths into internal storage are just keys: they are
+// stored as blobs of their own inside the bucket's object tree and can never
+// reach version storage, multipart staging, another bucket or the root.
+func TestLocalInternalStorageUnreachableFromKeys(t *testing.T) {
 	ls := newTestLocal(t)
 	_ = ls.CreateBucket("b", "")
-	for _, k := range []string{"../.versions/b/k", "../.multipart/x"} {
-		if err := ls.PutObject("b", k, bytes.NewReader([]byte("x")), 1, "", nil); err == nil {
-			t.Errorf("PutObject(%q) reached internal storage", k)
+	_ = ls.CreateBucket("other", "")
+	putString(t, ls, "k", "current")
+	if err := ls.ArchiveObjectVersion("b", "k", testVID); err != nil {
+		t.Fatal(err)
+	}
+	keys := []string{"../.versions/b/k", "../.objversions/b/" + keyHash("k") + "/" + testVID, "../.multipart/x", "../other/k", "../../../../etc/passwd", "/etc/passwd"}
+	for _, k := range keys {
+		putString(t, ls, k, "user data")
+	}
+	rc, err := ls.GetObjectVersion("b", "k", testVID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	if string(got) != "current" {
+		t.Errorf("archived version = %q", got)
+	}
+	if objs, _ := ls.ListObjects("other", ""); len(objs) != 0 {
+		t.Errorf("other bucket gained objects: %v", objs)
+	}
+	for _, name := range []string{".versions", ".multipart", "etc"} {
+		if _, err := os.Stat(filepath.Join(ls.rootPath, name)); !os.IsNotExist(err) {
+			t.Errorf("%s was created by a user write", name)
 		}
+	}
+	if got := listKeys(t, ls, "../"); len(got) != 5 {
+		t.Errorf("listing ../ = %q", got)
 	}
 	if err := ls.PutObject(".versions", "b/k", bytes.NewReader([]byte("x")), 1, "", nil); err == nil {
 		t.Error("a bucket named .versions must not be addressable")
-	}
-	if _, err := os.Stat(filepath.Join(ls.rootPath, ".versions")); !os.IsNotExist(err) {
-		t.Error("version storage was created by a user write")
 	}
 }
 

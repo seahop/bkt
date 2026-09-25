@@ -283,11 +283,14 @@ SELECT datname, usename, ssl FROM pg_stat_ssl JOIN pg_stat_activity ON pg_stat_s
 
 ### Object Storage Security
 
-**File System Security:**
-- Objects stored with sanitized paths
-- Path traversal prevention
-- Directory permissions (0755)
-- File permissions (0644)
+**File System Security (local backend):**
+- Object keys are never used as file paths: each object is stored under the
+  SHA-256 of its key (`<root>/.objects/<bucket>/<h[0:2]>/<h[2:4]>/<h>`), so a
+  key like `../../etc/passwd` is just a name — it cannot reach another key,
+  another bucket or anything outside the storage root
+- The only caller-supplied path segments are the bucket name (validated S3
+  bucket name) and UUID upload/version ids (checked to be canonical UUIDs)
+- Directory permissions (0750), file permissions (0600)
 
 **Integrity Checking:**
 ```go
@@ -307,8 +310,8 @@ c.Header("ETag", fmt.Sprintf("\"%s\"", md5Sum))
 **Security Features:**
 - MD5 ETags for cache validation
 - SHA256 hashes for integrity verification
-- Path sanitization prevents traversal
-- Atomic file operations
+- Hashed on-disk layout: keys cannot address arbitrary paths
+- Atomic file operations (temp file, fsync, rename)
 
 **Encryption at Rest:**
 - **External S3 backend**: set `S3_SSE=true` to request SSE-S3 (AES256)
@@ -417,26 +420,16 @@ database.DB.Where("username = ?", username).First(&user)
 ### Path Traversal
 
 **Prevention:**
-- ✅ Path sanitization
-- ✅ `..` detection and rejection
-- ✅ filepath.Clean()
-- ✅ Validation at multiple layers
-
-**Example:**
-```go
-// Policy validation
-if strings.Contains(resource, "..") {
-    return fmt.Errorf("resource cannot contain '..'")
-}
-
-// File system sanitization
-func sanitizeObjectKey(key string) string {
-    key = strings.Trim(key, "/")
-    key = strings.ReplaceAll(key, "..", "")
-    key = filepath.Clean(key)
-    return key
-}
-```
+- ✅ Object keys are opaque (any valid S3 key, including `..`, a leading `/`
+  and `\`) and are never joined into a filesystem path — the local backend
+  stores objects under the SHA-256 of the key
+- ✅ Bucket names (the one path segment taken from requests) must be valid S3
+  bucket names and are re-checked by the storage layer (no `/`, `\`, leading
+  `.`)
+- ✅ Multipart upload ids and version ids must be canonical UUIDs before they
+  name a file
+- ✅ Download file names derived from keys are reduced to the last segment and
+  encoded with `mime.FormatMediaType` (no header injection)
 
 ### Timing Attacks
 

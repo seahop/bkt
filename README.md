@@ -184,6 +184,24 @@ docker compose down -v
 rm -rf data/
 ```
 
+### Upgrading to the blob storage layout (local buckets)
+
+- **The first start after upgrading migrates local bucket storage** from the
+  old key-as-path layout (`<STORAGE_ROOT>/<bucket>/<key>`) to the blob layout
+  (objects stored under the SHA-256 of their key in
+  `<STORAGE_ROOT>/.objects/`), which is what allows any valid S3 key — `p`
+  next to `p/q`, `..`, a leading `/`, backslashes, 255+-byte names.
+- **Back up the data volume (and the database) first**, and stop any other bkt
+  instance sharing the volume.
+- The migration is automatic, runs before the server accepts requests, is
+  logged (`Local storage: ...` start, per-bucket and finish lines) and is
+  **resumable**: if it stops, bkt exits with the reason; fix it and start
+  again. Files are renamed, not copied, so it needs no extra disk space;
+  anything it cannot place stays in the old directory and is reported, never
+  deleted.
+- Afterwards the data directory is no longer human-browsable; back it up as a
+  whole. Details: [on-disk layout](docs/deployment/backup-restore.md#on-disk-layout-local-backend).
+
 ### Upgrading from v1.4.0 or earlier
 
 - **The backend now runs as the unprivileged uid/gid 10001** (releases up to

@@ -146,12 +146,12 @@ rm ~/bkt-mounts/my-bucket/file.txt
 ```
 
 `mkdir` creates an S3 folder-marker object (`subfolder/`). This works on both
-storage backends; on a local-backend bucket bkt stores the marker as the file
-`subfolder/.bkt-folder`, so the folder can hold files alongside its marker and
-`rmdir` removes only the marker. Because the local backend maps keys onto a
-filesystem, a local bucket cannot hold a file and a folder with the same name
-(`notes` and `notes/`), and `.bkt-folder` cannot be used as a file or folder
-name.
+storage backends: the marker is an ordinary object, so the folder can hold
+files alongside its marker, `rmdir` removes only the marker, and a file and a
+folder with the same name (`notes` and `notes/`) can coexist in the bucket (how
+a FUSE client presents that pair is up to the client). File and folder names
+are not restricted by the server's filesystem: bkt stores objects under a hash
+of their key, not at a path derived from it.
 
 ## Unmounting
 

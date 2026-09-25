@@ -13,9 +13,9 @@ import (
 // Bounds for the startup probe: it must stay cheap on stores with many
 // buckets and millions of objects.
 const (
-	probeMaxDirs         = 16  // top-level entries (buckets, .multipart, .versions) checked
-	probeMaxFilesPerDir  = 4   // existing objects opened for reading per top-level dir
-	probeMaxWalkPerDir   = 200 // directory entries visited per top-level dir while sampling
+	probeMaxDirs         = 16  // directories checked per level (top level, .objects/*, .objversions/*)
+	probeMaxFilesPerDir  = 4   // existing files opened for reading per checked dir
+	probeMaxWalkPerDir   = 200 // directory entries visited per checked dir while sampling
 	probeTempPrefix      = ".tmp-upload-writeprobe-"
 	probeImageUID        = 10001
 	probeImageGIDDefault = 10001
@@ -23,9 +23,12 @@ const (
 
 // ProbeWritable verifies that the process can actually use the local storage
 // root: it creates and removes a temp file in root, and for a bounded sample of
-// the existing top-level directories (buckets, .multipart, .versions) checks
-// that they are listable and writable and that a few existing objects inside
-// them are readable.
+// the existing directories checks that they are listable and writable and that
+// a few existing files inside them are readable. The sample covers the
+// top-level directories (the blob-layout trees .objects/.objversions, the
+// .multipart staging area and — until the startup migration has converted
+// them — legacy bucket and .versions directories) and the per-bucket
+// directories inside .objects and .objversions.
 //
 // os.MkdirAll succeeds on an existing directory regardless of its owner, so
 // without this probe a volume written by an older root-run bkt image looks
@@ -33,8 +36,9 @@ const (
 // and every 0600 root-owned object is unreadable. The returned error says
 // exactly how to fix the ownership.
 //
-// Temp files use the ".tmp-upload-" prefix, which object listings already
-// skip, so a probe interrupted mid-way never surfaces as an object.
+// Temp files use the ".tmp-upload-" prefix, which listings and the layout
+// migration already skip, so a probe interrupted mid-way never surfaces as an
+// object.
 func ProbeWritable(root string) error {
 	info, err := os.Stat(root)
 	if err != nil {
@@ -48,9 +52,33 @@ func ProbeWritable(root string) error {
 		return probeError(root, root, "storage root is not writable", err)
 	}
 
-	entries, err := os.ReadDir(root)
+	if err := probeChildren(root, root); err != nil {
+		return err
+	}
+	// Bucket directories of the blob layout (a missing tree is fine: it is
+	// created on first use / by the migration).
+	for _, tree := range []string{objectsDirName, objVersionsDirName} {
+		dir := filepath.Join(root, tree)
+		if _, err := os.Stat(dir); err != nil {
+			if isNotExist(err) {
+				continue
+			}
+			return probeError(root, dir, "existing storage directory is not accessible", err)
+		}
+		if err := probeChildren(root, dir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// probeChildren probes up to probeMaxDirs sub-directories of parent (sorted
+// by name): each must be listable and writable, and a few files in it
+// readable.
+func probeChildren(root, parent string) error {
+	entries, err := os.ReadDir(parent)
 	if err != nil {
-		return probeError(root, root, "storage root is not readable", err)
+		return probeError(root, parent, "storage directory is not readable", err)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 
@@ -63,7 +91,7 @@ func ProbeWritable(root string) error {
 			continue
 		}
 		checked++
-		dir := filepath.Join(root, e.Name())
+		dir := filepath.Join(parent, e.Name())
 		if _, err := os.ReadDir(dir); err != nil {
 			return probeError(root, dir, "existing storage directory is not readable", err)
 		}

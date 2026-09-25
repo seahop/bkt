@@ -106,37 +106,6 @@ func TestBucketViewOmitsSensitiveFields(t *testing.T) {
 	}
 }
 
-func TestValidateKeyForBucket(t *testing.T) {
-	local := &models.Bucket{StorageBackend: "local"}
-	s3b := &models.Bucket{StorageBackend: "s3"}
-	// Folder-marker keys are valid on both backends (the local backend stores
-	// them as "<folder>/.bkt-folder").
-	for _, b := range []*models.Bucket{local, s3b} {
-		if err := validateKeyForBucket(b, "folder/"); err != nil {
-			t.Errorf("%s backend should accept folder-marker keys: %v", b.StorageBackend, err)
-		}
-	}
-	// Non-canonical spellings alias on the filesystem only: rejected on local
-	// buckets, distinct valid keys on S3 buckets.
-	for _, k := range []string{"a//b", "./a", "a/./b", "a//", "folder/.bkt-folder"} {
-		if err := validateKeyForBucket(local, k); err == nil {
-			t.Errorf("validateKeyForBucket(local, %q) accepted", k)
-		}
-	}
-	for _, k := range []string{"a//b", "./a", "a/./b"} {
-		if err := validateKeyForBucket(s3b, k); err != nil {
-			t.Errorf("validateKeyForBucket(s3, %q) = %v, want nil", k, err)
-		}
-	}
-	for _, b := range []*models.Bucket{local, s3b} {
-		for _, k := range []string{".bkt-versions/a/x", "../x", "/abs", ""} {
-			if err := validateKeyForBucket(b, k); err == nil {
-				t.Errorf("validateKeyForBucket(%s, %q) accepted", b.StorageBackend, k)
-			}
-		}
-	}
-}
-
 func objectLockEntries() int {
 	objectKeyLocks.Lock()
 	defer objectKeyLocks.Unlock()

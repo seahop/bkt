@@ -60,6 +60,12 @@ definitions:
       read_only:
         description: Deny mutating S3 operations
         type: boolean
+      status:
+        description: |-
+          Status is computed for API responses (not stored): "active", "expired"
+          or "revoked" (deactivated, or an STS credential whose session was
+          revoked). is_active alone doesn't say whether a key still works.
+        type: string
       temporary:
         description: 'bkt-STS short-lived credential: excluded from the key limit,
           hard-deleted after expiry'
@@ -896,6 +902,104 @@ paths:
       security:
       - BearerAuth: []
       summary: Get a bucket
+      tags:
+      - buckets
+  /api/buckets/{name}/deleted-objects:
+    get:
+      description: Lists keys under a prefix whose latest version is a delete marker
+        (deleted but recoverable on versioned buckets), with the marker's version
+        id and the size/last-modified of the newest surviving version. Requires ListBucket
+        on the bucket.
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Key prefix
+        in: query
+        name: prefix
+        type: string
+      - description: Page size (1-1000, default 1000)
+        in: query
+        name: max_keys
+        type: integer
+      - description: Last key of the previous page
+        in: query
+        name: continuation_token
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: object
+      security:
+      - BearerAuth: []
+      summary: List deleted objects
+      tags:
+      - buckets
+  /api/buckets/{name}/folders:
+    delete:
+      description: Deletes every current object under a folder prefix (at most 10000).
+        Versioned buckets get delete markers. Objects under retention or without DeleteObject
+        permission are skipped and counted.
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Folder prefix, ending in '/'
+        in: query
+        name: prefix
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: '{deleted, skipped_retention, denied}'
+          schema:
+            type: object
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Delete a folder
+      tags:
+      - buckets
+    get:
+      description: Counts the current objects under a folder prefix (including a "<prefix>"
+        marker object). Requires ListBucket on the bucket.
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Folder prefix, ending in '/'
+        in: query
+        name: prefix
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Summarize a folder
       tags:
       - buckets
   /api/buckets/{name}/folders/move:

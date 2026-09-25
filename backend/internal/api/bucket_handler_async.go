@@ -119,7 +119,7 @@ func (h *BucketHandler) UploadObjectAsync(c *gin.Context) {
 	}
 
 	// Validate object key
-	if err := validateKeyForBucket(&bucket, objectKey); err != nil {
+	if err := validation.ValidateObjectKey(objectKey); err != nil {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error:   "Invalid object key",
 			Message: err.Error(),

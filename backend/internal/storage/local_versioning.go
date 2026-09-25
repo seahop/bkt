@@ -5,44 +5,24 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
-
-	"github.com/google/uuid"
 )
 
-// versionDir returns the containment-checked directory for a key's stored
-// versions: <root>/.versions/<bucket>/<key>/. It lives OUTSIDE bucket
-// directories so bucket listings and deletes never see version bytes.
-func (ls *LocalStorage) versionPath(bucketName, objectKey, versionID string) (string, error) {
-	if _, err := uuid.Parse(versionID); err != nil {
-		return "", fmt.Errorf("invalid version id")
+// versionLocation returns a key's version directory
+// (<root>/.objversions/<bucket>/<sha256(key)>) and the path of one stored
+// version in it. It lives OUTSIDE the bucket's object tree so object listings
+// never see version bytes.
+func (ls *LocalStorage) versionLocation(bucketName, objectKey, versionID string) (dir, file string, err error) {
+	if !isCanonicalUUID(versionID) {
+		return "", "", fmt.Errorf("invalid version id")
 	}
-	if err := checkLocalObjectKey(bucketName, objectKey); err != nil {
-		return "", err
+	if err := checkObjectKey(objectKey); err != nil {
+		return "", "", err
 	}
-	// Folder-marker keys ("a/b/") keep their versions under the marker name
-	// ("a/b/.bkt-folder/<vid>"), apart from the versions of the key "a/b".
-	return ls.resolve(".versions", bucketName, localKeyRel(objectKey), versionID)
-}
-
-// storedVersionPath is versionPath for an existing stored version. Releases
-// before folder-marker support archived a marker key "a/b/" at the cleaned
-// path ".versions/<bucket>/a/b/<vid>"; that legacy location is used when the
-// version is not at the current one.
-func (ls *LocalStorage) storedVersionPath(bucketName, objectKey, versionID string) (string, error) {
-	p, err := ls.versionPath(bucketName, objectKey, versionID)
-	if err != nil || !isFolderMarkerKey(objectKey) {
-		return p, err
+	if err := checkBucketName(bucketName); err != nil {
+		return "", "", err
 	}
-	if _, serr := os.Lstat(p); os.IsNotExist(serr) {
-		legacy, lerr := ls.resolve(".versions", bucketName, strings.TrimSuffix(objectKey, "/"), versionID)
-		if lerr == nil {
-			if info, ierr := os.Lstat(legacy); ierr == nil && info.Mode().IsRegular() {
-				return legacy, nil
-			}
-		}
-	}
-	return p, nil
+	dir = filepath.Join(ls.rootPath, objVersionsDirName, bucketName, keyHash(objectKey))
+	return dir, filepath.Join(dir, versionID), nil
 }
 
 // renameNoReplace moves src to dst but fails if dst already exists, so an
@@ -73,73 +53,81 @@ func renameNoReplace(src, dst string) error {
 }
 
 func (ls *LocalStorage) ArchiveObjectVersion(bucketName, objectKey, versionID string) error {
-	src, err := ls.readablePath(bucketName, objectKey)
+	loc, err := ls.objectLocation(bucketName, objectKey)
 	if err != nil {
 		return err
 	}
-	// Only an object's bytes are archived — never a folder that happens to
-	// sit at the key's path (renaming it would move the folder's contents).
-	if _, err := statObjectFile(src); err != nil {
+	if _, err := statObject(loc.blob); err != nil {
 		return fmt.Errorf("failed to archive version: object not found")
 	}
-	dst, err := ls.versionPath(bucketName, objectKey, versionID)
+	vdir, dst, err := ls.versionLocation(bucketName, objectKey, versionID)
 	if err != nil {
 		return err
 	}
+	sidecar := filepath.Join(vdir, versionSidecarName)
 	// The version directory can be pruned by a concurrent version delete
 	// between its creation and the move; withDirRetry re-creates it.
-	if err := withDirRetry(filepath.Dir(dst), func() error {
-		if rerr := renameNoReplace(src, dst); rerr != nil {
-			if _, serr := os.Lstat(src); isNotExist(rerr) && serr != nil {
+	if err := withDirRetry(vdir, func() error {
+		if serr := ensureSidecar(vdir, sidecar, objectKey); serr != nil {
+			return serr
+		}
+		if rerr := renameNoReplace(loc.blob, dst); rerr != nil {
+			if _, serr := os.Lstat(loc.blob); isNotExist(rerr) && serr != nil {
 				return fmt.Errorf("source vanished: %v", rerr) // not a directory race: don't retry
 			}
 			return rerr
 		}
 		return nil
 	}); err != nil {
-		ls.pruneVersionParents(bucketName, dst) // don't leave the fresh version dir behind
+		pruneVersionDir(vdir, objectKey) // don't leave a fresh, empty version dir behind
 		return fmt.Errorf("failed to archive version: %w", err)
 	}
-	// The object's bytes moved out of the bucket: prune its emptied folders.
-	ls.pruneObjectParents(bucketName, src)
+	// A racing prune may have removed the sidecar just before the move.
+	_ = ensureSidecar(vdir, sidecar, objectKey)
+	// The object's bytes moved out: its sidecar goes too.
+	dropSidecarUnlessBlob(loc, objectKey)
 	return nil
 }
 
 func (ls *LocalStorage) PromoteObjectVersion(bucketName, objectKey, versionID string) error {
-	src, err := ls.storedVersionPath(bucketName, objectKey, versionID)
+	vdir, src, err := ls.versionLocation(bucketName, objectKey, versionID)
 	if err != nil {
 		return err
 	}
-	dst, err := ls.objectPath(bucketName, objectKey)
+	loc, err := ls.objectLocation(bucketName, objectKey)
 	if err != nil {
 		return err
 	}
-	ls.upgradeLegacyMarker(bucketName, objectKey)
-	// The object's directory can be pruned by a concurrent delete between its
-	// creation and the rename; withDirRetry re-creates it.
-	if err := withDirRetry(filepath.Dir(dst), func() error {
-		rerr := os.Rename(src, dst)
-		if isNotExist(rerr) {
-			if _, serr := os.Lstat(src); serr != nil {
-				return fmt.Errorf("version not found: %v", rerr) // not a directory race: don't retry
-			}
+	if _, err := os.Lstat(src); err != nil {
+		if isNotExist(err) {
+			return fmt.Errorf("failed to promote version: version not found")
 		}
-		return rerr
-	}); err != nil {
-		ls.pruneObjectParents(bucketName, dst) // don't leave the fresh object dir behind
 		return fmt.Errorf("failed to promote version: %w", err)
 	}
-	// The version's bytes left version storage: prune its emptied folders.
-	ls.pruneVersionParents(bucketName, src)
+	if err := prepareObject(loc, objectKey); err != nil {
+		return err
+	}
+	if err := os.Rename(src, loc.blob); err != nil {
+		dropSidecarUnlessBlob(loc, objectKey)
+		if isNotExist(err) {
+			return fmt.Errorf("failed to promote version: version not found")
+		}
+		return fmt.Errorf("failed to promote version: %w", err)
+	}
+	if err := finishObject(loc, objectKey); err != nil {
+		return err
+	}
+	// The version's bytes left version storage.
+	pruneVersionDir(vdir, objectKey)
 	return nil
 }
 
 func (ls *LocalStorage) GetObjectVersion(bucketName, objectKey, versionID string) (io.ReadCloser, error) {
-	p, err := ls.storedVersionPath(bucketName, objectKey, versionID)
+	_, p, err := ls.versionLocation(bucketName, objectKey, versionID)
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.Open(p) //nolint:gosec // path validated by versionPath()/resolve() containment
+	f, err := os.Open(p) //nolint:gosec // <root>/.objversions/<bucket>/<sha256>/<canonical uuid>, never derived from key text
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("version not found")
@@ -150,13 +138,13 @@ func (ls *LocalStorage) GetObjectVersion(bucketName, objectKey, versionID string
 }
 
 func (ls *LocalStorage) DeleteObjectVersion(bucketName, objectKey, versionID string) error {
-	p, err := ls.storedVersionPath(bucketName, objectKey, versionID)
+	vdir, p, err := ls.versionLocation(bucketName, objectKey, versionID)
 	if err != nil {
 		return err
 	}
 	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to delete version: %w", err)
 	}
-	ls.pruneVersionParents(bucketName, p)
+	pruneVersionDir(vdir, objectKey)
 	return nil
 }

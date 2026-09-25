@@ -705,6 +705,150 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/buckets/{name}/deleted-objects": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Lists keys under a prefix whose latest version is a delete marker (deleted but recoverable on versioned buckets), with the marker's version id and the size/last-modified of the newest surviving version. Requires ListBucket on the bucket.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "buckets"
+                ],
+                "summary": "List deleted objects",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Bucket name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Key prefix",
+                        "name": "prefix",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Page size (1-1000, default 1000)",
+                        "name": "max_keys",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Last key of the previous page",
+                        "name": "continuation_token",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/buckets/{name}/folders": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Counts the current objects under a folder prefix (including a \"\u003cprefix\u003e\" marker object). Requires ListBucket on the bucket.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "buckets"
+                ],
+                "summary": "Summarize a folder",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Bucket name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Folder prefix, ending in '/'",
+                        "name": "prefix",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Deletes every current object under a folder prefix (at most 10000). Versioned buckets get delete markers. Objects under retention or without DeleteObject permission are skipped and counted.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "buckets"
+                ],
+                "summary": "Delete a folder",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Bucket name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Folder prefix, ending in '/'",
+                        "name": "prefix",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "{deleted, skipped_retention, denied}",
+                        "schema": {
+                            "type": "object"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/buckets/{name}/folders/move": {
             "post": {
                 "security": [
@@ -3159,6 +3303,10 @@ const docTemplate = `{
                 "read_only": {
                     "description": "Deny mutating S3 operations",
                     "type": "boolean"
+                },
+                "status": {
+                    "description": "Status is computed for API responses (not stored): \"active\", \"expired\"\nor \"revoked\" (deactivated, or an STS credential whose session was\nrevoked). is_active alone doesn't say whether a key still works.",
+                    "type": "string"
                 },
                 "temporary": {
                     "description": "bkt-STS short-lived credential: excluded from the key limit, hard-deleted after expiry",

@@ -10,12 +10,15 @@ import (
 func TestProbeWritable_OK(t *testing.T) {
 	root := t.TempDir()
 	// An existing bucket with an object and the internal dirs.
-	for _, d := range []string{"bucket-a/nested", ".multipart/u1", ".versions/bucket-a"} {
+	for _, d := range []string{"bucket-a/nested", ".multipart/u1", ".versions/bucket-a", ".objects/bucket-b/ab/cd", ".objversions/bucket-b/abcd"} {
 		if err := os.MkdirAll(filepath.Join(root, d), 0o750); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := os.WriteFile(filepath.Join(root, "bucket-a", "nested", "obj"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".objects", "bucket-b", "ab", "cd", "blob"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := ProbeWritable(root); err != nil {
@@ -103,5 +106,37 @@ func TestProbeWritable_UnreadableObject(t *testing.T) {
 	err := ProbeWritable(root)
 	if err == nil || !strings.Contains(err.Error(), obj) {
 		t.Fatalf("expected an error naming the unreadable object, got: %v", err)
+	}
+}
+
+func TestProbeWritable_UnwritableBlobLayoutBucket(t *testing.T) {
+	skipIfRoot(t)
+	root := t.TempDir()
+	bucket := filepath.Join(root, ".objects", "blob-bucket")
+	if err := os.MkdirAll(bucket, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(bucket, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(bucket, 0o700) })
+	if err := ProbeWritable(root); err == nil || !strings.Contains(err.Error(), "blob-bucket") {
+		t.Fatalf("expected an error naming the unwritable bucket directory, got: %v", err)
+	}
+}
+
+func TestProbeWritable_UnreadableBlob(t *testing.T) {
+	skipIfRoot(t)
+	root := t.TempDir()
+	dir := filepath.Join(root, ".objects", "b", "ab", "cd")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	blob := filepath.Join(dir, "blob")
+	if err := os.WriteFile(blob, []byte("x"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if err := ProbeWritable(root); err == nil || !strings.Contains(err.Error(), blob) {
+		t.Fatalf("expected an error naming the unreadable blob, got: %v", err)
 	}
 }

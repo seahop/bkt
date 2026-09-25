@@ -143,7 +143,7 @@ func (h *BucketHandler) RestoreObjectVersion(c *gin.Context) {
 		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "Bucket not found"})
 		return
 	}
-	if err := validateKeyForBucket(&bucket, req.Key); err != nil {
+	if err := validation.ValidateObjectKey(req.Key); err != nil {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "Invalid object key", Message: err.Error()})
 		return
 	}

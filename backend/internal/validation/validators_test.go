@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestValidateObjectKeyAcceptsCanonicalKeys(t *testing.T) {
+func TestValidateObjectKeyAcceptsS3Keys(t *testing.T) {
 	good := []string{
 		"a",
 		"file.txt",
@@ -19,6 +19,16 @@ func TestValidateObjectKeyAcceptsCanonicalKeys(t *testing.T) {
 		".bkt-versionsX/a",  // not the reserved prefix
 		"x/.bkt-versions/y", // reserved only at the start of the key
 		"name with spaces+plus%percent?q",
+		// Keys are opaque strings: none of these is special to S3 (nor to
+		// any bkt backend — the local backend hashes keys).
+		"a..b.txt", "..", "../x", "a/../b", "../../etc/passwd",
+		"/abs", "//", "/leading", "a//b", "./x", "a/./b", ".", "a/.", "a//",
+		"a\\b", "\\", "C:\\Windows\\x",
+		"dir/.bkt-folder", ".bkt-folder", // formerly reserved by the local backend
+		strings.Repeat("s", 300), // a single 300-byte "segment"
+		"ünï/😀",
+		strings.Repeat("k", MaxObjectKeyBytes),
+		"tab\tand\nnewline",
 	}
 	for _, k := range good {
 		if err := ValidateObjectKey(k); err != nil {
@@ -27,59 +37,19 @@ func TestValidateObjectKeyAcceptsCanonicalKeys(t *testing.T) {
 	}
 }
 
-func TestValidateObjectKeyRejectsTraversal(t *testing.T) {
+func TestValidateObjectKeyRejects(t *testing.T) {
 	bad := []string{
 		"",
-		"/abs",
-		"//",
-		"a/../b",
-		"..",
-		"a\\b",
 		"a\x00b",
-		strings.Repeat("k", 1025),
+		"\x00",
+		strings.Repeat("k", MaxObjectKeyBytes+1),
+		strings.Repeat("ü", MaxObjectKeyBytes/2) + "x", // 1025 bytes, 513 runes
+		"bad\xffutf8",
+		"\xc3", // truncated multi-byte sequence
 	}
 	for _, k := range bad {
 		if err := ValidateObjectKey(k); err == nil {
 			t.Errorf("ValidateObjectKey(%q) = nil, want error", k)
-		}
-		if err := ValidateLocalObjectKey(k); err == nil {
-			t.Errorf("ValidateLocalObjectKey(%q) = nil, want error", k)
-		}
-	}
-}
-
-// Non-canonical spellings are distinct keys on S3 (backend-independent
-// validation accepts them) but alias on the filesystem (local rule rejects).
-func TestNonCanonicalKeysAreLocalOnlyRejections(t *testing.T) {
-	aliases := []string{
-		"a//b",  // empty segment: aliases a/b on the filesystem
-		"./x",   // aliases x
-		"a/./b", // aliases a/b
-		"a/.",   // aliases a
-		".",
-		"a//",    // empty segment before the trailing slash
-		"a/b//",  // two trailing slashes
-		"dir/./", // '.' segment in a marker key
-	}
-	for _, k := range aliases {
-		if err := ValidateObjectKey(k); err != nil {
-			t.Errorf("ValidateObjectKey(%q) = %v, want nil (valid S3 key)", k, err)
-		}
-		if err := ValidateLocalObjectKey(k); err == nil {
-			t.Errorf("ValidateLocalObjectKey(%q) = nil, want error", k)
-		}
-	}
-}
-
-func TestValidateLocalObjectKeyFolderMarkers(t *testing.T) {
-	for _, k := range []string{"dir/", "a/b/", "dir/file.txt", "dir/.keep", ".bkt-folderX", "x.bkt-folder"} {
-		if err := ValidateLocalObjectKey(k); err != nil {
-			t.Errorf("ValidateLocalObjectKey(%q) = %v, want nil", k, err)
-		}
-	}
-	for _, k := range []string{LocalFolderMarkerName, "dir/" + LocalFolderMarkerName, LocalFolderMarkerName + "/x", "a/" + LocalFolderMarkerName + "/"} {
-		if err := ValidateLocalObjectKey(k); err == nil {
-			t.Errorf("ValidateLocalObjectKey(%q) = nil, want reserved-name error", k)
 		}
 	}
 }

@@ -23,6 +23,39 @@ export interface ObjectVersion {
   last_modified: string
 }
 
+// A key whose latest version is a delete marker (deleted but recoverable).
+export interface DeletedObject {
+  key: string
+  delete_marker_version_id: string
+  deleted_at: string
+  recoverable: boolean
+  size: number
+  content_type?: string
+  last_modified?: string
+}
+
+export interface ListDeletedObjectsResponse {
+  objects: DeletedObject[]
+  versioning: string
+  is_truncated: boolean
+  next_continuation_token?: string
+}
+
+export interface FolderSummary {
+  prefix: string
+  object_count: number
+  max_objects: number
+  too_large: boolean
+  versioning: string
+}
+
+export interface FolderDeleteResult {
+  prefix: string
+  deleted: number
+  skipped_retention: number
+  denied: number
+}
+
 export interface ListObjectVersionsResponse {
   bucket: string
   key: string
@@ -385,14 +418,50 @@ export const bucketApi = {
     return data
   },
 
+  // Object keys always travel as a query parameter (`/object?key=`), never in
+  // the URL path: browsers and axios resolve "." / ".." path segments (also
+  // spelled %2e) and the server decodes "%" sequences, so keys like "../x",
+  // "a/./b" or ".%2e/f" could not be addressed byte-for-byte in a path.
   deleteObject: async (bucketName: string, key: string): Promise<void> => {
-    await api.delete(`/buckets/${bucketName}/objects/${key}`)
+    await api.delete(`/buckets/${bucketName}/object`, { params: { key } })
   },
 
   downloadObject: async (bucketName: string, key: string): Promise<Blob> => {
-    const { data } = await api.get(`/buckets/${bucketName}/objects/${key}`, {
+    const { data } = await api.get(`/buckets/${bucketName}/object`, {
+      params: { key },
       responseType: 'blob',
     })
+    return data
+  },
+
+  // Creates the zero-byte "<prefix><name>/" marker object S3 tools (aws cli,
+  // rclone, s3fs, the AWS console) use for an empty folder.
+  createFolder: async (bucketName: string, folderKey: string): Promise<StorageObject> => {
+    const marker = new File([], 'folder', { type: 'application/x-directory' })
+    return bucketApi.uploadObject(bucketName, folderKey, marker)
+  },
+
+  getFolderSummary: async (bucketName: string, prefix: string): Promise<FolderSummary> => {
+    const { data } = await api.get<FolderSummary>(`/buckets/${bucketName}/folders`, { params: { prefix } })
+    return data
+  },
+
+  // Deletes every current object under prefix (including the folder marker).
+  deleteFolder: async (bucketName: string, prefix: string): Promise<FolderDeleteResult> => {
+    const { data } = await api.delete<FolderDeleteResult>(`/buckets/${bucketName}/folders`, { params: { prefix } })
+    return data
+  },
+
+  // Keys under prefix whose latest version is a delete marker (versioned buckets).
+  listDeletedObjects: async (
+    bucketName: string,
+    options?: { prefix?: string; maxKeys?: number; continuationToken?: string }
+  ): Promise<ListDeletedObjectsResponse> => {
+    const params: Record<string, string | number> = {}
+    if (options?.prefix) params.prefix = options.prefix
+    if (options?.maxKeys != null) params.max_keys = options.maxKeys
+    if (options?.continuationToken) params.continuation_token = options.continuationToken
+    const { data } = await api.get<ListDeletedObjectsResponse>(`/buckets/${bucketName}/deleted-objects`, { params })
     return data
   },
 

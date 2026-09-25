@@ -56,6 +56,11 @@ type AccessKey struct {
 	LastUsedAt         *time.Time `json:"last_used_at,omitempty"`
 	CreatedAt          time.Time  `json:"created_at"`
 
+	// Status is computed for API responses (not stored): "active", "expired"
+	// or "revoked" (deactivated, or an STS credential whose session was
+	// revoked). is_active alone doesn't say whether a key still works.
+	Status string `gorm:"-" json:"status,omitempty"`
+
 	// Relationships
 	User User `gorm:"foreignKey:UserID" json:"user,omitempty"`
 }

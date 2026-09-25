@@ -8,13 +8,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
-
-	"bkt/internal/validation"
 )
 
 func mustExist(t *testing.T, p string) {
@@ -31,120 +30,90 @@ func mustNotExist(t *testing.T, p string) {
 	}
 }
 
-func TestPruneEmptyDirsBounds(t *testing.T) {
-	root := t.TempDir()
-	bucket := filepath.Join(root, "b")
-	deep := filepath.Join(bucket, "x", "y", "z")
-	if err := os.MkdirAll(deep, 0750); err != nil {
-		t.Fatal(err)
-	}
-	pruneEmptyDirs(bucket, deep)
-	mustNotExist(t, filepath.Join(bucket, "x"))
-	mustExist(t, bucket) // the root itself is never removed
-
-	// A dir outside root, or root itself, is never touched.
-	other := filepath.Join(root, "other", "empty")
-	_ = os.MkdirAll(other, 0750)
-	pruneEmptyDirs(bucket, other)
-	mustExist(t, other)
-	pruneEmptyDirs(bucket, bucket)
-	mustExist(t, bucket)
-
-	// A regular file at a would-be directory path is never unlinked.
-	f := filepath.Join(bucket, "file")
-	if err := os.WriteFile(f, []byte("x"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	pruneEmptyDirs(bucket, f)
-	mustExist(t, f)
+func versionDirOf(ls *LocalStorage, key string) string {
+	return filepath.Join(ls.rootPath, ".objversions", "b", keyHash(key))
 }
 
-func TestLocalDeletePrunesEmptyDirs(t *testing.T) {
+func TestLocalDeleteRemovesBlobAndSidecar(t *testing.T) {
 	ls := newTestLocal(t)
-	_ = ls.CreateBucket("b", "")
 	putString(t, ls, "a/b/c/one", "1")
 	putString(t, ls, "a/keep", "k")
+	loc, _ := ls.objectLocation("b", "a/b/c/one")
+	mustExist(t, loc.blob)
+	mustExist(t, loc.sidecar)
 	if err := ls.DeleteObject("b", "a/b/c/one"); err != nil {
 		t.Fatal(err)
 	}
-	mustNotExist(t, filepath.Join(ls.rootPath, "b", "a", "b"))
-	mustExist(t, filepath.Join(ls.rootPath, "b", "a", "keep"))
-	if err := ls.DeleteObject("b", "a/keep"); err != nil {
+	mustNotExist(t, loc.blob)
+	mustNotExist(t, loc.sidecar)
+	// Deleting a missing key is a no-op success.
+	if err := ls.DeleteObject("b", "a/b/c/one"); err != nil {
 		t.Fatal(err)
 	}
-	mustNotExist(t, filepath.Join(ls.rootPath, "b", "a"))
-	mustExist(t, filepath.Join(ls.rootPath, "b")) // bucket dir survives even when empty
-	if got := listKeys(t, ls, ""); len(got) != 0 {
+	if got := listKeys(t, ls, ""); len(got) != 1 || got[0] != "a/keep" {
 		t.Errorf("listing = %v", got)
 	}
 }
 
-// A folder that only holds its marker is an explicit folder: deleting its
-// last object keeps it; deleting the marker afterwards removes it.
-func TestLocalDeleteKeepsExplicitFolder(t *testing.T) {
+func TestLocalVersionDirLifecycle(t *testing.T) {
 	ls := newTestLocal(t)
-	_ = ls.CreateBucket("b", "")
-	putString(t, ls, "top/dir/", "")
-	putString(t, ls, "top/dir/file", "f")
-	if err := ls.DeleteObject("b", "top/dir/file"); err != nil {
-		t.Fatal(err)
-	}
-	mustExist(t, filepath.Join(ls.rootPath, "b", "top", "dir", validation.LocalFolderMarkerName))
-	if got := listKeys(t, ls, ""); len(got) != 1 || got[0] != "top/dir/" {
-		t.Errorf("listing = %v", got)
-	}
-	if err := ls.DeleteObject("b", "top/dir/"); err != nil {
-		t.Fatal(err)
-	}
-	mustNotExist(t, filepath.Join(ls.rootPath, "b", "top"))
-
-	// Deleting a marker whose folder still has contents keeps the contents.
-	putString(t, ls, "p/q/", "")
-	putString(t, ls, "p/q/r/s", "s")
-	if err := ls.DeleteObject("b", "p/q/"); err != nil {
-		t.Fatal(err)
-	}
-	if got := readString(t, ls, "p/q/r/s"); got != "s" {
-		t.Errorf("content lost: %q", got)
-	}
-}
-
-func TestLocalVersionOpsPruneEmptyDirs(t *testing.T) {
-	ls := newTestLocal(t)
-	_ = ls.CreateBucket("b", "")
 	putString(t, ls, "v/w/obj", "one")
+	loc, _ := ls.objectLocation("b", "v/w/obj")
 	if err := ls.ArchiveObjectVersion("b", "v/w/obj", testVID); err != nil {
 		t.Fatal(err)
 	}
-	// Archiving moved the bytes out: the object's folders are gone.
-	mustNotExist(t, filepath.Join(ls.rootPath, "b", "v"))
+	vdir := versionDirOf(ls, "v/w/obj")
+	mustExist(t, filepath.Join(vdir, testVID))
+	if got, err := os.ReadFile(filepath.Join(vdir, ".key")); err != nil || string(got) != "v/w/obj" {
+		t.Errorf("version sidecar = %q, %v", got, err)
+	}
+	// Archiving moved the bytes out: the object's blob and sidecar are gone.
+	mustNotExist(t, loc.blob)
+	mustNotExist(t, loc.sidecar)
+
 	if err := ls.PromoteObjectVersion("b", "v/w/obj", testVID); err != nil {
 		t.Fatal(err)
 	}
 	if got := readString(t, ls, "v/w/obj"); got != "one" {
 		t.Errorf("promoted = %q", got)
 	}
-	// Promoting moved the bytes out of version storage: its tree is pruned
-	// down to (excluding) .versions/<bucket>.
-	mustNotExist(t, filepath.Join(ls.rootPath, ".versions", "b", "v"))
-	mustExist(t, filepath.Join(ls.rootPath, ".versions", "b"))
+	mustExist(t, loc.sidecar)
+	// The last version left: the per-key version dir is removed, the
+	// bucket's version root stays.
+	mustNotExist(t, vdir)
+	mustExist(t, filepath.Join(ls.rootPath, ".objversions", "b"))
 
+	const vid2 = "0b0c3b51-0000-4000-8000-0000000000ab"
 	if err := ls.ArchiveObjectVersion("b", "v/w/obj", testVID); err != nil {
+		t.Fatal(err)
+	}
+	putString(t, ls, "v/w/obj", "two")
+	if err := ls.ArchiveObjectVersion("b", "v/w/obj", vid2); err != nil {
 		t.Fatal(err)
 	}
 	if err := ls.DeleteObjectVersion("b", "v/w/obj", testVID); err != nil {
 		t.Fatal(err)
 	}
-	mustNotExist(t, filepath.Join(ls.rootPath, ".versions", "b", "v"))
+	mustExist(t, filepath.Join(vdir, ".key")) // vid2 still there
+	if err := ls.DeleteObjectVersion("b", "v/w/obj", vid2); err != nil {
+		t.Fatal(err)
+	}
+	mustNotExist(t, vdir)
 
-	// Promoting a missing version fails cleanly (no retry loop confusion).
+	// Promoting a missing version fails cleanly and leaves nothing behind.
 	if err := ls.PromoteObjectVersion("b", "v/w/obj", testVID); err == nil {
 		t.Error("promoting a missing version succeeded")
 	}
-	mustNotExist(t, filepath.Join(ls.rootPath, "b", "v"))
+	mustNotExist(t, loc.sidecar)
+	mustNotExist(t, vdir)
+	// A failed archive (no current object) leaves no version dir behind.
+	if err := ls.ArchiveObjectVersion("b", "v/w/obj", testVID); err == nil {
+		t.Error("archiving a missing object succeeded")
+	}
+	mustNotExist(t, vdir)
 }
 
-func TestLocalFailedMultipartCompleteLeavesNoDirs(t *testing.T) {
+func TestLocalFailedMultipartCompleteLeavesNothing(t *testing.T) {
 	ls := newTestLocal(t)
 	_ = ls.CreateBucket("b", "")
 	id, err := ls.CreateMultipartUpload("b", "m/n/obj", "", nil)
@@ -155,20 +124,32 @@ func TestLocalFailedMultipartCompleteLeavesNoDirs(t *testing.T) {
 	if err := ls.CompleteMultipartUpload("b", "m/n/obj", id, []CompletedPart{{PartNumber: 1}}); err == nil {
 		t.Fatal("complete with a missing part succeeded")
 	}
-	mustNotExist(t, filepath.Join(ls.rootPath, "b", "m"))
+	assertNoFiles(t, filepath.Join(ls.rootPath, ".objects", "b"))
 }
 
 type failingReader struct{}
 
 func (failingReader) Read([]byte) (int, error) { return 0, fmt.Errorf("client went away") }
 
-func TestLocalFailedPutLeavesNoDirs(t *testing.T) {
+func TestLocalFailedPutLeavesNothing(t *testing.T) {
 	ls := newTestLocal(t)
 	_ = ls.CreateBucket("b", "")
 	if err := ls.PutObject("b", "f/g/obj", failingReader{}, 10, "", nil); err == nil {
 		t.Fatal("put with a failing body succeeded")
 	}
-	mustNotExist(t, filepath.Join(ls.rootPath, "b", "f"))
+	assertNoFiles(t, filepath.Join(ls.rootPath, ".objects", "b"))
+
+	// A failed overwrite keeps the previous object and its sidecar.
+	putString(t, ls, "f/g/obj", "old")
+	if err := ls.PutObject("b", "f/g/obj", failingReader{}, 10, "", nil); err == nil {
+		t.Fatal("put with a failing body succeeded")
+	}
+	if got := readString(t, ls, "f/g/obj"); got != "old" {
+		t.Errorf("object after failed overwrite = %q", got)
+	}
+	if got := listKeys(t, ls, ""); len(got) != 1 {
+		t.Errorf("listing = %v", got)
+	}
 }
 
 // The writer side of the race: the directory is pruned between MkdirAll and
@@ -180,8 +161,8 @@ func TestWithDirRetryRecreatesPrunedDir(t *testing.T) {
 	err := withDirRetry(dir, func() error {
 		calls++
 		if calls == 1 {
-			// Simulate a concurrent delete pruning the fresh (empty) chain.
-			pruneEmptyDirs(root, dir)
+			// Simulate a concurrent prune removing the fresh (empty) dir.
+			_ = syscall.Rmdir(dir)
 		}
 		f, err := os.CreateTemp(dir, "t-*")
 		if err != nil {
@@ -201,8 +182,8 @@ func TestWithDirRetryRecreatesPrunedDir(t *testing.T) {
 }
 
 // Parallel puts, deletes, overwrites, listings and version churn in the same
-// directories: no operation may fail because a sibling pruned a directory, and
-// every object that was written and not deleted must survive intact.
+// "folders": no operation may fail, and every object that was written and not
+// deleted must survive intact.
 func TestLocalConcurrentPutDeleteSameDir(t *testing.T) {
 	ls := newTestLocal(t)
 	_ = ls.CreateBucket("b", "")
@@ -236,7 +217,7 @@ func TestLocalConcurrentPutDeleteSameDir(t *testing.T) {
 				dir := dirs[(g+i)%len(dirs)]
 				tmpKey := fmt.Sprintf("%s/tmp-%d-%d", dir, g, i)
 				body := fmt.Sprintf("body-%d-%d", g, i)
-				// Churn: create then delete an object (pruning its dirs).
+				// Churn: create then delete an object.
 				if err := ls.PutObject("b", tmpKey, bytes.NewReader([]byte(body)), int64(len(body)), "", nil); err != nil {
 					fail(fmt.Errorf("put %s: %w", tmpKey, err))
 					continue
@@ -258,7 +239,7 @@ func TestLocalConcurrentPutDeleteSameDir(t *testing.T) {
 						kept[g][keepKey] = body
 					}
 				}
-				// Version churn in the same trees (.versions side included).
+				// Version churn (per-key version dirs created and pruned).
 				if i%5 == 0 {
 					vkey := fmt.Sprintf("%s/ver-%d", dir, g)
 					vid := fmt.Sprintf("0b0c3b51-0000-4000-8000-%012d", g*1_000_000+i)
@@ -316,9 +297,10 @@ func TestLocalConcurrentPutDeleteSameDir(t *testing.T) {
 		t.Errorf("listing has %d objects, want %d kept", len(got), want)
 	}
 	// All version storage was deleted again: nothing but the bucket root left.
-	if entries, err := os.ReadDir(filepath.Join(ls.rootPath, ".versions", "b")); err == nil && len(entries) != 0 {
+	if entries, err := os.ReadDir(filepath.Join(ls.rootPath, ".objversions", "b")); err == nil && len(entries) != 0 {
 		t.Errorf("version storage not pruned: %d entries left", len(entries))
 	}
+	assertSidecarInvariant(t, ls)
 	t.Logf("%d rounds", ops.Load())
 }
 
@@ -352,4 +334,73 @@ func TestWithDirRetryDoesNotRetryOpEEXIST(t *testing.T) {
 	if !errors.Is(err, fs.ErrExist) || calls != 1 {
 		t.Fatalf("op EEXIST: err=%v calls=%d, want one call returning EEXIST", err, calls)
 	}
+}
+
+// assertSidecarInvariant checks "blob exists ⇒ sidecar exists" for objects
+// and "version dir holds versions ⇒ sidecar exists" for versions.
+func assertSidecarInvariant(t *testing.T, ls *LocalStorage) {
+	t.Helper()
+	_ = filepath.WalkDir(filepath.Join(ls.rootPath, ".objects", "b"), func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && isBlobName(d.Name()) {
+			if _, serr := os.Lstat(p + ".key"); serr != nil {
+				t.Errorf("blob %s has no sidecar", p)
+			}
+		}
+		return nil
+	})
+	vroot := filepath.Join(ls.rootPath, ".objversions", "b")
+	entries, _ := os.ReadDir(vroot)
+	for _, e := range entries {
+		sub, _ := os.ReadDir(filepath.Join(vroot, e.Name()))
+		versions, sidecar := 0, false
+		for _, f := range sub {
+			if f.Name() == ".key" {
+				sidecar = true
+			} else if !strings.HasPrefix(f.Name(), ".") {
+				versions++
+			}
+		}
+		if versions > 0 && !sidecar {
+			t.Errorf("version dir %s has %d versions but no sidecar", e.Name(), versions)
+		}
+	}
+}
+
+// One writer and one remover racing on the SAME key (which the API layer
+// serializes, but a second process or a bug might not) never leave a blob or
+// a version without its key sidecar.
+func TestLocalSidecarInvariantUnderSameKeyRaces(t *testing.T) {
+	ls := newTestLocal(t)
+	_ = ls.CreateBucket("b", "")
+	deadline := time.Now().Add(800 * time.Millisecond)
+	if testing.Short() {
+		deadline = time.Now().Add(200 * time.Millisecond)
+	}
+	var wg sync.WaitGroup
+	for g := 0; g < 4; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; time.Now().Before(deadline); i++ {
+				vid := fmt.Sprintf("0b0c3b51-0000-4000-8000-%012d", g*1_000_000+i)
+				switch g {
+				case 0:
+					_ = ls.PutObject("b", "k", bytes.NewReader([]byte("x")), 1, "", nil)
+				case 1:
+					_ = ls.DeleteObject("b", "k")
+				case 2:
+					if ls.ArchiveObjectVersion("b", "k", vid) == nil {
+						_ = ls.DeleteObjectVersion("b", "k", vid)
+					}
+				case 3:
+					_ = ls.PutObject("b", "k", bytes.NewReader([]byte("y")), 1, "", nil)
+					if ls.ArchiveObjectVersion("b", "k", vid) == nil && i%2 == 0 {
+						_ = ls.PromoteObjectVersion("b", "k", vid)
+					}
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+	assertSidecarInvariant(t, ls)
 }

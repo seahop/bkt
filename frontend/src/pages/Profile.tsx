@@ -4,6 +4,8 @@ import { useAuthStore } from '../store/authStore'
 import { accessKeyApi, stsApi } from '../services/api'
 import type { AccessKey, AccessKeyResponse } from '../types'
 import { getErrorMessage } from '../utils/errors'
+import AccessKeyBadges from '../components/AccessKeyBadges'
+import { keyIsActive } from '../utils/accessKeys'
 import { useAsyncLoad } from '../utils/useAsyncLoad'
 
 export default function Profile() {
@@ -93,6 +95,7 @@ export default function Profile() {
     try {
       const result = await stsApi.issueTemporaryCredentials(stsDuration, stsReadOnly)
       setStsResult(result)
+      await loadAccessKeys() // temporary credentials are listed alongside keys
     } catch (error) {
       console.error('Failed to issue temporary credentials:', error)
       setStsError(getErrorMessage(error, 'Failed to issue temporary credentials'))
@@ -140,7 +143,7 @@ export default function Profile() {
             </span>
             <div>
               <p className="text-2xl font-semibold tabular-nums text-dark-text leading-tight">
-                {accessKeys.length}
+                {accessKeys.filter(keyIsActive).length}
               </p>
               <p className="text-xs uppercase tracking-wider text-dark-textSecondary mt-0.5">
                 Active Access Keys
@@ -246,16 +249,19 @@ export default function Profile() {
                   <p className="font-mono text-sm text-dark-text truncate">{key.access_key}</p>
                   <p className="text-xs tabular-nums text-dark-textMuted mt-1">
                     Created {new Date(key.created_at).toLocaleDateString()}
+                    {key.expires_at &&
+                      ` • ${key.status === 'expired' ? 'Expired' : 'Expires'} ${new Date(key.expires_at).toLocaleString()}`}
                     {key.last_used_at &&
                       ` • Last used ${new Date(key.last_used_at).toLocaleDateString()}`}
                   </p>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
-                  {key.is_active ? (
-                    <span className="badge-green">Active</span>
-                  ) : (
-                    <span className="badge-red">Inactive</span>
-                  )}
+                  <AccessKeyBadges
+                    status={key.status}
+                    isActive={key.is_active}
+                    temporary={key.temporary}
+                    expiresAt={key.expires_at}
+                  />
                   <button
                     onClick={() => handleRevokeKey(key.id)}
                     title="Revoke access key"

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { FolderOpen, Upload, Download, Trash2, File as FileIcon, ArrowLeft, RefreshCw, Folder, FolderPlus, Home, Loader2, Pencil, Columns2, Info, Copy, ExternalLink, Search, X, Calendar, Filter, ChevronRight, CheckCircle2, XCircle, Link2, Check, History, Settings2, Lock } from 'lucide-react'
+import { FolderOpen, Upload, Download, Trash2, File as FileIcon, ArrowLeft, RefreshCw, Folder, FolderPlus, Home, Loader2, Pencil, Columns2, Info, Copy, ExternalLink, Search, X, Calendar, Filter, ChevronRight, CheckCircle2, XCircle, Link2, Check, History, Settings2, Lock, ArchiveRestore, Undo2 } from 'lucide-react'
 import { bucketApi } from '../services/api'
-import type { ObjectVersion } from '../services/api'
+import type { DeletedObject, ObjectVersion } from '../services/api'
 import type { Object as StorageObject, Bucket } from '../types'
 import { getErrorMessage, getErrorStatus } from '../utils/errors'
 import { useAsyncLoad } from '../utils/useAsyncLoad'
@@ -37,6 +37,38 @@ interface FileItem extends StorageObject {
 
 type BrowserItem = FolderItem | FileItem
 
+// A folder shown in the "Show deleted" view: a path segment under which at
+// least one deleted-but-recoverable key lives.
+interface DeletedFolderItem {
+  name: string
+  prefix: string
+  keys: DeletedObject[]
+}
+
+// S3 has no directories: a "folder" is a key prefix ending in "/". Its
+// optional zero-byte "<prefix>" marker object (the S3 convention) and the
+// legacy "<prefix>.keep" placeholder older console versions wrote are never
+// shown as files.
+const isFolderPlaceholder = (obj: { key: string; size: number }): boolean =>
+  obj.key.endsWith('/') || (obj.size === 0 && obj.key.endsWith('/.keep'))
+
+// S3's object key limit, in UTF-8 bytes.
+const MAX_KEY_BYTES = 1024
+const utf8Length = (s: string): number => new TextEncoder().encode(s).length
+
+// Why a new folder name is unusable at prefix, or '' when it is fine.
+const folderNameProblem = (prefix: string, name: string): string => {
+  if (name.trim() === '') return 'Enter a folder name'
+  if (name.includes('/')) return 'A folder name cannot contain "/" — create one level at a time'
+  if (utf8Length(prefix + name + '/') > MAX_KEY_BYTES) {
+    return `The folder path would exceed S3's ${MAX_KEY_BYTES}-byte key limit`
+  }
+  return ''
+}
+
+// Display name of a path segment ("" for keys like "a//b" or "/x").
+const segmentLabel = (name: string): string => (name === '' ? '(empty name)' : name)
+
 interface ActiveUpload {
   uploadId: string
   filename: string
@@ -63,6 +95,10 @@ export default function BucketDetails() {
   const [loadingMore, setLoadingMore] = useState(false)
   const [showCreateFolderModal, setShowCreateFolderModal] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
+  const [createFolderError, setCreateFolderError] = useState('')
+  const [notice, setNotice] = useState('')
+  // Pages of the listing appended via "Load more" (0 = first page only).
+  const [extraPagesLoaded, setExtraPagesLoaded] = useState(0)
   const [createFolderPane, setCreateFolderPane] = useState<'left' | 'right'>('left')
   const [createFolderFromContextMenu, setCreateFolderFromContextMenu] = useState(false)
   const [activeUploads, setActiveUploads] = useState<ActiveUpload[]>([])
@@ -135,6 +171,16 @@ export default function BucketDetails() {
   const [replicateTo, setReplicateTo] = useState('')
   const [generalSaving, setGeneralSaving] = useState(false)
 
+  // "Show deleted" view (versioned buckets): keys under the current prefix
+  // whose latest version is a delete marker.
+  const [showDeleted, setShowDeleted] = useState(false)
+  const [deletedObjects, setDeletedObjects] = useState<DeletedObject[]>([])
+  const [deletedLoading, setDeletedLoading] = useState(false)
+  const [deletedError, setDeletedError] = useState('')
+  const [deletedTruncated, setDeletedTruncated] = useState(false)
+  const [deletedToken, setDeletedToken] = useState<string | undefined>(undefined)
+  const [restoringKeys, setRestoringKeys] = useState<Set<string>>(new Set())
+
   // Search and filter state
   const [searchQuery, setSearchQuery] = useState('')
   const [showFilters, setShowFilters] = useState(false)
@@ -175,6 +221,7 @@ export default function BucketDetails() {
       const objectList = Array.isArray(data) ? data : data.objects || []
       setListDenied(false)
       setObjects(objectList)
+      setExtraPagesLoaded(0)
       if (!Array.isArray(data)) {
         setTruncated(!!data.is_truncated)
         setContinuationToken(data.next_continuation_token)
@@ -201,6 +248,7 @@ export default function BucketDetails() {
       const data = await bucketApi.listObjects(bucketName, { continuationToken })
       const more = Array.isArray(data) ? data : data.objects || []
       setObjects(prev => [...prev, ...more])
+      setExtraPagesLoaded(n => n + 1)
       if (!Array.isArray(data)) {
         setTruncated(!!data.is_truncated)
         setContinuationToken(data.next_continuation_token)
@@ -306,6 +354,65 @@ export default function BucketDetails() {
   useAsyncLoad(loadObjects, !!bucketName)
   useAsyncLoad(loadActiveUploads, !!bucketName)
 
+  // The bucket's versioning state decides whether "Show deleted" is offered.
+  // Callers without GetBucketLocation just don't get the toggle.
+  const loadBucketInfo = useCallback(async () => {
+    if (!bucketName) return
+    try {
+      setBucketInfo(await bucketApi.getBucket(bucketName))
+    } catch {
+      // Not fatal: the object listing works without it.
+    }
+  }, [bucketName])
+  useAsyncLoad(loadBucketInfo, !!bucketName)
+  const bucketVersioned = bucketInfo?.versioning === 'enabled' || bucketInfo?.versioning === 'suspended'
+
+  const loadDeletedObjects = useCallback(async (prefix: string, continuation?: string) => {
+    if (!bucketName) return
+    setDeletedLoading(true)
+    setDeletedError('')
+    try {
+      const data = await bucketApi.listDeletedObjects(bucketName, { prefix, continuationToken: continuation })
+      setDeletedObjects(prev => (continuation ? [...prev, ...(data.objects || [])] : data.objects || []))
+      setDeletedTruncated(!!data.is_truncated)
+      setDeletedToken(data.next_continuation_token || undefined)
+    } catch (error) {
+      console.error('Failed to load deleted objects:', error)
+      if (!continuation) setDeletedObjects([])
+      setDeletedError(getErrorMessage(error, 'Failed to load deleted objects'))
+    } finally {
+      setDeletedLoading(false)
+    }
+  }, [bucketName])
+
+  // The deleted view is scoped to the current folder: reload it on navigation.
+  const loadDeletedForView = useCallback(
+    () => loadDeletedObjects(currentPrefix),
+    [currentPrefix, loadDeletedObjects]
+  )
+  useAsyncLoad(loadDeletedForView, showDeleted)
+
+  // Changes made outside this page (an S3 client deleting a folder, another
+  // tab) show up when the user comes back to it. Skipped once extra pages were
+  // loaded, as a reload would drop them.
+  const lastFocusRefreshRef = useRef(0)
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return
+      const now = Date.now()
+      if (now - lastFocusRefreshRef.current < 2000) return
+      lastFocusRefreshRef.current = now
+      if (extraPagesLoaded === 0) void loadObjects()
+      if (showDeleted) void loadDeletedObjects(currentPrefix)
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', onVisible)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', onVisible)
+    }
+  }, [extraPagesLoaded, loadObjects, showDeleted, currentPrefix, loadDeletedObjects])
+
   // Parse objects into folders and files for a given prefix
   const getBrowserItemsForPrefix = (prefix: string): BrowserItem[] => {
     const items: BrowserItem[] = []
@@ -323,12 +430,13 @@ export default function BucketDetails() {
       // Check if this is a subfolder or a file in current directory
       const slashIndex = relativePath.indexOf('/')
 
-      if (slashIndex > 0) {
-        // This is in a subfolder
-        const folderName = relativePath.substring(0, slashIndex)
-        folders.add(folderName)
-      } else if (relativePath.length > 0 && relativePath !== '.keep') {
-        // This is a file in current directory (skip .keep files)
+      if (slashIndex >= 0) {
+        // In a subfolder — or the subfolder's own "name/" marker. The name
+        // may be empty (keys like "a//b" or "/x").
+        folders.add(relativePath.substring(0, slashIndex))
+      } else if (relativePath.length > 0 && !isFolderPlaceholder(obj)) {
+        // A file in this folder. The folder's own "prefix" marker has an
+        // empty relative path and is not listed.
         items.push({ ...obj, isFolder: false })
       }
     })
@@ -355,7 +463,7 @@ export default function BucketDetails() {
     if (prefix === '') return []
     const parts = prefix.slice(0, -1).split('/')
     return parts.map((part, index) => ({
-      name: part,
+      name: segmentLabel(part),
       prefix: parts.slice(0, index + 1).join('/') + '/',
     }))
   }
@@ -444,7 +552,7 @@ export default function BucketDetails() {
     if (!hasActiveFilters) return []
 
     return objects
-      .filter(obj => !obj.key.endsWith('.keep')) // Skip .keep files
+      .filter(obj => !isFolderPlaceholder(obj)) // folder markers are not files
       .filter(matchesSearchCriteria)
       .map(obj => ({ ...obj, isFolder: false as const }))
   }
@@ -549,28 +657,92 @@ export default function BucketDetails() {
     }
   }
 
+  const closeCreateFolderModal = () => {
+    setShowCreateFolderModal(false)
+    setNewFolderName('')
+    setCreateFolderError('')
+  }
+
   const handleCreateFolder = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!bucketName || !newFolderName.trim()) return
+    if (!bucketName) return
 
+    // Use the appropriate prefix based on selected pane
+    const targetPrefix = splitView && createFolderPane === 'right' ? rightPrefix : currentPrefix
+    const name = newFolderName.trim()
+    const problem = folderNameProblem(targetPrefix, name)
+    if (problem) {
+      setCreateFolderError(problem)
+      return
+    }
+    const folderKey = targetPrefix + name + '/'
+    if (objects.some(obj => obj.key.startsWith(folderKey))) {
+      setCreateFolderError(`A folder named "${name}" already exists here`)
+      return
+    }
+
+    setCreateFolderError('')
     setError('')
-
     try {
-      // Use the appropriate prefix based on selected pane
-      const targetPrefix = splitView && createFolderPane === 'right' ? rightPrefix : currentPrefix
-      // Create a zero-byte object with trailing slash to represent the folder
-      const folderKey = targetPrefix + newFolderName.trim() + '/.keep'
-      const emptyBlob = new Blob([''], { type: 'text/plain' })
-      const emptyFile = new File([emptyBlob], '.keep', { type: 'text/plain' })
-
-      await bucketApi.uploadObject(bucketName, folderKey, emptyFile)
-
-      setShowCreateFolderModal(false)
-      setNewFolderName('')
+      // The zero-byte "name/" marker object S3 tools use for folders.
+      await bucketApi.createFolder(bucketName, folderKey)
+      closeCreateFolderModal()
       await loadObjects()
     } catch (error) {
       console.error('Failed to create folder:', error)
-      setError(getErrorMessage(error, 'Failed to create folder'))
+      setCreateFolderError(
+        getErrorStatus(error) === 403
+          ? "You don't have permission to create objects here"
+          : getErrorMessage(error, 'Failed to create folder')
+      )
+    }
+  }
+
+  // Deletes a folder: every object under its prefix, including the folder's
+  // own marker — done server-side, so the count is exact even when the
+  // listing here is truncated.
+  const handleDeleteFolder = async (folder: FolderItem) => {
+    if (!bucketName) return
+    setContextMenu(prev => ({ ...prev, show: false }))
+    setError('')
+    setNotice('')
+    try {
+      const summary = await bucketApi.getFolderSummary(bucketName, folder.prefix)
+      if (summary.too_large) {
+        setError(
+          `Folder "${folder.prefix}" holds ${summary.object_count.toLocaleString()} objects; the console deletes at most ` +
+          `${summary.max_objects.toLocaleString()} at once. Delete its subfolders first or use an S3 client (aws s3 rm --recursive).`
+        )
+        return
+      }
+      const n = summary.object_count
+      const what = n === 0
+        ? 'It holds no objects.'
+        : `This deletes ${n.toLocaleString()} object${n === 1 ? '' : 's'} (including the folder marker, if any).`
+      const versioned = summary.versioning === 'enabled'
+      const tail = versioned
+        ? 'Versioning is on: the objects get delete markers and can be restored from "Show deleted".'
+        : 'This cannot be undone.'
+      if (!confirm(`Delete folder "${folder.prefix}"?\n\n${what}\n${tail}`)) return
+
+      const result = await bucketApi.deleteFolder(bucketName, folder.prefix)
+      const skipped: string[] = []
+      if (result.denied > 0) skipped.push(`${result.denied} you don't have permission to delete`)
+      if (result.skipped_retention > 0) skipped.push(`${result.skipped_retention} under retention`)
+      if (skipped.length > 0) {
+        setError(`Deleted ${result.deleted} object${result.deleted === 1 ? '' : 's'}; kept ${skipped.join(' and ')}.`)
+      } else {
+        setNotice(`Deleted folder "${folder.prefix}" (${result.deleted} object${result.deleted === 1 ? '' : 's'}).`)
+      }
+    } catch (error) {
+      console.error('Failed to delete folder:', error)
+      setError(
+        getErrorStatus(error) === 403
+          ? `Permission denied: ${getErrorMessage(error, "you can't delete this folder")}`
+          : getErrorMessage(error, 'Failed to delete folder')
+      )
+    } finally {
+      await loadObjects()
     }
   }
 
@@ -809,7 +981,7 @@ export default function BucketDetails() {
     }
   }
 
-  const handleVersionHistoryClick = (object: StorageObject) => {
+  const handleVersionHistoryClick = (object: { key: string }) => {
     setVersionsTarget(object.key)
     setVersions([])
     setVersionsError('')
@@ -833,6 +1005,7 @@ export default function BucketDetails() {
       await bucketApi.restoreObjectVersion(bucketName, versionsTarget, versionId)
       await loadVersions(versionsTarget)
       await loadObjects()
+      if (showDeleted) await loadDeletedObjects(currentPrefix)
     } catch (error) {
       console.error('Failed to restore version:', error)
       setVersionsError(getErrorMessage(error, 'Failed to restore version'))
@@ -848,10 +1021,70 @@ export default function BucketDetails() {
       await bucketApi.deleteObjectVersion(bucketName, versionsTarget, versionId)
       await loadVersions(versionsTarget)
       await loadObjects()
+      if (showDeleted) await loadDeletedObjects(currentPrefix)
     } catch (error) {
       console.error('Failed to delete version:', error)
       setVersionsError(getErrorMessage(error, 'Failed to delete version'))
     }
+  }
+
+  // Undelete: removing a key's latest delete marker makes its newest surviving
+  // version current again (S3 semantics).
+  const restoreDeletedKeys = async (items: DeletedObject[]): Promise<{ restored: number; failures: string[] }> => {
+    if (!bucketName) return { restored: 0, failures: [] }
+    let restored = 0
+    const failures: string[] = []
+    setRestoringKeys(prev => new Set([...prev, ...items.map(i => i.key)]))
+    try {
+      for (const item of items) {
+        try {
+          await bucketApi.deleteObjectVersion(bucketName, item.key, item.delete_marker_version_id)
+          restored++
+        } catch (error) {
+          failures.push(
+            getErrorStatus(error) === 403
+              ? `${item.key}: permission denied`
+              : `${item.key}: ${getErrorMessage(error, 'restore failed')}`
+          )
+        }
+      }
+    } finally {
+      setRestoringKeys(prev => {
+        const next = new Set(prev)
+        items.forEach(i => next.delete(i.key))
+        return next
+      })
+    }
+    return { restored, failures }
+  }
+
+  const reportRestore = (restored: number, failures: string[]) => {
+    if (failures.length > 0) {
+      const more = failures.length > 3 ? ` (and ${failures.length - 3} more)` : ''
+      setError(`Restored ${restored}; failed ${failures.length}: ${failures.slice(0, 3).join('; ')}${more}`)
+    } else {
+      setNotice(`Restored ${restored} object${restored === 1 ? '' : 's'}.`)
+    }
+  }
+
+  const handleRestoreDeleted = async (item: DeletedObject) => {
+    setError('')
+    setNotice('')
+    const { restored, failures } = await restoreDeletedKeys([item])
+    reportRestore(restored, failures)
+    await Promise.all([loadObjects(), loadDeletedObjects(currentPrefix)])
+  }
+
+  const handleRestoreDeletedFolder = async (folder: DeletedFolderItem) => {
+    const items = folder.keys.filter(k => k.recoverable)
+    if (items.length === 0) return
+    const partial = deletedTruncated ? ' (only the deleted objects loaded so far)' : ''
+    if (!confirm(`Restore ${items.length} deleted object${items.length === 1 ? '' : 's'} under "${folder.prefix}"${partial}?`)) return
+    setError('')
+    setNotice('')
+    const { restored, failures } = await restoreDeletedKeys(items)
+    reportRestore(restored, failures)
+    await Promise.all([loadObjects(), loadDeletedObjects(currentPrefix)])
   }
 
   // Bucket settings handlers
@@ -1102,6 +1335,185 @@ export default function BucketDetails() {
   const rightBreadcrumbs = getBreadcrumbsForPrefix(rightPrefix)
   const isSearchMode = !!hasActiveFilters
 
+  // "Show deleted" rows for the current folder, grouped by the next path
+  // segment like the normal listing.
+  const getDeletedItemsForPrefix = (prefix: string): { folders: DeletedFolderItem[]; files: DeletedObject[] } => {
+    const folders = new Map<string, DeletedFolderItem>()
+    const files: DeletedObject[] = []
+    deletedObjects.forEach(obj => {
+      if (!obj.key.startsWith(prefix)) return
+      const rel = obj.key.substring(prefix.length)
+      if (rel === '') return // this folder's own marker
+      const slash = rel.indexOf('/')
+      if (slash >= 0) {
+        const name = rel.substring(0, slash)
+        const folder = folders.get(name) ?? { name, prefix: prefix + name + '/', keys: [] }
+        folder.keys.push(obj)
+        folders.set(name, folder)
+      } else if (!isFolderPlaceholder(obj)) {
+        files.push(obj)
+      }
+    })
+    return { folders: Array.from(folders.values()), files }
+  }
+
+  const renderDeletedView = () => {
+    const { folders, files } = getDeletedItemsForPrefix(currentPrefix)
+    const empty = folders.length === 0 && files.length === 0
+    return (
+      <>
+        {/* Breadcrumbs */}
+        <div className="flex items-center gap-1 text-sm mb-4 flex-wrap">
+          <button
+            onClick={() => setCurrentPrefix('')}
+            className={`flex items-center gap-1.5 px-1.5 py-0.5 rounded-md transition-colors ${
+              leftBreadcrumbs.length === 0 ? 'text-dark-text font-medium' : 'text-dark-textSecondary hover:text-dark-text'
+            }`}
+          >
+            <Home className="w-3.5 h-3.5" />
+            <span>{bucketName}</span>
+          </button>
+          {leftBreadcrumbs.map((crumb, index) => (
+            <div key={index} className="flex items-center gap-1">
+              <ChevronRight className="w-3.5 h-3.5 text-dark-textMuted shrink-0" />
+              <button
+                onClick={() => navigateToFolder(crumb.prefix)}
+                className={`px-1.5 py-0.5 rounded-md transition-colors ${
+                  index === leftBreadcrumbs.length - 1 ? 'text-dark-text font-medium' : 'text-dark-textSecondary hover:text-dark-text'
+                }`}
+              >
+                {crumb.name}
+              </button>
+            </div>
+          ))}
+          <span className="badge-red ml-2">Deleted objects</span>
+        </div>
+
+        <div className="alert-info mb-4">
+          <span>
+            Objects deleted from this folder while versioning was on. Restoring one removes its delete marker, so its
+            latest version becomes current again.{isSearchMode ? ' Search and filters do not apply to this view.' : ''}
+          </span>
+        </div>
+
+        {deletedError && <div className="alert-error mb-4">{deletedError}</div>}
+
+        {deletedLoading && deletedObjects.length === 0 ? (
+          <div className="flex items-center justify-center py-12">
+            <div className="spinner" />
+          </div>
+        ) : empty ? (
+          <div className="card empty-state">
+            <ArchiveRestore className="empty-state-icon" />
+            <h3 className="text-base font-semibold text-dark-text mb-1">No deleted objects here</h3>
+            <p className="text-sm text-dark-textSecondary max-w-sm">
+              Nothing under this folder has a delete marker as its latest version.
+            </p>
+          </div>
+        ) : (
+          <div className="card overflow-hidden">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th className="text-right!">Size</th>
+                  <th className="text-right!">Deleted</th>
+                  <th className="text-right!">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {folders.map(folder => {
+                  const recoverable = folder.keys.filter(k => k.recoverable).length
+                  return (
+                    <tr key={`deleted-folder-${folder.prefix}`} className="cursor-pointer">
+                      <td onClick={() => navigateToFolder(folder.prefix)}>
+                        <div className="flex items-center gap-2.5">
+                          <Folder className="w-4 h-4 shrink-0 text-dark-textMuted" />
+                          <span className="text-dark-textSecondary font-medium line-through decoration-dark-textMuted">
+                            {segmentLabel(folder.name)}/
+                          </span>
+                          <span className="badge-gray">
+                            {folder.keys.length}{deletedTruncated ? '+' : ''} deleted
+                          </span>
+                        </div>
+                      </td>
+                      <td className="text-right! tabular-nums text-xs !text-dark-textMuted">—</td>
+                      <td className="text-right! tabular-nums text-xs !text-dark-textMuted">—</td>
+                      <td>
+                        <div className="flex items-center justify-end gap-1">
+                          <button
+                            onClick={() => void handleRestoreDeletedFolder(folder)}
+                            disabled={recoverable === 0 || folder.keys.some(k => restoringKeys.has(k.key))}
+                            className="btn-secondary btn-sm"
+                            title={recoverable === 0 ? 'No earlier versions survive' : `Restore ${recoverable} object(s) under this folder`}
+                          >
+                            <Undo2 className="w-3.5 h-3.5" />
+                            Restore all
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+                {files.map(item => (
+                  <tr key={`deleted-${item.key}`}>
+                    <td>
+                      <div className="flex items-center gap-2.5">
+                        <FileIcon className="w-4 h-4 shrink-0 text-dark-textMuted" />
+                        <span className="text-dark-textSecondary line-through decoration-dark-textMuted break-all">
+                          {item.key.substring(currentPrefix.length)}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="text-right! tabular-nums !text-dark-textSecondary text-xs whitespace-nowrap">
+                      {item.recoverable ? formatFileSize(item.size) : '—'}
+                    </td>
+                    <td className="text-right! tabular-nums !text-dark-textSecondary text-xs whitespace-nowrap">
+                      {new Date(item.deleted_at).toLocaleString()}
+                    </td>
+                    <td>
+                      <div className="flex items-center justify-end gap-1">
+                        <button
+                          onClick={() => void handleRestoreDeleted(item)}
+                          disabled={!item.recoverable || restoringKeys.has(item.key)}
+                          className="btn-secondary btn-sm"
+                          title={item.recoverable ? 'Restore the latest version' : 'No earlier version survives'}
+                        >
+                          {restoringKeys.has(item.key) ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Undo2 className="w-3.5 h-3.5" />}
+                          Restore
+                        </button>
+                        <button
+                          onClick={() => handleVersionHistoryClick(item)}
+                          className="btn-icon"
+                          title="Version history"
+                        >
+                          <History className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {deletedTruncated && (
+          <div className="alert-info mt-4 items-center! justify-between gap-4">
+            <span>More deleted objects exist under this folder than are shown.</span>
+            <button
+              onClick={() => void loadDeletedObjects(currentPrefix, deletedToken)}
+              disabled={deletedLoading || !deletedToken}
+              className="btn-secondary btn-sm shrink-0"
+            >
+              {deletedLoading ? 'Loading...' : 'Load more'}
+            </button>
+          </div>
+        )}
+      </>
+    )
+  }
+
   return (
     <div className="page">
       {/* Header */}
@@ -1117,7 +1529,9 @@ export default function BucketDetails() {
           <div>
             <h1 className="page-title font-mono">{bucketName}</h1>
             <p className="page-subtitle">
-              {browserItems.length} item{browserItems.length !== 1 ? 's' : ''}
+              {showDeleted
+                ? `${deletedObjects.length}${deletedTruncated ? '+' : ''} deleted object${deletedObjects.length !== 1 ? 's' : ''} in this folder`
+                : `${browserItems.length} item${browserItems.length !== 1 ? 's' : ''}`}
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -1129,6 +1543,7 @@ export default function BucketDetails() {
                 setSplitView(!splitView)
                 if (!splitView) {
                   setRightPrefix(currentPrefix) // Initialize right pane to same location
+                  setShowDeleted(false) // the deleted view is single-pane
                 }
               }}
               className={
@@ -1141,7 +1556,31 @@ export default function BucketDetails() {
               <Columns2 className="w-4 h-4" />
               Split View
             </button>
-            <button onClick={loadObjects} className="btn-icon" title="Refresh">
+            {bucketVersioned && (
+              <button
+                onClick={() => {
+                  if (!showDeleted) setSplitView(false)
+                  setShowDeleted(!showDeleted)
+                }}
+                className={
+                  showDeleted
+                    ? 'btn-secondary bg-accent-soft! text-blue-400! border-blue-500/40!'
+                    : 'btn-secondary'
+                }
+                title={showDeleted ? 'Back to current objects' : 'List deleted objects that can be restored'}
+              >
+                <ArchiveRestore className="w-4 h-4" />
+                {showDeleted ? 'Hide deleted' : 'Show deleted'}
+              </button>
+            )}
+            <button
+              onClick={() => {
+                void loadObjects()
+                if (showDeleted) void loadDeletedObjects(currentPrefix)
+              }}
+              className="btn-icon"
+              title="Refresh"
+            >
               <RefreshCw className="w-4 h-4" />
             </button>
             <button
@@ -1367,7 +1806,7 @@ export default function BucketDetails() {
           )}
 
           {/* Search Results Info */}
-          {isSearchMode && (
+          {isSearchMode && !showDeleted && (
             <div className="mt-3 flex items-center gap-2 text-sm text-dark-textSecondary">
               <Search className="w-4 h-4 text-dark-textMuted" />
               <span>
@@ -1434,8 +1873,17 @@ export default function BucketDetails() {
         </div>
       )}
 
+      {notice && (
+        <div className="alert-success mb-6 items-center! justify-between gap-4">
+          <span>{notice}</span>
+          <button onClick={() => setNotice('')} className="btn-icon w-6! h-6!" title="Dismiss">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* Pane Content */}
-      {splitView ? (
+      {showDeleted ? renderDeletedView() : splitView ? (
         // Dual pane view
         <div className="flex gap-4">
           {/* Left Pane */}
@@ -1538,11 +1986,21 @@ export default function BucketDetails() {
                         <td onClick={() => navigateToFolder(item.prefix, 'left')}>
                           <div className="flex items-center gap-2.5">
                             <Folder className={`w-4 h-4 shrink-0 ${dropTarget === item.prefix ? 'text-blue-300' : 'text-blue-400'}`} />
-                            <span className="text-dark-text font-medium truncate">{item.name}/</span>
+                            <span className="text-dark-text font-medium truncate">{segmentLabel(item.name)}/</span>
                           </div>
                         </td>
                         <td className="text-right! tabular-nums text-xs !text-dark-textMuted">—</td>
-                        <td></td>
+                        <td>
+                          <div className="flex items-center justify-end gap-1">
+                            <button
+                              onClick={(e) => { e.stopPropagation(); void handleDeleteFolder(item) }}
+                              className="btn-icon hover:text-red-400! hover:bg-red-500/10!"
+                              title="Delete folder"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </td>
                       </tr>
                     ) : (
                       <tr
@@ -1693,11 +2151,21 @@ export default function BucketDetails() {
                         <td onClick={() => navigateToFolder(item.prefix, 'right')}>
                           <div className="flex items-center gap-2.5">
                             <Folder className={`w-4 h-4 shrink-0 ${dropTarget === item.prefix ? 'text-blue-300' : 'text-blue-400'}`} />
-                            <span className="text-dark-text font-medium truncate">{item.name}/</span>
+                            <span className="text-dark-text font-medium truncate">{segmentLabel(item.name)}/</span>
                           </div>
                         </td>
                         <td className="text-right! tabular-nums text-xs !text-dark-textMuted">—</td>
-                        <td></td>
+                        <td>
+                          <div className="flex items-center justify-end gap-1">
+                            <button
+                              onClick={(e) => { e.stopPropagation(); void handleDeleteFolder(item) }}
+                              className="btn-icon hover:text-red-400! hover:bg-red-500/10!"
+                              title="Delete folder"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </td>
                       </tr>
                     ) : (
                       <tr
@@ -1900,13 +2368,23 @@ export default function BucketDetails() {
                         <td onClick={() => navigateToFolder(item.prefix)}>
                           <div className="flex items-center gap-2.5">
                             <Folder className={`w-4 h-4 shrink-0 ${dropTarget === item.prefix ? 'text-blue-300' : 'text-blue-400'}`} />
-                            <span className="text-dark-text font-medium">{item.name}/</span>
+                            <span className="text-dark-text font-medium">{segmentLabel(item.name)}/</span>
                           </div>
                         </td>
                         <td className="text-right! tabular-nums text-xs !text-dark-textMuted">—</td>
                         <td className="!text-dark-textSecondary text-xs">Folder</td>
                         <td className="text-right! tabular-nums text-xs !text-dark-textMuted">—</td>
-                        <td></td>
+                        <td>
+                          <div className="flex items-center justify-end gap-1">
+                            <button
+                              onClick={(e) => { e.stopPropagation(); void handleDeleteFolder(item) }}
+                              className="btn-icon hover:text-red-400! hover:bg-red-500/10!"
+                              title="Delete folder"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </td>
                       </tr>
                     ) : (
                       <tr
@@ -2044,25 +2522,26 @@ export default function BucketDetails() {
                 <input
                   type="text"
                   value={newFolderName}
-                  onChange={(e) => setNewFolderName(e.target.value)}
+                  onChange={(e) => {
+                    setNewFolderName(e.target.value)
+                    setCreateFolderError('')
+                  }}
                   className="input"
                   placeholder="my-folder"
                   required
-                  pattern="[a-zA-Z0-9_\-]+"
-                  title="Only letters, numbers, hyphens, and underscores"
+                  autoFocus
                 />
                 <p className="help-text">
-                  Only letters, numbers, hyphens, and underscores
+                  Any name without "/" (e.g. <code>photos</code>, <code>2024.backup</code>, <code>a.txt</code>).
+                  Creates an empty <code>name/</code> folder marker, as S3 tools like the AWS console and rclone do.
                 </p>
+                {createFolderError && <div className="alert-error mt-3">{createFolderError}</div>}
               </div>
 
               <div className="flex justify-end gap-2 mt-6">
                 <button
                   type="button"
-                  onClick={() => {
-                    setShowCreateFolderModal(false)
-                    setNewFolderName('')
-                  }}
+                  onClick={closeCreateFolderModal}
                   className="btn-ghost"
                 >
                   Cancel
@@ -2200,20 +2679,7 @@ export default function BucketDetails() {
               </button>
               <div className="border-t border-dark-border my-1" />
               <button
-                onClick={() => {
-                  const folder = contextMenu.item as FolderItem
-                  if (!bucketName) return
-                  if (!confirm(`Delete folder "${folder.name}" and all its contents?`)) {
-                    setContextMenu(prev => ({ ...prev, show: false }))
-                    return
-                  }
-                  // Delete all objects with this prefix
-                  const objectsToDelete = objects.filter(obj => obj.key.startsWith(folder.prefix))
-                  Promise.all(objectsToDelete.map(obj => bucketApi.deleteObject(bucketName, obj.key)))
-                    .then(() => loadObjects())
-                    .catch((err) => setError(getErrorMessage(err, 'Failed to delete folder')))
-                  setContextMenu(prev => ({ ...prev, show: false }))
-                }}
+                onClick={() => void handleDeleteFolder(contextMenu.item as FolderItem)}
                 className="w-full px-3 py-2 text-left text-sm text-red-400 hover:bg-red-500/10 flex items-center gap-2.5 transition-colors"
               >
                 <Trash2 className="w-4 h-4" />

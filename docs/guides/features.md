@@ -59,7 +59,7 @@ Version ids are UUIDs; objects written before versioning report id `null`.
   (no AWS null-version overwrite behavior).
 - Console **move/rename** relocate an object together with its identity — no
   versions or markers are recorded for a move.
-- Version bytes live in hidden storage (`.versions/` locally, a
+- Version bytes live in hidden storage (`.objversions/` locally, a
   `.bkt-versions/` prefix inside the real bucket on the S3 backend) and never
   appear in listings.
 
@@ -281,23 +281,26 @@ Configure in bucket Settings → Replication.
 
 ## Object keys and uploads
 
-- On every bucket, `..`, a leading `/`, backslashes and NUL bytes are
-  rejected, and the `.bkt-versions/` prefix is reserved for bkt's version
-  storage.
-- On **local**-backend buckets keys must also be canonical paths: empty
-  segments (`a//b`) and `.` segments (`./x`, `a/./b`) are rejected, because
-  the filesystem would alias them onto another key. On **S3**-backed buckets
-  those are distinct, valid S3 keys and are accepted.
+- Object keys follow S3's rules on **every** bucket and backend: any
+  non-empty, valid UTF-8 string of at most 1024 bytes. Keys are opaque — `..`,
+  a leading `/`, backslashes, empty segments (`a//b`), `.` segments (`./x`),
+  very long segments and emoji are ordinary characters, and `p` and `p/q` (or
+  a folder marker `m/` and an object `m`) are independent objects that
+  coexist. Only NUL bytes are rejected, and the `.bkt-versions/` prefix is
+  reserved for bkt's version storage.
+- The local backend never uses a key as a filesystem path: it stores each
+  object under the SHA-256 of its key (see
+  [on-disk layout](../deployment/backup-restore.md#on-disk-layout-local-backend)),
+  so no key can alias another key, reach another bucket or escape the storage
+  root, and the filesystem's name rules (255-byte names, `.`/`..`) don't
+  apply.
 - S3 folder-marker objects (keys ending in `/`, created by s3fs `mkdir`,
-  Cyberduck/rclone "new folder" or `aws s3api put-object --key dir/`) work on
-  both backends. The local backend stores `dir/` as the file
-  `dir/.bkt-folder` inside the folder, so the marker and the folder's
-  contents (`dir/file.txt`) coexist; deleting `dir/` removes only the marker.
-  The name `.bkt-folder` is therefore reserved as a key segment on local
-  buckets. Folder markers created by earlier releases (stored as an empty
-  file `dir`) stay readable and deletable, and re-creating the marker
-  upgrades them. A local bucket still cannot hold both an object `dir` and a
-  folder `dir/` (a file and a directory of the same name).
+  Cyberduck/rclone "new folder" or `aws s3api put-object --key dir/`) are
+  ordinary objects on both backends: they coexist with the folder's contents
+  (`dir/file.txt`) and with an object `dir`; deleting `dir/` removes only the
+  marker.
+- Console downloads name the file after the key's last segment (sanitized;
+  `..`-only or empty names become `download`).
 - `aws-chunked` uploads must send `X-Amz-Decoded-Content-Length` (as on AWS);
   the decoded length is enforced exactly. Signed streaming uploads
   (`STREAMING-AWS4-HMAC-SHA256-PAYLOAD[-TRAILER]`) have every chunk signature

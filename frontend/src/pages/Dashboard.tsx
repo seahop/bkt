@@ -4,6 +4,7 @@ import { FolderOpen, Key, Shield, ArrowRight } from 'lucide-react'
 import { bucketApi, accessKeyApi } from '../services/api'
 import { listPolicies } from '../services/policy'
 import type { Bucket, AccessKey } from '../types'
+import { keyIsActive } from '../utils/accessKeys'
 import { useAsyncLoad } from '../utils/useAsyncLoad'
 
 export default function Dashboard() {
@@ -54,7 +55,7 @@ export default function Dashboard() {
     },
     {
       label: 'Access Keys',
-      value: accessKeys.length,
+      value: accessKeys.filter(keyIsActive).length,
       icon: Key,
       color: 'text-green-500',
       bgColor: 'bg-green-500/10',

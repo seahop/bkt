@@ -9,6 +9,7 @@ import (
 	"net"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gabriel-vasile/mimetype"
 )
@@ -56,78 +57,35 @@ func ValidateBucketName(name string) error {
 	return nil
 }
 
-// ValidateObjectKey validates object key to prevent path traversal and other attacks
+// MaxObjectKeyBytes is S3's object key length limit (UTF-8 bytes).
+const MaxObjectKeyBytes = 1024
+
+// ValidateObjectKey applies S3's own object key rules plus bkt's reserved
+// keyspace, for every storage backend: a key is any non-empty, valid UTF-8
+// string of at most 1024 bytes without NUL bytes, outside the reserved
+// ".bkt-versions/" prefix. Keys are opaque: "..", a leading "/", "\", "//",
+// "." segments or very long segments are ordinary characters. No storage
+// backend uses a key as a filesystem path (the local backend stores objects
+// under the SHA-256 of the key), so no path-safety rule belongs here — and
+// code that derives something path- or header-like from a key (download file
+// names, folder views) must sanitize it itself.
 func ValidateObjectKey(key string) error {
-	// Check for empty key
 	if key == "" {
 		return fmt.Errorf("object key cannot be empty")
 	}
-
-	// Max length check (1024 bytes for S3)
-	if len(key) > 1024 {
-		return fmt.Errorf("object key cannot exceed 1024 characters")
+	if len(key) > MaxObjectKeyBytes {
+		return fmt.Errorf("object key cannot exceed %d bytes", MaxObjectKeyBytes)
 	}
-
-	// Check for path traversal patterns
-	if strings.Contains(key, "..") {
-		return fmt.Errorf("object key cannot contain '..' path traversal")
+	if !utf8.ValidString(key) {
+		return fmt.Errorf("object key must be valid UTF-8")
 	}
-
-	// Check for absolute paths
-	if strings.HasPrefix(key, "/") {
-		return fmt.Errorf("object key cannot start with '/'")
-	}
-
-	// Check for null bytes (security risk)
-	if strings.Contains(key, "\x00") {
+	// NUL bytes are not representable in the metadata database (Postgres
+	// text) and break many clients.
+	if strings.ContainsRune(key, 0) {
 		return fmt.Errorf("object key cannot contain null bytes")
 	}
-
-	// Check for backslashes (Windows path separators - potential confusion)
-	if strings.Contains(key, "\\") {
-		return fmt.Errorf("object key cannot contain backslashes")
-	}
-
-	// Non-canonical spellings ("a//b", "./a", "a/./b") are distinct, valid
-	// keys on S3-backed buckets; only the local filesystem backend aliases
-	// them, so that rule lives in ValidateLocalObjectKey (applied per bucket).
-
 	if IsReservedObjectKey(key) {
 		return fmt.Errorf("object keys under %q are reserved", ReservedObjectKeyPrefix)
-	}
-
-	return nil
-}
-
-// LocalFolderMarkerName is the file the local storage backend uses to store
-// an S3 folder-marker object: the key "a/b/" (what s3fs mkdir, Cyberduck,
-// rclone and `aws s3api put-object --key a/b/` create) is stored as the file
-// "a/b/<LocalFolderMarkerName>", so the marker and the objects inside the
-// folder ("a/b/file.txt") coexist. User keys may not use this name as a path
-// segment on local-backend buckets.
-const LocalFolderMarkerName = ".bkt-folder"
-
-// ValidateLocalObjectKey applies the extra key rules of the local filesystem
-// backend on top of ValidateObjectKey's backend-independent checks. The
-// filesystem collapses "a//b", "./a" and "a/./b" onto the same file as "a/b",
-// so accepting them would let a caller reach one object through a key that
-// policy rules, versioning and the metadata index treat as a different
-// object: only canonical keys are accepted. Exactly one trailing "/" (a
-// folder-marker object) is allowed. The folder-marker file name is reserved.
-func ValidateLocalObjectKey(key string) error {
-	if err := ValidateObjectKey(key); err != nil {
-		return err
-	}
-	for _, seg := range strings.Split(strings.TrimSuffix(key, "/"), "/") {
-		if seg == "" {
-			return fmt.Errorf("object key cannot contain empty path segments ('//')")
-		}
-		if seg == "." {
-			return fmt.Errorf("object key cannot contain '.' path segments")
-		}
-		if seg == LocalFolderMarkerName {
-			return fmt.Errorf("object key cannot contain the reserved path segment %q", LocalFolderMarkerName)
-		}
 	}
 	return nil
 }

@@ -2,6 +2,8 @@ package storage
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,26 +17,82 @@ func newTestLocal(t *testing.T) *LocalStorage {
 	return NewLocalStorage(dir)
 }
 
-func TestResolveRejectsTraversal(t *testing.T) {
+func TestLocalBlobLayoutPaths(t *testing.T) {
 	ls := newTestLocal(t)
-	bad := []struct{ bucket, key string }{
-		{"b", "../escape"},
-		{"b", "../../etc/passwd"},
-		{"..", "x"},
-		{"b", "a/../../../../etc/passwd"},
+	key := "../../etc/passwd"
+	putString(t, ls, key, "x")
+	sum := sha256.Sum256([]byte(key))
+	h := hex.EncodeToString(sum[:])
+	if keyHash(key) != h {
+		t.Fatalf("keyHash(%q) = %q, want %q", key, keyHash(key), h)
 	}
-	for _, c := range bad {
-		if _, err := ls.resolve(c.bucket, c.key); err == nil {
-			t.Errorf("resolve(%q,%q) should have been rejected", c.bucket, c.key)
+	blob := filepath.Join(ls.rootPath, ".objects", "b", h[0:2], h[2:4], h)
+	if got, err := os.ReadFile(blob); err != nil || string(got) != "x" {
+		t.Fatalf("blob %s: %q, %v", blob, got, err)
+	}
+	if got, err := os.ReadFile(blob + ".key"); err != nil || string(got) != key {
+		t.Fatalf("sidecar: %q, %v", got, err)
+	}
+	// Nothing but the blob layout exists under the root.
+	entries, _ := os.ReadDir(ls.rootPath)
+	if len(entries) != 1 || entries[0].Name() != ".objects" {
+		t.Errorf("root holds %v, want only .objects", entries)
+	}
+
+	// Bucket names are the only caller-supplied path segment left: anything
+	// that is not a single, non-hidden segment is refused.
+	for _, b := range []string{"", ".", "..", ".versions", ".objects", "a/b", "a\\b", "../x"} {
+		if err := ls.PutObject(b, "k", bytes.NewReader(nil), 0, "", nil); err == nil {
+			t.Errorf("PutObject accepted bucket %q", b)
+		}
+		if _, err := ls.BucketExists(b); err == nil {
+			t.Errorf("BucketExists accepted bucket %q", b)
+		}
+		if err := ls.DeleteBucket(b); err == nil {
+			t.Errorf("DeleteBucket accepted bucket %q", b)
 		}
 	}
-	// A normal nested key must be allowed and stay under the root.
-	p, err := ls.resolve("b", "photos/2024/a.jpg")
-	if err != nil {
-		t.Fatalf("unexpected error for valid key: %v", err)
+	if err := ls.PutObject("b", "", bytes.NewReader(nil), 0, "", nil); err == nil {
+		t.Error("PutObject accepted an empty key")
 	}
-	if !strings.HasPrefix(p, ls.rootPath) {
-		t.Errorf("resolved path %q escaped root %q", p, ls.rootPath)
+}
+
+func TestLocalBucketLifecycle(t *testing.T) {
+	ls := newTestLocal(t)
+	if ok, err := ls.BucketExists("nb"); ok || err != nil {
+		t.Fatalf("BucketExists before create = %v, %v", ok, err)
+	}
+	if err := ls.CreateBucket("nb", ""); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := ls.BucketExists("nb"); !ok || err != nil {
+		t.Fatalf("BucketExists after create = %v, %v", ok, err)
+	}
+	if err := ls.PutObject("nb", "k", bytes.NewReader([]byte("v")), 1, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := ls.ArchiveObjectVersion("nb", "k", testVID); err != nil {
+		t.Fatal(err)
+	}
+	// A not-yet-migrated legacy bucket directory also counts as existing.
+	if err := os.MkdirAll(filepath.Join(ls.rootPath, "legacy", "x"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := ls.BucketExists("legacy"); !ok {
+		t.Error("legacy bucket directory not reported as existing")
+	}
+	_ = os.MkdirAll(filepath.Join(ls.rootPath, ".versions", "nb", "old"), 0o750)
+	_ = os.MkdirAll(filepath.Join(ls.rootPath, "nb", "old"), 0o750)
+	if err := ls.DeleteBucket("nb"); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{".objects/nb", ".objversions/nb", "nb", ".versions/nb"} {
+		if _, err := os.Stat(filepath.Join(ls.rootPath, p)); !os.IsNotExist(err) {
+			t.Errorf("%s survived DeleteBucket: %v", p, err)
+		}
+	}
+	if ok, _ := ls.BucketExists("nb"); ok {
+		t.Error("deleted bucket still exists")
 	}
 }
 
@@ -108,6 +166,20 @@ func TestMultipartUploadIDGuard(t *testing.T) {
 	}
 	if err := ls.AbortMultipartUpload("b", "k", "../../etc"); err == nil {
 		t.Error("AbortMultipartUpload accepted a non-UUID uploadID")
+	}
+	// uuid.Parse also accepts these (it does not even check the braces of the
+	// 38-character form); only the canonical form names a staging dir.
+	const id = "0b0c3b51-0000-4000-8000-0000000000aa"
+	for _, bad := range []string{"/" + id + "/", "." + id + ".", "{" + id + "}", "urn:uuid:" + id, strings.ToUpper(id), strings.ReplaceAll(id, "-", "")} {
+		if _, err := ls.multipartDir(bad); err == nil {
+			t.Errorf("multipartDir accepted %q", bad)
+		}
+		if _, err := ls.GetObjectVersion("b", "k", bad); err == nil || !strings.Contains(err.Error(), "invalid version id") {
+			t.Errorf("GetObjectVersion accepted version id %q (%v)", bad, err)
+		}
+	}
+	if _, err := ls.multipartDir(id); err != nil {
+		t.Errorf("multipartDir rejected a canonical id: %v", err)
 	}
 }
 

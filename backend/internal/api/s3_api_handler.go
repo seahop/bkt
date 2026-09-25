@@ -340,9 +340,10 @@ func (h *S3APIHandler) ListObjects(c *gin.Context) {
 				continue
 			}
 		}
-		if strings.HasSuffix(obj.Key, "/.keep") {
-			continue
-		}
+		// Every object is listed — including "dir/.keep" placeholders older
+		// console versions created. Hiding them made such folders impossible
+		// to remove with S3 tools (`aws s3 rm --recursive` never saw the
+		// placeholder, so the console kept showing the folder).
 		contents = append(contents, ObjectInfo{
 			Key:          obj.Key,
 			LastModified: obj.UpdatedAt,
@@ -599,7 +600,7 @@ func (h *S3APIHandler) PutObject(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 	userUUID := userID.(uuid.UUID)
 
-	// Validate object key to prevent path traversal and other attacks
+	// S3 key rules (length, UTF-8, NUL) and the reserved version keyspace.
 	if err := validation.ValidateObjectKey(objectKey); err != nil {
 		h.s3Error(c, "InvalidArgument", err.Error(), objectKey, http.StatusBadRequest)
 		return
@@ -609,10 +610,6 @@ func (h *S3APIHandler) PutObject(c *gin.Context) {
 	var bucket models.Bucket
 	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
 		h.s3Error(c, "NoSuchBucket", "The specified bucket does not exist", bucketName, http.StatusNotFound)
-		return
-	}
-	if err := validateKeyForBucket(&bucket, objectKey); err != nil {
-		h.s3Error(c, "InvalidArgument", err.Error(), objectKey, http.StatusBadRequest)
 		return
 	}
 
@@ -1046,11 +1043,6 @@ func (h *S3APIHandler) CopyObject(c *gin.Context, copySource string) {
 		h.s3Error(c, "NoSuchBucket", "Destination bucket does not exist", destBucket, http.StatusNotFound)
 		return
 	}
-	if err := validateKeyForBucket(&destBucketModel, destKey); err != nil {
-		h.s3Error(c, "InvalidArgument", err.Error(), destKey, http.StatusBadRequest)
-		return
-	}
-
 	sameObject := srcBucket == destBucket && srcKey == destKey
 	metaReplace := strings.EqualFold(c.GetHeader("x-amz-metadata-directive"), "REPLACE")
 	tagReplace := strings.EqualFold(c.GetHeader("x-amz-tagging-directive"), "REPLACE")

@@ -792,6 +792,13 @@ docker exec bkt-db pg_dump -U objectstore objectstore | gzip > backup_$(date +%Y
 
 ### Object Storage Backup
 
+Always back up the **whole** storage directory (`./data/buckets`, i.e.
+`STORAGE_ROOT`), including its hidden `.objects/`, `.objversions/` and
+`.multipart/` directories. Local objects are stored under the SHA-256 of their
+key, not under their key name, so the directory is not human-browsable and
+individual buckets or objects cannot be picked out of it by path (see
+[on-disk layout](../deployment/backup-restore.md#on-disk-layout-local-backend)).
+
 ```bash
 # Backup all buckets
 tar -czf buckets_backup_$(date +%Y%m%d).tar.gz ./data/buckets/

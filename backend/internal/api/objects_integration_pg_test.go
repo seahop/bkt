@@ -138,7 +138,7 @@ func TestIntegrationDeleteBucketClearsReplicationTargets(t *testing.T) {
 	if n != 0 {
 		t.Error("object rows survived")
 	}
-	if _, err := os.Stat(filepath.Join(cfg.Storage.RootPath, target.Name)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(cfg.Storage.RootPath, ".objects", target.Name)); !os.IsNotExist(err) {
 		t.Errorf("bucket directory survived: %v", err)
 	}
 	for _, src := range []models.Bucket{byName, byID} {
@@ -188,7 +188,7 @@ func TestIntegrationDeleteObjectsWithVersionId(t *testing.T) {
 	admin := mkUser(t, itName("adm"), "password-123", true, false)
 	b := itBucket(t, admin.ID, func(b *models.Bucket) { b.Versioning = models.VersioningEnabled })
 	r := itS3Router(cfg, admin)
-	verDir := func(key string) string { return filepath.Join(cfg.Storage.RootPath, ".versions", b.Name, key) }
+	verDir := func(key string) string { return itVersionDir(cfg.Storage.RootPath, b.Name, key) }
 
 	s3PutString(t, r, b.Name, "d/k", "one")
 	v1Row, _ := currentRow(t, b.ID, "d/k")
@@ -207,7 +207,7 @@ func TestIntegrationDeleteObjectsWithVersionId(t *testing.T) {
 	if vs := versionRows(t, b.ID, "d/k"); len(vs) != 0 {
 		t.Errorf("versions left: %+v", vs)
 	}
-	if _, err := os.Stat(verDir("d")); !os.IsNotExist(err) {
+	if _, err := os.Stat(verDir("d/k")); !os.IsNotExist(err) {
 		t.Errorf("version storage for the key not pruned: %v", err)
 	}
 	if code, body := s3GetString(t, r, b.Name, "d/k"); code != http.StatusOK || body != "two" {
@@ -254,8 +254,8 @@ func TestIntegrationDeleteObjectsWithVersionId(t *testing.T) {
 	if vs := versionRows(t, b.ID, "d/k"); len(vs) != 0 {
 		t.Errorf("versions/markers left: %+v", vs)
 	}
-	if _, err := os.Stat(filepath.Join(cfg.Storage.RootPath, b.Name, "d")); !os.IsNotExist(err) {
-		t.Errorf("empty object directory not pruned: %v", err)
+	if _, err := os.Stat(itBlobPath(cfg.Storage.RootPath, b.Name, "d/k")); !os.IsNotExist(err) {
+		t.Errorf("object bytes survived: %v", err)
 	}
 
 	// 4. Retention: content versions (archived or current) are refused, the

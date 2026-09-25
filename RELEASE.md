@@ -265,8 +265,8 @@ still contains a placeholder / old default / short `JWT_SECRET` or
 `ENCRYPTION_KEY_PREVIOUS` / `ENCRYPTION_LEGACY_JWT_SECRET` (decrypt-only), and
 the backend re-encrypts stored S3 credentials under the new key at startup.
 ```bash
-BKT_VERSION=1.4.0 docker compose -f docker-compose.prod.yml pull
-BKT_VERSION=1.4.0 docker compose -f docker-compose.prod.yml up -d
+BKT_VERSION=1.5.0 docker compose -f docker-compose.prod.yml pull
+BKT_VERSION=1.5.0 docker compose -f docker-compose.prod.yml up -d
 # Only containers whose image changed are recreated
 ```
 

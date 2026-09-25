@@ -17,8 +17,10 @@ const ERROR_HINTS: Record<string, string> = {
 
 /**
  * Shared landing page for every browser-based SSO provider. The backend
- * completes the provider exchange and redirects here with either
- * #token=…&refresh_token=… or #error=…&error_description=… in the fragment.
+ * completes the provider exchange and redirects here with either #token=…
+ * (the access token) or #error=…&error_description=… in the fragment. The
+ * refresh token never appears in the URL: the backend set it as the httpOnly
+ * bkt_refresh cookie on the same response.
  */
 export default function SSOCallback({ provider }: { provider: string }) {
   const navigate = useNavigate();
@@ -55,10 +57,9 @@ export default function SSOCallback({ provider }: { provider: string }) {
       }
 
       const token = params.get('token');
-      const refreshToken = params.get('refresh_token');
 
-      if (!token || !refreshToken) {
-        setError('Authentication failed - missing tokens');
+      if (!token) {
+        setError('Authentication failed - missing token');
         setProcessing(false);
         return;
       }
@@ -89,28 +90,18 @@ export default function SSOCallback({ provider }: { provider: string }) {
       }
 
       try {
-        // Temporarily store token so we can make authenticated API call.
-        // The refresh token is intentionally NOT persisted (see authStore) —
-        // nothing reads it back, so storing it would only widen exposure.
-        localStorage.setItem('token', token);
-
-        // Fetch user info
-        const user = await userApi.getCurrentUser();
+        // Look the user up with the new access token directly; the session
+        // is committed to the auth store only once that succeeds (the
+        // refresh token is already in the httpOnly cookie).
+        const user = await userApi.getCurrentUser(token);
 
         // Update auth store with full auth data
-        setAuth({
-          token,
-          refresh_token: refreshToken,
-          user
-        });
+        setAuth({ token, user });
 
         // Redirect to home
         navigate('/');
-      } catch (err: any) {
+      } catch (err) {
         console.error('Failed to fetch user info:', err);
-        // Clear invalid tokens
-        localStorage.removeItem('token');
-        localStorage.removeItem('refresh_token');
         setError('Failed to complete authentication');
         setProcessing(false);
       }

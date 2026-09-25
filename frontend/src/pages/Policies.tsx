@@ -1,10 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useEffectEvent, useMemo, useRef } from 'react';
 import { Shield, Plus, Trash2, Edit, FileText, AlertCircle, FolderOpen, User as UserIcon, Database, ChevronDown, ChevronRight, Settings2 } from 'lucide-react';
-import { listPolicies, createPolicy, updatePolicy, deletePolicy, getPolicyTemplates, Policy, attachPolicyToUser } from '../services/policy';
+import { listPolicies, createPolicy, updatePolicy, deletePolicy, Policy, attachPolicyToUser } from '../services/policy';
 import { useAuthStore } from '../store/authStore';
 import { bucketApi, userApi } from '../services/api';
 import type { Bucket, User } from '../types';
 import { getErrorMessage } from '../utils/errors';
+import { useAsyncLoad } from '../utils/useAsyncLoad';
 
 // Helper to extract bucket names from a policy document
 const extractBucketsFromPolicy = (document: string): string[] => {
@@ -37,23 +38,21 @@ export default function Policies() {
   const [selectedPolicy, setSelectedPolicy] = useState<Policy | null>(null);
   const { user } = useAuthStore();
 
-  useEffect(() => {
-    fetchPolicies();
-  }, []);
-
-  const fetchPolicies = async () => {
+  const fetchPolicies = useCallback(async () => {
     try {
       setLoading(true);
       const data = await listPolicies();
       setPolicies(data || []);
       setError('');
-    } catch (err: any) {
+    } catch (err) {
       console.error('Failed to fetch policies:', err);
       setError(getErrorMessage(err, 'Failed to load policies'));
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useAsyncLoad(fetchPolicies);
 
   const handleDeletePolicy = async (id: string) => {
     if (!confirm('Are you sure you want to delete this policy?')) return;
@@ -61,7 +60,7 @@ export default function Policies() {
     try {
       await deletePolicy(id);
       await fetchPolicies();
-    } catch (err: any) {
+    } catch (err) {
       alert(getErrorMessage(err, 'Failed to delete policy'));
     }
   };
@@ -340,6 +339,114 @@ const extractActionsFromPolicy = (document: string): { actions: string[]; effect
   }
 };
 
+interface PolicyStatement {
+  Effect: 'Allow' | 'Deny';
+  Action: string[];
+  Resource: string[];
+}
+
+interface BuilderState {
+  buckets: string[];
+  actions: string[];
+  effect: 'Allow' | 'Deny';
+  advancedMode: boolean;
+  bucketPermissions: BucketPermissions;
+}
+
+// Builder selections for the policy being edited (empty for a new policy).
+const initialBuilderState = (policy: Policy | null): BuilderState => {
+  const state: BuilderState = { buckets: [], actions: [], effect: 'Allow', advancedMode: false, bucketPermissions: {} };
+  if (!policy) return state;
+
+  state.buckets = extractBucketsFromPolicy(policy.document);
+  const { actions, effect } = extractActionsFromPolicy(policy.document);
+  state.actions = actions;
+  state.effect = effect;
+
+  // A multi-statement policy is edited in advanced (per-bucket) mode
+  try {
+    const doc = JSON.parse(policy.document);
+    if (doc.Statement && doc.Statement.length > 1) {
+      state.advancedMode = true;
+      state.bucketPermissions = extractPerBucketPermissions(policy.document, state.buckets);
+    }
+  } catch {
+    // Ignore parse errors
+  }
+  return state;
+};
+
+// Identity of the builder inputs that affect the generated document in the
+// current mode (simple mode ignores per-bucket permissions and vice versa).
+const builderKey = (
+  advancedMode: boolean,
+  effect: 'Allow' | 'Deny',
+  actions: string[],
+  buckets: string[],
+  bucketPermissions: BucketPermissions
+): string =>
+  advancedMode
+    ? JSON.stringify([true, buckets, bucketPermissions])
+    : JSON.stringify([false, effect, actions, buckets]);
+
+const bucketResources = (bucket: string): string[] => [
+  `arn:aws:s3:::${bucket}`,
+  `arn:aws:s3:::${bucket}/*`,
+];
+
+// Simple mode: one statement over the selected buckets (all buckets if none).
+// Returns null when there is nothing to generate (no actions selected).
+const buildSimplePolicyDocument = (
+  effect: 'Allow' | 'Deny',
+  actions: string[],
+  buckets: string[]
+): string | null => {
+  if (actions.length === 0) return null;
+  const resources = buckets.length > 0
+    ? buckets.flatMap(bucketResources)
+    : ['arn:aws:s3:::*', 'arn:aws:s3:::*/*'];
+  const statement: PolicyStatement = { Effect: effect, Action: actions, Resource: resources };
+  return JSON.stringify({ Version: '2012-10-17', Statement: [statement] }, null, 2);
+};
+
+// Advanced mode: one statement per selected bucket that has actions.
+// Returns null when no bucket has any action yet.
+const buildAdvancedPolicyDocument = (
+  buckets: string[],
+  bucketPermissions: BucketPermissions
+): string | null => {
+  const statements: PolicyStatement[] = [];
+  for (const bucketName of buckets) {
+    const perms = bucketPermissions[bucketName];
+    if (perms && perms.actions.length > 0) {
+      statements.push({ Effect: perms.effect, Action: perms.actions, Resource: bucketResources(bucketName) });
+    }
+  }
+  if (statements.length === 0) return null;
+  return JSON.stringify({ Version: '2012-10-17', Statement: statements }, null, 2);
+};
+
+// Suggested name/description for a simple-mode policy.
+const autoPolicyName = (
+  effect: 'Allow' | 'Deny',
+  actions: string[],
+  buckets: string[]
+): { name: string; description: string } => {
+  const actionDesc = actions.length === ALL_ACTIONS.length ? 'Full Access' : `${actions.length} Actions`;
+  let bucketDesc: string;
+  if (buckets.length === 0) {
+    bucketDesc = 'All Buckets';
+  } else if (buckets.length === 1) {
+    bucketDesc = buckets[0];
+  } else {
+    bucketDesc = `${buckets.length} Buckets`;
+  }
+  return {
+    name: `${bucketDesc} - ${actionDesc}`,
+    description: `${effect}s ${actionDesc.toLowerCase()} on ${bucketDesc.toLowerCase()}`,
+  };
+};
+
 interface PolicyModalProps {
   policy: Policy | null;
   onClose: () => void;
@@ -348,7 +455,9 @@ interface PolicyModalProps {
 
 function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
   const isEditMode = policy !== null;
-  const templates = getPolicyTemplates();
+  // Builder selections parsed from the policy being edited (computed once:
+  // the modal is remounted for every policy it opens).
+  const [initial] = useState(() => initialBuilderState(policy));
 
   // Basic fields
   const [name, setName] = useState(policy?.name || '');
@@ -359,42 +468,35 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
 
   // User/bucket data
   const [buckets, setBuckets] = useState<Bucket[]>([]);
-  const [selectedBuckets, setSelectedBuckets] = useState<string[]>([]);
+  const [selectedBuckets, setSelectedBuckets] = useState<string[]>(initial.buckets);
   const [loadingBuckets, setLoadingBuckets] = useState(true);
   const [users, setUsers] = useState<User[]>([]);
   const [selectedUserId, setSelectedUserId] = useState<string>('');
   const [loadingUsers, setLoadingUsers] = useState(true);
 
   // Simple mode state
-  const [selectedActions, setSelectedActions] = useState<string[]>([]);
-  const [effect, setEffect] = useState<'Allow' | 'Deny'>('Allow');
+  const [selectedActions, setSelectedActions] = useState<string[]>(initial.actions);
+  const [effect, setEffect] = useState<'Allow' | 'Deny'>(initial.effect);
 
   // Advanced mode state
-  const [advancedMode, setAdvancedMode] = useState(false);
-  const [bucketPermissions, setBucketPermissions] = useState<BucketPermissions>({});
+  const [advancedMode, setAdvancedMode] = useState(initial.advancedMode);
+  const [bucketPermissions, setBucketPermissions] = useState<BucketPermissions>(initial.bucketPermissions);
   const [expandedBuckets, setExpandedBuckets] = useState<Set<string>>(new Set());
 
   // Track if name was manually edited
   const [nameManuallyEdited, setNameManuallyEdited] = useState(isEditMode);
 
-  // Track initialization
-  const [initialized, setInitialized] = useState(false);
-
-  // Track manual edits to the raw JSON and its validity
+  // Track manual edits to the raw JSON
   const [jsonManuallyEdited, setJsonManuallyEdited] = useState(false);
-  const [jsonError, setJsonError] = useState('');
 
-  // Validate the raw JSON document whenever it changes
-  useEffect(() => {
-    if (!document.trim()) {
-      setJsonError('');
-      return;
-    }
+  // Validity of the raw JSON document (derived, recomputed when it changes)
+  const jsonError = useMemo(() => {
+    if (!document.trim()) return '';
     try {
       JSON.parse(document);
-      setJsonError('');
+      return '';
     } catch (err) {
-      setJsonError(`Invalid JSON: ${(err as Error).message}`);
+      return `Invalid JSON: ${(err as Error).message}`;
     }
   }, [document]);
 
@@ -419,32 +521,6 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
     fetchData();
   }, []);
 
-  // Initialize form from existing policy when editing
-  useEffect(() => {
-    if (isEditMode && policy && !initialized) {
-      const policyBuckets = extractBucketsFromPolicy(policy.document);
-      const { actions, effect: policyEffect } = extractActionsFromPolicy(policy.document);
-
-      setSelectedBuckets(policyBuckets);
-      setSelectedActions(actions);
-      setEffect(policyEffect);
-
-      // Check if this is a multi-statement policy (advanced mode)
-      try {
-        const doc = JSON.parse(policy.document);
-        if (doc.Statement && doc.Statement.length > 1) {
-          setAdvancedMode(true);
-          const perms = extractPerBucketPermissions(policy.document, policyBuckets);
-          setBucketPermissions(perms);
-        }
-      } catch {
-        // Ignore parse errors
-      }
-
-      setInitialized(true);
-    }
-  }, [isEditMode, policy, initialized]);
-
   // Warn before overwriting hand-edited JSON with a builder-generated document.
   // Returns true if the builder is allowed to regenerate the document.
   const confirmOverwriteJson = (): boolean => {
@@ -458,93 +534,38 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
     return ok;
   };
 
-  // Auto-update policy document when selections change (simple mode only)
-  useEffect(() => {
-    if (!advancedMode && (initialized || !isEditMode)) {
-      if (selectedActions.length > 0 || selectedBuckets.length > 0) {
-        if (!confirmOverwriteJson()) return;
-        generatePolicyDocument();
-      }
-    }
-  }, [selectedActions, effect, selectedBuckets, advancedMode, initialized]);
-
-  // Auto-update policy document in advanced mode
-  useEffect(() => {
-    if (advancedMode && selectedBuckets.length > 0) {
-      if (!confirmOverwriteJson()) return;
-      generateAdvancedPolicyDocument();
-    }
-  }, [bucketPermissions, advancedMode, selectedBuckets]);
-
-  const generatePolicyDocument = () => {
-    if (selectedActions.length === 0) return;
-
-    let resources: string[];
-    if (selectedBuckets.length > 0) {
-      resources = [];
-      for (const bucket of selectedBuckets) {
-        resources.push(`arn:aws:s3:::${bucket}`);
-        resources.push(`arn:aws:s3:::${bucket}/*`);
-      }
-    } else {
-      resources = ['arn:aws:s3:::*', 'arn:aws:s3:::*/*'];
-    }
-
-    const policyDoc = {
-      Version: '2012-10-17',
-      Statement: [{
-        Effect: effect,
-        Action: selectedActions,
-        Resource: resources
-      }]
-    };
-
-    setDocument(JSON.stringify(policyDoc, null, 2));
+  // Regenerate the policy document (and, in simple mode, the auto-name) from
+  // the visual builder. An Effect Event: it reads the latest state without
+  // making the effect below re-run when e.g. the name or JSON is edited.
+  const regenerateFromBuilder = useEffectEvent(() => {
+    const doc = advancedMode
+      ? buildAdvancedPolicyDocument(selectedBuckets, bucketPermissions)
+      : buildSimplePolicyDocument(effect, selectedActions, selectedBuckets);
+    if (doc === null) return;
+    if (!confirmOverwriteJson()) return;
+    setDocument(doc);
 
     // Auto-generate name if not manually edited
-    if (!nameManuallyEdited) {
-      const actionCount = selectedActions.length;
-      const actionDesc = actionCount === ALL_ACTIONS.length ? 'Full Access' : `${actionCount} Actions`;
-
-      let bucketDesc = '';
-      if (selectedBuckets.length === 0) {
-        bucketDesc = 'All Buckets';
-      } else if (selectedBuckets.length === 1) {
-        bucketDesc = selectedBuckets[0];
-      } else {
-        bucketDesc = `${selectedBuckets.length} Buckets`;
-      }
-
-      setName(`${bucketDesc} - ${actionDesc}`);
-      setDescription(`${effect}s ${actionDesc.toLowerCase()} on ${bucketDesc.toLowerCase()}`);
+    if (!advancedMode && !nameManuallyEdited) {
+      const auto = autoPolicyName(effect, selectedActions, selectedBuckets);
+      setName(auto.name);
+      setDescription(auto.description);
     }
-  };
+  });
 
-  const generateAdvancedPolicyDocument = () => {
-    const statements: any[] = [];
-
-    for (const bucketName of selectedBuckets) {
-      const perms = bucketPermissions[bucketName];
-      if (perms && perms.actions.length > 0) {
-        statements.push({
-          Effect: perms.effect,
-          Action: perms.actions,
-          Resource: [
-            `arn:aws:s3:::${bucketName}`,
-            `arn:aws:s3:::${bucketName}/*`
-          ]
-        });
-      }
-    }
-
-    if (statements.length > 0) {
-      const policyDoc = {
-        Version: '2012-10-17',
-        Statement: statements
-      };
-      setDocument(JSON.stringify(policyDoc, null, 2));
-    }
-  };
+  // Auto-update the policy document when the builder selections change.
+  // Keyed on the mode-relevant inputs so the stored document of a policy being
+  // edited is shown as-is until the user actually changes a selection (and a
+  // StrictMode double-invoke doesn't regenerate/prompt twice).
+  const lastBuilderKey = useRef(
+    builderKey(initial.advancedMode, initial.effect, initial.actions, initial.buckets, initial.bucketPermissions)
+  );
+  useEffect(() => {
+    const key = builderKey(advancedMode, effect, selectedActions, selectedBuckets, bucketPermissions);
+    if (key === lastBuilderKey.current) return;
+    lastBuilderKey.current = key;
+    regenerateFromBuilder();
+  }, [selectedActions, effect, selectedBuckets, advancedMode, bucketPermissions]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -580,7 +601,7 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
         }
       }
       onSuccess();
-    } catch (err: any) {
+    } catch (err) {
       setError(getErrorMessage(err, `Failed to ${isEditMode ? 'update' : 'create'} policy`));
     } finally {
       setLoading(false);
@@ -1178,16 +1199,13 @@ function PolicyModal({ policy, onClose, onSuccess }: PolicyModalProps) {
 }
 
 function ViewPolicyModal({ policy, onClose }: { policy: Policy; onClose: () => void }) {
-  const [formattedDoc, setFormattedDoc] = useState('');
-
-  useEffect(() => {
+  const formattedDoc = useMemo(() => {
     try {
-      const parsed = JSON.parse(policy.document);
-      setFormattedDoc(JSON.stringify(parsed, null, 2));
+      return JSON.stringify(JSON.parse(policy.document), null, 2);
     } catch {
-      setFormattedDoc(policy.document);
+      return policy.document;
     }
-  }, [policy]);
+  }, [policy.document]);
 
   return (
     <div className="modal-overlay">

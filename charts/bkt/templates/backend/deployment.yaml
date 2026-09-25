@@ -90,6 +90,9 @@ spec:
               mountPath: /certs
               readOnly: true
             {{- end }}
+            {{- with .Values.backend.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       {{- with .Values.backend.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -121,4 +124,7 @@ spec:
         - name: tls-certs
           secret:
             secretName: {{ .Values.backend.tls.existingSecret | default (printf "%s-tls" (include "bkt.fullname" .)) }}
+        {{- end }}
+        {{- with .Values.backend.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
         {{- end }}

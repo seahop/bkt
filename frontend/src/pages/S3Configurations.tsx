@@ -1,9 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useCallback } from 'react';
 import { Plus, Trash2, Edit2, AlertCircle, X, Server } from 'lucide-react';
 import { s3ConfigApi } from '../services/api';
 import type { S3Configuration } from '../types';
 import { useAuthStore } from '../store/authStore';
 import { getErrorMessage } from '../utils/errors';
+import { useAsyncLoad } from '../utils/useAsyncLoad';
 
 export default function S3Configurations() {
   const [configs, setConfigs] = useState<S3Configuration[]>([]);
@@ -13,23 +14,21 @@ export default function S3Configurations() {
   const [editingConfig, setEditingConfig] = useState<S3Configuration | null>(null);
   const { user } = useAuthStore();
 
-  useEffect(() => {
-    fetchConfigs();
-  }, []);
-
-  const fetchConfigs = async () => {
+  const fetchConfigs = useCallback(async () => {
     try {
       setLoading(true);
       const data = await s3ConfigApi.listS3Configs();
       setConfigs(data || []);
       setError('');
-    } catch (err: any) {
+    } catch (err) {
       console.error('Failed to fetch S3 configurations:', err);
       setError(getErrorMessage(err, 'Failed to load S3 configurations'));
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useAsyncLoad(fetchConfigs);
 
   const handleDeleteConfig = async (id: string) => {
     if (!confirm('Are you sure you want to delete this S3 configuration? This will fail if any buckets are using it.')) return;
@@ -37,7 +36,7 @@ export default function S3Configurations() {
     try {
       await s3ConfigApi.deleteS3Config(id);
       await fetchConfigs();
-    } catch (err: any) {
+    } catch (err) {
       alert(getErrorMessage(err, 'Failed to delete S3 configuration'));
     }
   };
@@ -208,7 +207,7 @@ function S3ConfigModal({ config, onClose, onSuccess }: S3ConfigModalProps) {
     try {
       if (config) {
         // Update existing config
-        const updateData: any = { ...formData };
+        const updateData: Partial<typeof formData> = { ...formData };
         // Only send secret if it's been changed
         if (!formData.secret_access_key) {
           delete updateData.secret_access_key;
@@ -224,7 +223,7 @@ function S3ConfigModal({ config, onClose, onSuccess }: S3ConfigModalProps) {
         await s3ConfigApi.createS3Config(formData);
       }
       onSuccess();
-    } catch (err: any) {
+    } catch (err) {
       setError(getErrorMessage(err, `Failed to ${config ? 'update' : 'create'} configuration`));
     } finally {
       setSubmitting(false);

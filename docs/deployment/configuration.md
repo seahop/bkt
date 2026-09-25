@@ -45,6 +45,7 @@ docker logs bkt | grep -A2 "admin credentials"
 | `ALLOW_REGISTRATION` | `false` | Allow users to self-register |
 | `AUTH_RATE_LIMIT` | `5` (omnibus: `60`, Helm: `20`) | Max login/register attempts per minute per IP |
 | `AUTH_REFRESH_RATE_LIMIT` | `30` | Max token refreshes per minute per IP (separate budget, so users sharing an egress IP aren't logged out by each other's logins) |
+| `ACCESS_TOKEN_EXPIRY` / `REFRESH_TOKEN_EXPIRY` | `15m` / `168h` | JWT access / refresh token lifetimes (Go durations: `15m`, `1h`, `168h`, …) |
 
 ## Proxies, rate limits, audit & metrics
 
@@ -67,13 +68,42 @@ leak through container logs.
 | Variable | Default | Purpose |
 |---|---|---|
 | `WEBHOOK_ALLOWED_HOSTS` | _(empty)_ | Comma-separated hostnames, IPs and/or CIDRs that webhook deliveries may reach even though they are internal. By default bucket webhooks can only reach public addresses: loopback, private (RFC 1918 / IPv6 ULA), link-local (incl. `169.254.169.254` cloud metadata), CGNAT `100.64.0.0/10`, multicast, unspecified and reserved ranges — and IPv4-mapped/embedded IPv6 forms of them — are refused, checked on the address actually dialed (so DNS rebinding cannot bypass it). A listed **hostname** may resolve to any address; a listed **IP/CIDR** may be reached under any name. Example: `hooks.internal,10.20.0.0/16` |
+| `WEBHOOK_PROXY_URL` | _(empty)_ | Explicit egress proxy for webhook deliveries: an `http://` or `https://` proxy URL (`http://[user:pass@]host:port`, no path). Empty = deliveries connect directly and no proxy is used at all. See below. |
 
 Webhook deliveries never follow redirects (a 3xx counts as a failed delivery)
-and ignore `HTTP_PROXY`/`HTTPS_PROXY` (a proxy would connect on bkt's behalf,
-bypassing the address check), so a receiver must be reachable directly. Any
-user with `s3:PutBucketNotification` on a bucket can set its webhook URL, so
-keep the allowlist as narrow as possible: every such user can make bkt POST to
-the listed hosts.
+and always ignore `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` (a proxy would connect
+on bkt's behalf, bypassing the address check). Any user with
+`s3:PutBucketNotification` on a bucket can set its webhook URL, so keep the
+allowlist as narrow as possible: every such user can make bkt POST to the
+listed hosts.
+
+**Delivering through a proxy (`WEBHOOK_PROXY_URL`).** Where bkt has no direct
+internet egress, set `WEBHOOK_PROXY_URL` to route every delivery through that
+proxy (plain `http` targets as proxy requests, `https` targets via `CONNECT`,
+so TLS stays end-to-end). In this mode:
+
+- bkt connects **only** to the proxy's own address, which is allowed even
+  though it is usually internal — it does not need to be (and should not be)
+  in `WEBHOOK_ALLOWED_HOSTS`;
+- the **target** is still checked before every attempt, retries included:
+  bkt re-validates the URL and resolves the target hostname itself, and
+  refuses the delivery — without contacting the proxy — if *any* resolved
+  address is loopback/private/link-local/reserved and not allowlisted by
+  `WEBHOOK_ALLOWED_HOSTS`;
+- **DNS-rebinding protection is weaker than in direct mode**: the proxy
+  resolves the name again when it connects and may get a different answer
+  than bkt did. Enforce the same policy on the proxy itself — deny egress to
+  RFC 1918 / ULA, loopback, link-local (`169.254.0.0/16`, incl. cloud
+  metadata) and CGNAT ranges, and ideally only allow ports 80/443;
+- an invalid `WEBHOOK_PROXY_URL` (not http/https, no host, has a path) is
+  logged at startup and **disables** webhook deliveries (fail closed) rather
+  than silently bypassing the proxy.
+
+Bucket webhook secrets are stored encrypted. Secrets saved in plaintext by
+older releases are sealed automatically at startup (in the background,
+idempotent, one compare-and-swap per row; the log reports
+`Webhook secrets: sealed N legacy plaintext secret(s)`), so no re-save is
+needed.
 
 ## Secrets
 
@@ -170,8 +200,10 @@ legacy-format values are examined).
 | `TLS_CERT_FILE` / `TLS_KEY_FILE` | _auto self-signed_ | Mount your own cert/key to override the generated pair |
 | `CONSOLE_PORT` | `9443` | Web UI + REST API listener |
 | `S3_API_PORT` | `9000` | S3-compatible API listener |
+| `SERVER_HOST` | `0.0.0.0` | Bind address for both listeners |
 | `S3_PUBLIC_ENDPOINT` | _(empty)_ | Browser-facing base URL of the S3 listener (e.g. `https://s3.example.com`), embedded in console-generated presigned URLs. Empty = derived from the console request host + the S3 API port — right whenever console and S3 share a hostname |
 | `CORS_ALLOWED_ORIGINS` | localhost dev origins | Comma-separated browser origins allowed to call the API |
+| `CORS_ALLOW_CREDENTIALS` | `true` | Allow credentialed (cookie / `Authorization`) cross-origin requests |
 
 ## Storage backend
 
@@ -211,6 +243,13 @@ legacy-format values are examined).
 | `GOOGLE_ALLOWED_DOMAINS` | — | Comma-separated Workspace domains allowed to sign in (`hd` claim and email domain must both match). **Unset: new Google users are only auto-provisioned when `ALLOW_REGISTRATION=true`** |
 | `VAULT_JWT_AUDIENCE` | `object-storage` | Required `aud` for Vault JWT login |
 | `VAULT_JWT_ISSUER` | — | If set, required `iss` for Vault JWT login |
+| `VAULT_SSO_ENABLED` | `false` | Enable the legacy Vault JWT login (`POST /api/auth/vault/login`) |
+| `VAULT_ADDR` | `https://vault.example.com:8200` | Vault base URL; the legacy JWT login fetches its JWKS from here |
+| `VAULT_JWT_PATH` | `auth/jwt` | Vault JWT auth mount; JWKS = `<VAULT_ADDR>/v1/<VAULT_JWT_PATH>/.well-known/jwks.json` |
+| `VAULT_JWT_ROLE` | `object-storage-users` | Vault JWT role name (read into the config; not currently enforced) |
+| `GOOGLE_WORKSPACE_ENABLED` | `false` | Sync bkt policies from Google Workspace group membership (needs a service account with domain-wide delegation) |
+| `GOOGLE_SERVICE_ACCOUNT_KEY_FILE` / `GOOGLE_WORKSPACE_ADMIN_EMAIL` | — | Service-account key JSON path (inside the container) and the admin user to impersonate |
+| `GOOGLE_POLICY_SYNC_MODE` / `GOOGLE_POLICY_GROUP_PREFIX` | `direct` / — | `direct`: group name = policy name; `prefix`: only groups starting with the prefix (e.g. `bkt-`) map, prefix stripped |
 | `GOOGLE_REDIRECT_URL` | `https://localhost:9443/api/auth/google/callback` | OAuth callback |
 | `VAULT_OIDC_ENABLED` | `false` | Enable generic OIDC login (any standard OIDC IdP — Vault, Keycloak, …; endpoints come from the provider's discovery document) |
 | `VAULT_OIDC_CLIENT_ID` / `VAULT_OIDC_PROVIDER_URL` / `VAULT_OIDC_REDIRECT_URL` | — | OIDC client ID, provider/issuer URL, and backend callback URL |

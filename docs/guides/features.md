@@ -79,6 +79,19 @@ XML subset (`Expiration.Days`, `Filter.Prefix`,
 `NotImplemented`. Requires admin or `s3:PutLifecycleConfiguration`
 (`s3:GetLifecycleConfiguration` to read it).
 
+Lifecycle **runs as the user who last configured it, with that user's current
+permissions, checked per object** on every sweep: a current object or a
+noncurrent version is expired only if that user may `s3:DeleteObject` the key.
+A narrower Deny (e.g. on `logs/keep/*`) or a permission revoked later is
+honored — denied objects are skipped and counted in one warning per bucket per
+sweep. If that user is deleted or locked, lifecycle for the bucket is
+**paused** with a warning (the rule is kept; re-saving it as an authorized
+user resumes it). Deleting the lifecycle configuration also clears the
+recorded user. Rules saved before this was recorded run as the bucket owner
+while the owner is an active (unlocked) admin, and are otherwise skipped (with
+a warning, once per bucket per process) until re-saved — the same rule as
+replication.
+
 Noncurrent expiry never removes a key's *latest* delete marker while older
 versions of that key remain (it would resurrect the object); the marker is
 removed only once it is the key's sole remaining version (AWS
@@ -182,6 +195,18 @@ and reserved ranges are refused both when the URL is saved (for literal IPs
 and `localhost`) and on every connection (for the address a hostname actually
 resolves to). To deliver to an internal receiver, list it in
 `WEBHOOK_ALLOWED_HOSTS` (see [configuration](../deployment/configuration.md#webhooks)).
+
+**Egress proxy**: environment proxies (`HTTP_PROXY`/`HTTPS_PROXY`) are never
+used for webhooks. To deliver through a proxy, set `WEBHOOK_PROXY_URL`
+explicitly: bkt then connects only to that proxy and checks the *target* by
+resolving it itself before every attempt (a target with any blocked address
+is refused before the proxy is contacted). Because the proxy resolves the
+name again, DNS-rebinding protection is weaker in this mode — also block
+private and metadata ranges on the proxy (see
+[configuration](../deployment/configuration.md#webhooks)).
+
+Webhook secrets written in plaintext by older releases are encrypted
+automatically at startup.
 
 ## Groups
 

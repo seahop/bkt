@@ -66,6 +66,11 @@ curl -k -X POST https://localhost:9443/api/users \
 ```
 
 **Note:** Public registration is disabled by default. To enable self-registration, set `ALLOW_REGISTRATION=true` in `.env` (not recommended for production).
+When it is enabled, the web console's sign-in page shows a **Create account** link to `/register`
+(the setting is published as `allow_registration` by the public `GET /api/auth/sso/config`);
+when it is disabled the link is hidden and `/register` redirects back to the sign-in page.
+Usernames must be 3–50 characters and passwords at least 8 characters (at most 72 bytes);
+a username that is taken — or still named in a bucket policy — is rejected with 409.
 
 ### Listing All Users
 

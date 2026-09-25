@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { FolderOpen, Key, Shield, ArrowRight } from 'lucide-react'
 import { bucketApi, accessKeyApi } from '../services/api'
 import { listPolicies } from '../services/policy'
 import type { Bucket, AccessKey } from '../types'
+import { useAsyncLoad } from '../utils/useAsyncLoad'
 
 export default function Dashboard() {
   const [buckets, setBuckets] = useState<Bucket[]>([])
@@ -11,11 +12,7 @@ export default function Dashboard() {
   const [policyCount, setPolicyCount] = useState(0)
   const [loading, setLoading] = useState(true)
 
-  useEffect(() => {
-    loadDashboardData()
-  }, [])
-
-  const loadDashboardData = async () => {
+  const loadDashboardData = useCallback(async () => {
     try {
       const [bucketsData, keysData, policiesData] = await Promise.all([
         bucketApi.listBuckets(),
@@ -33,7 +30,9 @@ export default function Dashboard() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
+
+  useAsyncLoad(loadDashboardData)
 
   if (loading) {
     return (

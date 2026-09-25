@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 
 	"bkt/internal/auth"
@@ -22,15 +21,14 @@ import (
 // Integration tests against a throwaway PostgreSQL. Run with e.g.
 //
 //	BKT_TEST_POSTGRES_HOST=pg BKT_TEST_POSTGRES_PASSWORD=t go test ./internal/api -run Integration
+//
+// The package's tests share one freshly created database (see
+// integration_pg_test.go / pgtest), dropped when the test binary exits.
 func integrationDB(t *testing.T) *config.Config {
 	t.Helper()
-	host := os.Getenv("BKT_TEST_POSTGRES_HOST")
-	if host == "" {
-		t.Skip("BKT_TEST_POSTGRES_HOST not set")
-	}
+	s, dbName := packageTestDatabase(t)
 	cfg := &config.Config{}
-	cfg.Database = config.DatabaseConfig{Host: host, Port: "5432", User: "postgres",
-		Password: os.Getenv("BKT_TEST_POSTGRES_PASSWORD"), DBName: "postgres", SSLMode: "disable"}
+	cfg.Database = s.DatabaseConfig(dbName)
 	cfg.Auth.JWTSecret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	cfg.Auth.BcryptCost = 4
 	cfg.Auth.AccessTokenExpiry, cfg.Auth.RefreshTokenExpiry = "15m", "24h"

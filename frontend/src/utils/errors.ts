@@ -19,3 +19,9 @@ export function getErrorMessage(err: unknown, fallback: string): string {
     fallback
   )
 }
+
+/** HTTP status of a failed API call (axios error), or undefined for other errors. */
+export function getErrorStatus(err: unknown): number | undefined {
+  const status = (err as { response?: { status?: unknown } } | null)?.response?.status
+  return typeof status === 'number' ? status : undefined
+}

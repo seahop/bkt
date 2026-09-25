@@ -86,7 +86,7 @@ func (h *BucketHandler) ListObjectVersionsREST(c *gin.Context) {
 	}
 	vers := []models.ObjectVersion{}
 	database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, key).
-		Order("versioned_at DESC").Limit(500).Find(&vers)
+		Order(versionOrder).Limit(500).Find(&vers)
 	for _, v := range vers {
 		lm := v.ContentModifiedAt
 		if v.IsDeleteMarker {

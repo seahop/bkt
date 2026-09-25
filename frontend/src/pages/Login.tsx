@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../store/authStore'
 import { Database, KeyRound } from 'lucide-react'
 import GoogleSignInButton from '../components/GoogleSignInButton'
@@ -16,6 +16,9 @@ export default function Login() {
   const [vaultModalOpen, setVaultModalOpen] = useState(false)
   const { login } = useAuthStore()
   const navigate = useNavigate()
+  // Set by pages that bounce here with an explanation (e.g. /register when
+  // self-service registration is disabled).
+  const notice = (useLocation().state as { notice?: string } | null)?.notice
 
   // Fetch SSO configuration on mount
   useEffect(() => {
@@ -39,7 +42,7 @@ export default function Login() {
     try {
       await login(username, password)
       navigate('/')
-    } catch (err: any) {
+    } catch (err) {
       setError(getErrorMessage(err, 'Invalid credentials'))
     } finally {
       setLoading(false)
@@ -68,6 +71,7 @@ export default function Login() {
         <div className="card p-8">
           <form onSubmit={handleSubmit} className="space-y-5">
             {error && <div className="alert-error">{error}</div>}
+            {!error && notice && <div className="alert-info">{notice}</div>}
 
             <div>
               <label htmlFor="username" className="label">
@@ -166,9 +170,18 @@ export default function Login() {
             </>
           )}
 
-          <p className="mt-6 text-center text-xs text-dark-textMuted">
-            Contact your administrator for access
-          </p>
+          {ssoConfig?.allow_registration ? (
+            <p className="mt-6 text-center text-xs text-dark-textMuted">
+              Don&apos;t have an account?{' '}
+              <Link to="/register" className="text-blue-500 hover:text-blue-400 font-medium">
+                Create account
+              </Link>
+            </p>
+          ) : (
+            <p className="mt-6 text-center text-xs text-dark-textMuted">
+              Contact your administrator for access
+            </p>
+          )}
         </div>
 
         {/* Vault Login Modal */}

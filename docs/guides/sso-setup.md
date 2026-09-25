@@ -151,7 +151,13 @@ are only used when they carry a `sub` equal to the ID token's subject.
 - **Admin** is granted to members of `OIDC_ADMIN_GROUP` and revoked from
   everyone else *on every login*, so group changes in the IdP take effect at
   once. Leave it empty to manage admins in bkt only (SSO never touches
-  `is_admin`).
+  `is_admin`). One exception protects against lock-out: a demotion that would
+  leave **no active (unlocked) admin** is refused — the user stays admin, a
+  `WARNING ... LAST active bkt admin` line is logged and a `user.admin_demote`
+  audit entry with status `denied` is written. The check and the update run in
+  one transaction that locks the admin rows, so concurrent logins cannot race
+  past it. Fix the IdP group (or promote another admin in bkt) to complete the
+  demotion on the next login.
 - **Access gating**: when `OIDC_USER_GROUP` is set, users who are in neither
   group are denied with one of two distinct errors — *no groups claim at all*
   (a mapper is missing) or *not a member* — and the denial is audit-logged.
@@ -402,6 +408,10 @@ Your JWT must include:
   }
 }
 ```
+
+API clients receive `refresh_token` in the body as shown. Requests sent by the
+web console (`X-Bkt-Client: console`) get it only as the httpOnly `bkt_refresh`
+cookie instead — see [Authentication](../api/authentication.md).
 
 ---
 

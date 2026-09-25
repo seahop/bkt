@@ -76,6 +76,25 @@ Database host — bitnami subchart or external
 {{- end }}
 
 {{/*
+backend.env.<KEY> as a string, falling back to a default only when the key is
+unset or "". Unlike `default`, a deliberate falsy value (false, 0) is kept, so
+`--set backend.env.HSTS_MAX_AGE=0` really disables HSTS. YAML numbers arrive
+as float64 and are rendered as integers.
+Usage: {{ include "bkt.env" (list . "HSTS_MAX_AGE" "31536000") }}
+*/}}
+{{- define "bkt.env" -}}
+{{- $root := index . 0 }}
+{{- $v := index $root.Values.backend.env (index . 1) }}
+{{- if or (kindIs "invalid" $v) (and (kindIs "string" $v) (eq $v "")) }}
+{{- index . 2 }}
+{{- else if kindIs "float64" $v }}
+{{- $v | int64 | toString }}
+{{- else }}
+{{- $v | toString }}
+{{- end }}
+{{- end }}
+
+{{/*
 Trusted proxies for X-Forwarded-For. An explicit value always wins; with an
 ingress and no value, trust the private/CGNAT ranges ingress controllers run in
 so per-IP rate limiting sees real clients (see values.yaml for the trade-off).

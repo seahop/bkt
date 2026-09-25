@@ -21,15 +21,41 @@ jobs:
   backend-test:
     name: Backend Tests
     runs-on: ubuntu-latest
+    # Real Postgres for the BKT_TEST_POSTGRES_*-gated integration tests
+    # (skipped when those env vars are unset, e.g. on a laptop).
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      BKT_TEST_POSTGRES_HOST: localhost
+      BKT_TEST_POSTGRES_PASSWORD: postgres
+      # Dedicated database for the DSN-based key-rotation test (it DROPs and
+      # recreates tables); HOST-based tests create throwaway databases of
+      # their own (internal/database/pgtest).
+      BKT_TEST_POSTGRES_DSN: host=localhost port=5432 user=postgres password=postgres dbname=bkt_rotation_test sslmode=disable
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
+
+      - name: Create integration test database
+        env:
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+        run: docker exec "$PG_CONTAINER" psql -U postgres -c 'CREATE DATABASE bkt_rotation_test'
 
       - name: go vet
         working-directory: backend
@@ -37,6 +63,8 @@ jobs:
 
       - name: go test (race + cover)
         working-directory: backend
+        # Packages run in parallel: each Postgres-gated test works in its own
+        # throwaway database (internal/database/pgtest).
         run: go test ./... -race -cover
 
   backend-lint:
@@ -44,16 +72,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: latest
           working-directory: backend
@@ -66,10 +94,10 @@ jobs:
     continue-on-error: true
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
@@ -89,10 +117,10 @@ jobs:
         working-directory: frontend
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 26
           cache: npm
@@ -102,10 +130,6 @@ jobs:
         run: npm ci
 
       - name: Lint
-        # frontend/eslint.config.js (flat config) is committed, but the codebase
-        # still carries pre-existing findings (no-explicit-any, react-hooks
-        # rules). Keep lint visible but non-blocking until those are cleared.
-        continue-on-error: true
         run: npm run lint
 
       - name: Type-check

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"bkt/internal/config"
@@ -59,16 +60,37 @@ func parseLifecycleConfig(b *models.Bucket) *models.LifecycleConfig {
 	return &cfg
 }
 
-func storeLifecycleConfig(b *models.Bucket, cfg *models.LifecycleConfig) error {
+// storeLifecycleConfig saves (or, with cfg == nil, clears) the bucket's
+// lifecycle and records who configured it: the sweep later expires keys only
+// with that user's current permissions.
+func storeLifecycleConfig(b *models.Bucket, cfg *models.LifecycleConfig, by uuid.UUID) error {
 	if cfg == nil {
-		return database.DB.Model(b).Update("lifecycle", nil).Error
+		return database.DB.Model(b).Updates(map[string]interface{}{
+			"lifecycle":               nil,
+			"lifecycle_configured_by": nil,
+			"lifecycle_configured_at": nil,
+		}).Error
 	}
 	raw, err := json.Marshal(cfg)
 	if err != nil {
 		return err
 	}
 	s := string(raw)
-	return database.DB.Model(b).Update("lifecycle", &s).Error
+	return database.DB.Model(b).Updates(map[string]interface{}{
+		"lifecycle":               &s,
+		"lifecycle_configured_by": by,
+		"lifecycle_configured_at": time.Now(),
+	}).Error
+}
+
+// requestUserID is the authenticated user of an S3 or console request.
+func requestUserID(c *gin.Context) uuid.UUID {
+	if v, ok := c.Get("user_id"); ok {
+		if id, ok := v.(uuid.UUID); ok {
+			return id
+		}
+	}
+	return uuid.Nil
 }
 
 // bucketForConfigAction loads the bucket and requires admin or the given
@@ -137,7 +159,7 @@ func (h *S3APIHandler) PutBucketLifecycle(c *gin.Context) {
 		}
 	}
 	if len(enabled) == 0 {
-		if err := storeLifecycleConfig(bucket, nil); err != nil {
+		if err := storeLifecycleConfig(bucket, nil, uuid.Nil); err != nil {
 			h.s3Error(c, "InternalError", "Failed to store lifecycle", "", http.StatusInternalServerError)
 			return
 		}
@@ -162,7 +184,7 @@ func (h *S3APIHandler) PutBucketLifecycle(c *gin.Context) {
 		h.s3Error(c, "MalformedXML", "Rule must set Expiration.Days or NoncurrentVersionExpiration.NoncurrentDays", "", http.StatusBadRequest)
 		return
 	}
-	if err := storeLifecycleConfig(bucket, cfg); err != nil {
+	if err := storeLifecycleConfig(bucket, cfg, requestUserID(c)); err != nil {
 		h.s3Error(c, "InternalError", "Failed to store lifecycle", "", http.StatusInternalServerError)
 		return
 	}
@@ -176,7 +198,7 @@ func (h *S3APIHandler) DeleteBucketLifecycle(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if err := storeLifecycleConfig(bucket, nil); err != nil {
+	if err := storeLifecycleConfig(bucket, nil, uuid.Nil); err != nil {
 		h.s3Error(c, "InternalError", "Failed to delete lifecycle", "", http.StatusInternalServerError)
 		return
 	}
@@ -222,13 +244,123 @@ func (h *BucketHandler) SetBucketLifecycleREST(c *gin.Context) {
 	if req.ExpireDays > 0 || req.NoncurrentExpireDays > 0 {
 		cfg = &req
 	}
-	if err := storeLifecycleConfig(&bucket, cfg); err != nil {
+	if err := storeLifecycleConfig(&bucket, cfg, userUUID); err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to store lifecycle"})
 		return
 	}
 	_ = h.auditService.LogSuccess(c, userUUID, "", "bucket.lifecycle", "bucket", bucket.ID.String(), bucket.Name,
 		map[string]interface{}{"expire_days": req.ExpireDays, "prefix": req.Prefix, "noncurrent_expire_days": req.NoncurrentExpireDays})
 	c.JSON(http.StatusOK, models.SuccessResponse{Message: "Lifecycle updated"})
+}
+
+// Lifecycle authorization: expiry acts on behalf of the user who configured
+// the rule (LifecycleConfiguredBy) with that user's CURRENT permissions,
+// evaluated per key: expiring a current object or a noncurrent version needs
+// s3:DeleteObject on the key. Denied keys are skipped (counted, logged once
+// per bucket per sweep). If the configurer is deleted or locked, lifecycle
+// for the bucket is paused (the configuration is kept; re-saving it by an
+// authorized user resumes it). Legacy configurations without a recorded
+// configurer run as the bucket owner only while the owner is an active admin
+// (and are skipped otherwise until re-saved) — the same rule as replication.
+
+// legacyLifecycleWarned de-duplicates the per-bucket warning for legacy
+// configurations that cannot run (no recorded configurer, non-admin owner).
+var legacyLifecycleWarned sync.Map
+
+const (
+	lifecycleBatch = 1000
+	// lifecycleMaxScan bounds candidates examined per phase per bucket and
+	// sweep, so keys the configurer may not delete cannot starve the rest.
+	lifecycleMaxScan = 10 * lifecycleBatch
+)
+
+// lifecyclePrincipalFor picks the user lifecycle runs as: the recorded
+// configurer, else (legacy) the bucket owner if currently an active admin
+// (owner == nil: not found). ok=false means skip.
+func lifecyclePrincipalFor(configuredBy *uuid.UUID, owner *models.User) (uuid.UUID, bool) {
+	if configuredBy != nil {
+		return *configuredBy, true
+	}
+	if owner != nil && owner.IsAdmin && !owner.IsLocked {
+		return owner.ID, true
+	}
+	return uuid.Nil, false
+}
+
+// lifecyclePrincipal resolves lifecyclePrincipalFor from the DB, warning once
+// per bucket per process when a legacy configuration cannot run.
+func lifecyclePrincipal(b *models.Bucket) (uuid.UUID, bool) {
+	var owner *models.User
+	if b.LifecycleConfiguredBy == nil {
+		var o models.User
+		if err := database.DB.Select("id", "is_admin", "is_locked").First(&o, "id = ?", b.OwnerID).Error; err == nil {
+			owner = &o
+		}
+	}
+	id, ok := lifecyclePrincipalFor(b.LifecycleConfiguredBy, owner)
+	if !ok {
+		if _, warned := legacyLifecycleWarned.LoadOrStore(b.ID, true); !warned {
+			logger.Warn("Lifecycle: legacy configuration has no recorded configurer and the bucket owner is not an active admin — skipping; re-save the lifecycle rule to resume", map[string]interface{}{"bucket": b.Name})
+		}
+	}
+	return id, ok
+}
+
+// lifecycleEvaluator loads the principal's permissions on the bucket once
+// for this sweep. ok=false means skip the bucket this sweep; a deleted or
+// locked configurer pauses lifecycle (the configuration is kept).
+func lifecycleEvaluator(ps *services.PolicyService, b *models.Bucket) (*services.AccessEvaluator, bool) {
+	principal, ok := lifecyclePrincipal(b)
+	if !ok {
+		return nil, false
+	}
+	eval, err := ps.NewAccessEvaluator(principal, b.Name)
+	if err != nil {
+		logger.Warn("Lifecycle: failed to load permissions", map[string]interface{}{"bucket": b.Name, "error": err.Error()})
+		return nil, false
+	}
+	if eval.UserMissing() || eval.UserLocked() {
+		logger.Warn("Lifecycle paused: the user who configured it was deleted or locked — re-save the lifecycle rule to resume", map[string]interface{}{"bucket": b.Name})
+		return nil, false
+	}
+	return eval, true
+}
+
+// lifecycleExpiryAllowed reports whether the lifecycle principal may expire
+// key (current object or noncurrent version).
+func lifecycleExpiryAllowed(eval *services.AccessEvaluator, key string) bool {
+	return eval.Allowed(services.ActionDeleteObject, key)
+}
+
+// lifecycleCurrentCandidates returns up to limit current objects last
+// written before cutoff (under prefix), in key order after afterKey.
+func lifecycleCurrentCandidates(bucketID uuid.UUID, prefix string, cutoff time.Time, afterKey string, limit int) ([]models.Object, error) {
+	var out []models.Object
+	q := database.DB.Where("bucket_id = ? AND updated_at < ? AND key > ?", bucketID, cutoff, afterKey)
+	if prefix != "" {
+		q = q.Where("key LIKE ?", validation.EscapeLikeWildcards(prefix)+"%")
+	}
+	return out, q.Order("key").Limit(limit).Find(&out).Error
+}
+
+// lifecycleVersionCandidates returns up to limit versions that stopped being
+// current before cutoff (under prefix), oldest first; with after set, only
+// those strictly after (afterAt, afterID) in that order.
+func lifecycleVersionCandidates(bucketID uuid.UUID, prefix string, cutoff time.Time, after bool, afterAt time.Time, afterID uuid.UUID, limit int) ([]models.ObjectVersion, error) {
+	var out []models.ObjectVersion
+	q := database.DB.Where("bucket_id = ? AND versioned_at < ?", bucketID, cutoff)
+	if after {
+		q = q.Where("(versioned_at, id) > (?, ?)", afterAt, afterID)
+	}
+	if prefix != "" {
+		q = q.Where("key LIKE ?", validation.EscapeLikeWildcards(prefix)+"%")
+	}
+	return out, q.Order("versioned_at ASC, id ASC").Limit(limit).Find(&out).Error
+}
+
+// lifecyclePhase counts one expiry phase of one bucket.
+type lifecyclePhase struct {
+	expired, busy, denied int
 }
 
 // RunLifecycleSweep applies every bucket's lifecycle rules once. Called from
@@ -246,40 +378,57 @@ func RunLifecycleSweep(cfg *config.Config) {
 		if lc == nil {
 			continue
 		}
+		eval, ok := lifecycleEvaluator(h.policyService, b)
+		if !ok {
+			continue
+		}
 		backend, err := h.getStorageBackend(b)
 		if err != nil {
 			logger.Warn("Lifecycle sweep: storage init failed", map[string]interface{}{"bucket": b.Name, "error": err.Error()})
 			continue
 		}
+		denied := 0
 
 		// Expire current objects.
 		if lc.ExpireDays > 0 {
 			cutoff := time.Now().AddDate(0, 0, -lc.ExpireDays)
-			var expired []models.Object
-			q := database.DB.Where("bucket_id = ? AND updated_at < ?", b.ID, cutoff)
-			if lc.Prefix != "" {
-				q = q.Where("key LIKE ?", validation.EscapeLikeWildcards(lc.Prefix)+"%")
-			}
-			if err := q.Limit(1000).Find(&expired).Error; err == nil {
-				expiredCount, busy := 0, 0
+			var ph lifecyclePhase
+			last, attempted := "", 0
+		currentScan:
+			for scanned := 0; scanned < lifecycleMaxScan && attempted < lifecycleBatch; {
+				expired, err := lifecycleCurrentCandidates(b.ID, lc.Prefix, cutoff, last, lifecycleBatch)
+				if err != nil || len(expired) == 0 {
+					break
+				}
+				scanned += len(expired)
+				last = expired[len(expired)-1].Key
 				for i := range expired {
-					if busy >= sweepMaxBusyKeys {
-						break // the rest is retried next sweep
+					if ph.busy >= sweepMaxBusyKeys {
+						break currentScan // the rest is retried next sweep
 					}
+					if !lifecycleExpiryAllowed(eval, expired[i].Key) {
+						ph.denied++
+						continue
+					}
+					attempted++
 					done, wasBusy := expireCurrentObject(backend, b, expired[i].Key, cutoff)
 					if done {
-						expiredCount++
+						ph.expired++
 					} else if wasBusy {
-						busy++
+						ph.busy++
 					}
 				}
-				if expiredCount > 0 {
-					logger.Info("Lifecycle: expired current objects", map[string]interface{}{"bucket": b.Name, "count": expiredCount})
-				}
-				if busy > 0 {
-					logger.Info("Lifecycle: busy keys deferred to the next sweep", map[string]interface{}{"bucket": b.Name, "busy": busy})
+				if len(expired) < lifecycleBatch {
+					break
 				}
 			}
+			if ph.expired > 0 {
+				logger.Info("Lifecycle: expired current objects", map[string]interface{}{"bucket": b.Name, "count": ph.expired})
+			}
+			if ph.busy > 0 {
+				logger.Info("Lifecycle: busy keys deferred to the next sweep", map[string]interface{}{"bucket": b.Name, "busy": ph.busy})
+			}
+			denied += ph.denied
 		}
 
 		// Expire noncurrent versions permanently (oldest first, so a marker
@@ -290,31 +439,49 @@ func RunLifecycleSweep(cfg *config.Config) {
 		// delete marker is only removed once it is the sole version left.
 		if lc.NoncurrentExpireDays > 0 {
 			cutoff := time.Now().AddDate(0, 0, -lc.NoncurrentExpireDays)
-			var vers []models.ObjectVersion
-			vq := database.DB.Where("bucket_id = ? AND versioned_at < ?", b.ID, cutoff)
-			if lc.Prefix != "" {
-				vq = vq.Where("key LIKE ?", validation.EscapeLikeWildcards(lc.Prefix)+"%")
-			}
-			if err := vq.Order("versioned_at ASC").Limit(1000).Find(&vers).Error; err == nil {
-				expiredCount, busy := 0, 0
+			var ph lifecyclePhase
+			var lastAt time.Time
+			var lastID uuid.UUID
+			attempted := 0
+		versionScan:
+			for scanned := 0; scanned < lifecycleMaxScan && attempted < lifecycleBatch; {
+				vers, err := lifecycleVersionCandidates(b.ID, lc.Prefix, cutoff, scanned > 0, lastAt, lastID, lifecycleBatch)
+				if err != nil || len(vers) == 0 {
+					break
+				}
+				scanned += len(vers)
+				lastAt, lastID = vers[len(vers)-1].VersionedAt, vers[len(vers)-1].ID
 				for i := range vers {
-					if busy >= sweepMaxBusyKeys {
-						break // the rest is retried next sweep
+					if ph.busy >= sweepMaxBusyKeys {
+						break versionScan // the rest is retried next sweep
 					}
+					if !lifecycleExpiryAllowed(eval, vers[i].Key) {
+						ph.denied++
+						continue
+					}
+					attempted++
 					done, wasBusy := expireNoncurrentVersion(backend, b, &vers[i])
 					if done {
-						expiredCount++
+						ph.expired++
 					} else if wasBusy {
-						busy++
+						ph.busy++
 					}
 				}
-				if expiredCount > 0 {
-					logger.Info("Lifecycle: expired noncurrent versions", map[string]interface{}{"bucket": b.Name, "count": expiredCount})
-				}
-				if busy > 0 {
-					logger.Info("Lifecycle: busy keys deferred to the next sweep", map[string]interface{}{"bucket": b.Name, "busy": busy})
+				if len(vers) < lifecycleBatch {
+					break
 				}
 			}
+			if ph.expired > 0 {
+				logger.Info("Lifecycle: expired noncurrent versions", map[string]interface{}{"bucket": b.Name, "count": ph.expired})
+			}
+			if ph.busy > 0 {
+				logger.Info("Lifecycle: busy keys deferred to the next sweep", map[string]interface{}{"bucket": b.Name, "busy": ph.busy})
+			}
+			denied += ph.denied
+		}
+
+		if denied > 0 {
+			logger.Warn("Lifecycle: keys skipped — the user who configured lifecycle may not s3:DeleteObject them", map[string]interface{}{"bucket": b.Name, "skipped": denied})
 		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -77,6 +78,9 @@ type webhookDispatcher struct {
 	backoff  func(attempt int) time.Duration
 	idle     time.Duration
 	deliverF func(q queuedEvent) // test hook; nil = d.deliver
+	// preflight, when set (WEBHOOK_PROXY_URL mode), vets the target before
+	// every attempt; an errWebhookBlocked result refuses the delivery.
+	preflight func(ctx context.Context, rawURL string) error
 }
 
 func newWebhookDispatcher(client *http.Client) *webhookDispatcher {
@@ -99,7 +103,17 @@ var (
 
 func webhookDispatcherInstance() *webhookDispatcher {
 	defaultWebhookDispatcherOnce.Do(func() {
-		defaultWebhookDispatcher = newWebhookDispatcher(newWebhookClient(currentWebhookAllowlist))
+		proxy, perr := webhookProxyFromEnv()
+		d := newWebhookDispatcher(newWebhookClientVia(currentWebhookAllowlist, proxy))
+		switch {
+		case perr != nil:
+			logger.Error("WEBHOOK_PROXY_URL is invalid — webhook deliveries are disabled until it is fixed or unset", map[string]interface{}{"error": perr.Error()})
+			d.preflight = func(context.Context, string) error { return errWebhookProxyInvalid }
+		case proxy != nil:
+			logger.Info("Webhooks: delivering via WEBHOOK_PROXY_URL", map[string]interface{}{"proxy": redactWebhookURL(proxy.String())})
+			d.preflight = webhookTargetPreflight(currentWebhookAllowlist, net.DefaultResolver.LookupIPAddr)
+		}
+		defaultWebhookDispatcher = d
 		go defaultWebhookDispatcher.reportLoop()
 	})
 	return defaultWebhookDispatcher
@@ -308,6 +322,12 @@ func (d *webhookDispatcher) deliver(q queuedEvent) {
 				})
 				return
 			}
+			if errors.Is(err, errWebhookProxyInvalid) {
+				logger.Warn("Webhook: not delivered — WEBHOOK_PROXY_URL is invalid", map[string]interface{}{
+					"bucket": q.event.Bucket, "destination": dest,
+				})
+				return
+			}
 			lastErr = "request failed"
 			if errors.Is(err, context.DeadlineExceeded) {
 				lastErr = "timeout"
@@ -329,6 +349,11 @@ func (d *webhookDispatcher) deliver(q queuedEvent) {
 }
 
 func (d *webhookDispatcher) attempt(ctx context.Context, rawURL, secret string, body []byte) (int, error) {
+	if d.preflight != nil {
+		if err := d.preflight(ctx, rawURL); err != nil {
+			return 0, err
+		}
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, bytes.NewReader(body))
 	if err != nil {
 		return 0, err

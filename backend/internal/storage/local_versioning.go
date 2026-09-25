@@ -86,12 +86,22 @@ func (ls *LocalStorage) ArchiveObjectVersion(bucketName, objectKey, versionID st
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0750); err != nil {
-		return fmt.Errorf("failed to create version dir: %w", err)
-	}
-	if err := renameNoReplace(src, dst); err != nil {
+	// The version directory can be pruned by a concurrent version delete
+	// between its creation and the move; withDirRetry re-creates it.
+	if err := withDirRetry(filepath.Dir(dst), func() error {
+		if rerr := renameNoReplace(src, dst); rerr != nil {
+			if _, serr := os.Lstat(src); isNotExist(rerr) && serr != nil {
+				return fmt.Errorf("source vanished: %v", rerr) // not a directory race: don't retry
+			}
+			return rerr
+		}
+		return nil
+	}); err != nil {
+		ls.pruneVersionParents(bucketName, dst) // don't leave the fresh version dir behind
 		return fmt.Errorf("failed to archive version: %w", err)
 	}
+	// The object's bytes moved out of the bucket: prune its emptied folders.
+	ls.pruneObjectParents(bucketName, src)
 	return nil
 }
 
@@ -105,12 +115,22 @@ func (ls *LocalStorage) PromoteObjectVersion(bucketName, objectKey, versionID st
 		return err
 	}
 	ls.upgradeLegacyMarker(bucketName, objectKey)
-	if err := os.MkdirAll(filepath.Dir(dst), 0750); err != nil {
-		return fmt.Errorf("failed to create object dir: %w", err)
-	}
-	if err := os.Rename(src, dst); err != nil {
+	// The object's directory can be pruned by a concurrent delete between its
+	// creation and the rename; withDirRetry re-creates it.
+	if err := withDirRetry(filepath.Dir(dst), func() error {
+		rerr := os.Rename(src, dst)
+		if isNotExist(rerr) {
+			if _, serr := os.Lstat(src); serr != nil {
+				return fmt.Errorf("version not found: %v", rerr) // not a directory race: don't retry
+			}
+		}
+		return rerr
+	}); err != nil {
+		ls.pruneObjectParents(bucketName, dst) // don't leave the fresh object dir behind
 		return fmt.Errorf("failed to promote version: %w", err)
 	}
+	// The version's bytes left version storage: prune its emptied folders.
+	ls.pruneVersionParents(bucketName, src)
 	return nil
 }
 
@@ -137,5 +157,6 @@ func (ls *LocalStorage) DeleteObjectVersion(bucketName, objectKey, versionID str
 	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to delete version: %w", err)
 	}
+	ls.pruneVersionParents(bucketName, p)
 	return nil
 }

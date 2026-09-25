@@ -44,9 +44,21 @@ The system implements multiple layers of security:
 - Logout revokes both the access and refresh tokens
 - Access tokens are stateless; refresh tokens are tracked server-side to
   enable rotation, reuse detection, and revocation
+- **The web console's refresh token is not accessible to JavaScript.** It is
+  delivered only as the `bkt_refresh` cookie — `HttpOnly`, `SameSite=Strict`,
+  `Path=/api/auth`, host-only, `Max-Age` = refresh lifetime, `Secure` when
+  `TLS_ENABLED` or `TLS_TERMINATED_UPSTREAM` is set — and never in a JSON body
+  (for requests carrying `X-Bkt-Client: console`) or an SSO redirect URL. An
+  XSS bug can therefore at most use the 15-minute access token the console
+  keeps in localStorage; it cannot steal the 7-day credential. Refreshing
+  with the cookie requires the `X-Bkt-Client: console` header, which a
+  cross-origin page cannot send past the CORS allowlist. Logout clears the
+  cookie. API/script clients (no header) still receive `refresh_token` in the
+  body and manage it themselves
 
 **Best Practices:**
-- Never store tokens in localStorage (XSS risk)
+- Keep long-lived tokens out of localStorage (XSS risk) — the console keeps
+  only the short-lived access token there
 - Use httpOnly cookies or secure storage
 - Implement automatic token refresh
 - Clear tokens on logout
@@ -514,7 +526,7 @@ if fileHeader.Size > h.config.Storage.MaxFileSize {
 router.Use(cors.New(cors.Config{
     AllowOrigins:     []string{"http://localhost:5173"},
     AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"},
-    AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
+    AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "X-Bkt-Client" /* , ... */},
     ExposeHeaders:    []string{"Content-Length", "ETag"},
     AllowCredentials: true,
 }))
@@ -523,12 +535,19 @@ router.Use(cors.New(cors.Config{
 ### Cross-Site Request Forgery (CSRF)
 
 **Prevention:**
-- ✅ JWT tokens (not cookies)
+- ✅ API authorization uses bearer JWTs (the `Authorization` header), not
+  cookies
 - ✅ CORS restrictions
 - ✅ Authorization header required
-- ✅ SameSite cookie policy (future)
+- ✅ The only session cookie, `bkt_refresh`, is `SameSite=Strict`, scoped to
+  `/api/auth`, and accepted by `/api/auth/refresh` only together with the
+  custom `X-Bkt-Client: console` header (a cross-origin sender would need a
+  CORS preflight, which the origin allowlist refuses). It can mint an access
+  token but the response is unreadable cross-origin, and logout additionally
+  requires the bearer access token.
 - ✅ **Login CSRF on SSO callbacks:** SSO flows finish with a redirect to
-  `/auth/<provider>/callback#token=…`. The UI accepts those tokens only when
+  `/auth/<provider>/callback#token=…` (the access token only; the refresh
+  token is set as the httpOnly `bkt_refresh` cookie). The UI accepts those tokens only when
   the same browser tab started an SSO login in the last 10 minutes (a
   `sessionStorage` marker set by the login button, consumed once); crafted
   links carrying someone else's tokens are discarded. The fragment is removed

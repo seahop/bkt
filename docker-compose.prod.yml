@@ -23,8 +23,9 @@ services:
       POSTGRES_USER: objectstore
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_DB: objectstore
-      # postgres:18 defaults PGDATA to /var/lib/postgresql/18/docker and refuses
-      # to start when a volume is mounted at the old path; pin the old layout.
+      # Explicit classic layout (the postgres:16 default). Keeps this mount working
+      # if the image is later bumped to 18+, whose default PGDATA moved to
+      # /var/lib/postgresql/<major>/docker (a major bump still needs pg_upgrade).
       PGDATA: /var/lib/postgresql/data
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
@@ -42,7 +43,9 @@ services:
   # One-shot, runs before the backend on every `up`. The backend image runs as
   # the unprivileged uid/gid 10001, so:
   #   - bucket data written by older releases (which ran as root) is re-owned
-  #     once (no-op when already owned), and
+  #     when ANY entry (not just the top directory) is not 10001:10001; when
+  #     everything is already owned it is a read-only metadata walk (no
+  #     writes), and a mismatch stops the scan at the first hit, and
   #   - the TLS cert/key from setup.py (key is 0600, owned by the host user) is
   #     copied into a volume readable only by uid 10001.
   init-perms:
@@ -52,7 +55,9 @@ services:
       - sh
       - -ec
       - |
-        [ "$$(stat -c %u:%g /data/buckets)" = 10001:10001 ] || chown -R 10001:10001 /data/buckets
+        if [ -n "$$(find /data/buckets \( ! -user 10001 -o ! -group 10001 \) -print -quit)" ]; then
+          chown -R 10001:10001 /data/buckets
+        fi
         cp -a /certs-src/. /certs/
         chown -R 10001:10001 /certs
         chmod 0500 /certs
@@ -101,8 +106,13 @@ services:
       ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-false}
       AUTH_RATE_LIMIT: ${AUTH_RATE_LIMIT:-}
       AUTH_REFRESH_RATE_LIMIT: ${AUTH_REFRESH_RATE_LIMIT:-}
+      # JWT lifetimes (Go durations, e.g. 15m, 168h).
+      ACCESS_TOKEN_EXPIRY: ${ACCESS_TOKEN_EXPIRY:-15m}
+      REFRESH_TOKEN_EXPIRY: ${REFRESH_TOKEN_EXPIRY:-168h}
       # Swagger UI at /api/docs is off in production unless set to "true".
       SWAGGER_ENABLED: ${SWAGGER_ENABLED:-}
+      # Strict-Transport-Security max-age (seconds); 0 disables.
+      HSTS_MAX_AGE: ${HSTS_MAX_AGE:-31536000}
       # Comma-separated proxy CIDRs/IPs whose X-Forwarded-For is trusted for
       # rate limiting; empty (default) = trust none.
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
@@ -116,6 +126,9 @@ services:
       # Comma-separated hostnames/IPs/CIDRs webhook deliveries may reach even
       # though they are private/loopback (SSRF guard); empty = public only.
       WEBHOOK_ALLOWED_HOSTS: ${WEBHOOK_ALLOWED_HOSTS:-}
+      # Explicit http(s) egress proxy for webhook deliveries (may carry
+      # user:pass); empty = connect directly. HTTP(S)_PROXY is never used.
+      WEBHOOK_PROXY_URL: ${WEBHOOK_PROXY_URL:-}
       # Base URL embedded in console-generated presigned URLs (empty = derive
       # from the request host + S3 API port, correct when clients reach the
       # backend directly; set it when running behind a proxy/LB).
@@ -124,6 +137,7 @@ services:
       S3_SSE: ${S3_SSE:-false}
       # CORS — set to your actual frontend domain in production
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://localhost}
+      CORS_ALLOW_CREDENTIALS: ${CORS_ALLOW_CREDENTIALS:-true}
       # Generic OIDC (any OpenID Connect IdP; authorization code + PKCE)
       OIDC_ENABLED: ${OIDC_ENABLED:-}
       OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
@@ -161,6 +175,9 @@ services:
       VAULT_SSO_ENABLED: ${VAULT_SSO_ENABLED:-false}
       VAULT_JWT_AUDIENCE: ${VAULT_JWT_AUDIENCE:-}
       VAULT_JWT_ISSUER: ${VAULT_JWT_ISSUER:-}
+      # Vault JWT auth mount (JWKS: <VAULT_ADDR>/v1/<path>/.well-known/jwks.json)
+      VAULT_JWT_PATH: ${VAULT_JWT_PATH:-auth/jwt}
+      VAULT_JWT_ROLE: ${VAULT_JWT_ROLE:-object-storage-users}
       VAULT_OIDC_CLIENT_ID: ${VAULT_OIDC_CLIENT_ID:-}
       VAULT_OIDC_PROVIDER_URL: ${VAULT_OIDC_PROVIDER_URL:-}
       VAULT_OIDC_REDIRECT_URL: ${VAULT_OIDC_REDIRECT_URL:-}
@@ -177,6 +194,8 @@ services:
       # Storage
       STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
       STORAGE_ROOT: /data/buckets
+      # Detect content types from magic bytes and reject unsafe ones.
+      CONTENT_TYPE_ENFORCEMENT: ${CONTENT_TYPE_ENFORCEMENT:-false}
       S3_ENABLED: ${S3_ENABLED:-false}
       S3_ENDPOINT: ${S3_ENDPOINT:-}
       S3_REGION: ${S3_REGION:-us-east-1}

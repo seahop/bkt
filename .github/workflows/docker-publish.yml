@@ -7,6 +7,10 @@ on:
     tags:
       - 'v*.*.*'
 
+# Least privilege by default; the image builds grant themselves packages: write.
+permissions:
+  contents: read
+
 env:
   REGISTRY: ghcr.io
   BACKEND_IMAGE: ghcr.io/seahop/bkt-backend
@@ -15,20 +19,47 @@ env:
 jobs:
   # ── Gates ──────────────────────────────────────────────────────────────────
   # These run first; the image builds `needs:` them, so a failing test or a
-  # frontend type error blocks the publish. (Pull requests run the same checks
-  # plus lint/vuln via ci.yml; this workflow only fires on main + tags.)
+  # frontend lint/type error blocks the publish. (Pull requests run the same
+  # checks plus golangci-lint/govulncheck via ci.yml; this workflow only fires
+  # on main + tags.)
   backend-test:
     name: Backend Tests
     runs-on: ubuntu-latest
+    # Real Postgres for the BKT_TEST_POSTGRES_*-gated integration tests
+    # (same setup as ci.yml).
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      BKT_TEST_POSTGRES_HOST: localhost
+      BKT_TEST_POSTGRES_PASSWORD: postgres
+      # Dedicated database for the DSN-based key-rotation test (it DROPs and
+      # recreates tables); HOST-based tests create throwaway databases of
+      # their own (internal/database/pgtest).
+      BKT_TEST_POSTGRES_DSN: host=localhost port=5432 user=postgres password=postgres dbname=bkt_rotation_test sslmode=disable
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
+
+      - name: Create integration test database
+        env:
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+        run: docker exec "$PG_CONTAINER" psql -U postgres -c 'CREATE DATABASE bkt_rotation_test'
 
       - name: go vet
         working-directory: backend
@@ -36,6 +67,8 @@ jobs:
 
       - name: go test (race + cover)
         working-directory: backend
+        # Packages run in parallel: each Postgres-gated test works in its own
+        # throwaway database (internal/database/pgtest).
         run: go test ./... -race -cover
 
   frontend-check:
@@ -46,10 +79,10 @@ jobs:
         working-directory: frontend
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 26
           cache: npm
@@ -59,9 +92,6 @@ jobs:
         run: npm ci
 
       - name: Lint
-        # No ESLint flat config is committed (ESLint v9 requires one), so keep
-        # lint visible but non-blocking until a config lands under frontend/.
-        continue-on-error: true
         run: npm run lint
 
       - name: Type-check
@@ -83,17 +113,17 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up QEMU (multi-arch support)
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -101,7 +131,7 @@ jobs:
 
       - name: Extract metadata for backend image
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.BACKEND_IMAGE }}
           tags: |
@@ -119,7 +149,7 @@ jobs:
 
       - name: Build and push backend image
         id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           # Root context so the frontend can be built and embedded.
           context: .
@@ -147,17 +177,17 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up QEMU (multi-arch support)
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -165,7 +195,7 @@ jobs:
 
       - name: Extract metadata for omnibus image
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.OMNIBUS_IMAGE }}
           tags: |
@@ -182,7 +212,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/seahop/bkt
 
       - name: Build and push omnibus image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: ./Dockerfile
@@ -211,14 +241,14 @@ jobs:
       packages: read
     steps:
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           # Scan by digest so the exact image just built/pushed is analysed,
           # regardless of which tags (latest / semver / sha) were applied.
@@ -238,11 +268,13 @@ jobs:
     steps:
       - name: Summary
         run: |
-          echo "## Images Published" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Image | Registry |" >> $GITHUB_STEP_SUMMARY
-          echo "|-------|----------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Omnibus (1 container) | \`ghcr.io/seahop/bkt\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Backend (UI + API)    | \`ghcr.io/seahop/bkt-backend\` |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Quickstart: \`docker run -d -p 9000:9000 -p 9443:9443 -v bkt:/data ghcr.io/seahop/bkt\`" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Images Published"
+            echo ""
+            echo "| Image | Registry |"
+            echo "|-------|----------|"
+            echo "| Omnibus (1 container) | \`ghcr.io/seahop/bkt\` |"
+            echo "| Backend (UI + API)    | \`ghcr.io/seahop/bkt-backend\` |"
+            echo ""
+            echo "Quickstart: \`docker run -d -p 9000:9000 -p 9443:9443 -v bkt:/data ghcr.io/seahop/bkt\`"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -18,6 +18,24 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+// maxPasswordBytes is bcrypt's input limit: longer passwords are rejected by
+// the hasher (they would otherwise surface as a 500). It counts BYTES — a
+// binding "max" tag counts characters, which multi-byte UTF-8 would slip past.
+const maxPasswordBytes = 72
+
+// rejectOverlongPassword answers 400 and returns true when a new password
+// exceeds maxPasswordBytes.
+func rejectOverlongPassword(c *gin.Context, password string) bool {
+	if len(password) <= maxPasswordBytes {
+		return false
+	}
+	c.JSON(http.StatusBadRequest, models.ErrorResponse{
+		Error:   "Password too long",
+		Message: "Password must be at most 72 bytes (72 ASCII characters; fewer if it contains multi-byte characters).",
+	})
+	return true
+}
+
 type UserHandler struct {
 	config       *config.Config
 	auditService *services.AuditService
@@ -144,6 +162,9 @@ func (h *UserHandler) UpdateCurrentUser(c *gin.Context) {
 			})
 			return
 		}
+		if rejectOverlongPassword(c, req.Password) {
+			return
+		}
 
 		hashedPassword, err := auth.HashPassword(req.Password, h.config.Auth.BcryptCost)
 		if err != nil {
@@ -229,6 +250,10 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 			Error:   "Invalid request",
 			Message: err.Error(),
 		})
+		return
+	}
+
+	if rejectOverlongPassword(c, req.Password) {
 		return
 	}
 

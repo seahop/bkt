@@ -161,17 +161,21 @@ func (h *VaultJWTHandler) LoginWithVaultJWT(c *gin.Context) {
 		return
 	}
 
-	// Return success response
+	// The refresh token always goes into the httpOnly console cookie; the
+	// JSON body carries it only for API/script clients (not the console).
+	SetRefreshCookie(c, h.config, refreshToken)
 	response := struct {
 		Token        string       `json:"token"`
-		RefreshToken string       `json:"refresh_token"`
+		RefreshToken string       `json:"refresh_token,omitempty"`
 		User         *models.User `json:"user"`
 		IsNewUser    bool         `json:"is_new_user"`
 	}{
-		Token:        jwtToken,
-		RefreshToken: refreshToken,
-		User:         user,
-		IsNewUser:    isNewUser,
+		Token:     jwtToken,
+		User:      user,
+		IsNewUser: isNewUser,
+	}
+	if !IsConsoleClient(c) {
+		response.RefreshToken = refreshToken
 	}
 
 	c.JSON(http.StatusOK, response)

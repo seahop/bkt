@@ -1,8 +1,19 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../store/authStore'
 import { Database } from 'lucide-react'
-import { getErrorMessage } from '../utils/errors'
+import { getSSOConfig } from '../services/sso'
+import { getErrorMessage, getErrorStatus } from '../utils/errors'
+
+const REGISTRATION_DISABLED_NOTICE =
+  'Self-service registration is disabled on this server. Ask an administrator for an account.'
+
+// Mirrors the backend's RegisterRequest binding (username 3-50 chars, valid
+// email, password >= 8) plus bcrypt's 72-byte input limit.
+const USERNAME_MIN = 3
+const USERNAME_MAX = 50
+const PASSWORD_MIN = 8
+const PASSWORD_MAX_BYTES = 72
 
 export default function Register() {
   const [username, setUsername] = useState('')
@@ -11,33 +22,94 @@ export default function Register() {
   const [confirmPassword, setConfirmPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  // null until the server says whether registration is open
+  const [registrationOpen, setRegistrationOpen] = useState<boolean | null>(null)
   const { register } = useAuthStore()
   const navigate = useNavigate()
+
+  const leaveBecauseDisabled = () =>
+    navigate('/login', { replace: true, state: { notice: REGISTRATION_DISABLED_NOTICE } })
+
+  useEffect(() => {
+    let cancelled = false
+    getSSOConfig()
+      .then((config) => {
+        if (cancelled) return
+        if (config.allow_registration) {
+          setRegistrationOpen(true)
+        } else {
+          navigate('/login', { replace: true, state: { notice: REGISTRATION_DISABLED_NOTICE } })
+        }
+      })
+      .catch((err) => {
+        // Can't tell: show the form; the server still enforces the setting.
+        console.error('Failed to fetch server config:', err)
+        if (!cancelled) setRegistrationOpen(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [navigate])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError('')
+
+    const name = username.trim()
+    if (name.length < USERNAME_MIN || name.length > USERNAME_MAX) {
+      setError(`Username must be ${USERNAME_MIN}-${USERNAME_MAX} characters`)
+      return
+    }
 
     if (password !== confirmPassword) {
       setError('Passwords do not match')
       return
     }
 
-    if (password.length < 8) {
-      setError('Password must be at least 8 characters')
+    if (password.length < PASSWORD_MIN) {
+      setError(`Password must be at least ${PASSWORD_MIN} characters`)
+      return
+    }
+
+    if (new TextEncoder().encode(password).length > PASSWORD_MAX_BYTES) {
+      setError(`Password must be at most ${PASSWORD_MAX_BYTES} bytes`)
       return
     }
 
     setLoading(true)
 
     try {
-      await register(username, email, password)
+      await register(name, email.trim(), password)
       navigate('/')
-    } catch (err: any) {
-      setError(getErrorMessage(err, 'Registration failed'))
+    } catch (err) {
+      switch (getErrorStatus(err)) {
+        case 403:
+          leaveBecauseDisabled()
+          return
+        case 409:
+          setError('That username or email is already taken. Choose another, or sign in.')
+          break
+        case 400:
+          // The backend's binding errors are validator dumps; summarise.
+          setError(
+            `Please check your details: username ${USERNAME_MIN}-${USERNAME_MAX} characters, ` +
+              `a valid email address, and a password of at least ${PASSWORD_MIN} characters.`
+          )
+          break
+        default:
+          setError(getErrorMessage(err, 'Registration failed'))
+      }
     } finally {
       setLoading(false)
     }
+  }
+
+  if (registrationOpen === null) {
+    return (
+      <div className="min-h-screen bg-dark-bg flex items-center justify-center">
+        <div className="spinner" />
+      </div>
+    )
   }
 
   return (
@@ -73,7 +145,9 @@ export default function Register() {
                 className="input"
                 placeholder="Choose a username"
                 required
-                minLength={3}
+                minLength={USERNAME_MIN}
+                maxLength={USERNAME_MAX}
+                autoComplete="username"
               />
             </div>
 
@@ -104,7 +178,8 @@ export default function Register() {
                 className="input"
                 placeholder="Choose a password"
                 required
-                minLength={8}
+                minLength={PASSWORD_MIN}
+                autoComplete="new-password"
               />
             </div>
 

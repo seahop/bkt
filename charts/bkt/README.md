@@ -128,6 +128,13 @@ The Swagger UI (`/api/docs/`) is off in production; set
 | `backend.env.JWT_SECRET` / `ENCRYPTION_KEY` / `ADMIN_PASSWORD` | — | **Required.** Stored in a Secret. `JWT_SECRET`/`ENCRYPTION_KEY` must be ≥ 32 chars (`openssl rand -hex 32`) |
 | `backend.env.ENCRYPTION_KEY_PREVIOUS` / `ENCRYPTION_LEGACY_JWT_SECRET` | `""` | Decrypt-only keys for rotating `ENCRYPTION_KEY` (comma-separated retired keys) or a retired `JWT_SECRET` that encrypted credentials before `ENCRYPTION_KEY` existed. Stored in the Secret; no strength checks. Credentials are re-encrypted at startup — remove once the log says they are unused |
 | `backend.env.WEBHOOK_ALLOWED_HOSTS` | `""` | Hostnames/IPs/CIDRs webhooks may reach despite being private (SSRF guard) |
+| `backend.env.WEBHOOK_PROXY_URL` | `""` | Explicit http(s) egress proxy for webhook deliveries (may contain `user:pass`; stored in the Secret) |
+| `backend.env.ACCESS_TOKEN_EXPIRY` / `REFRESH_TOKEN_EXPIRY` | `15m` / `168h` | JWT lifetimes (Go durations) |
+| `backend.env.HSTS_MAX_AGE` | `31536000` | `Strict-Transport-Security` max-age; `"0"` disables |
+| `backend.env.CORS_ALLOW_CREDENTIALS` | `true` | Allow credentialed cross-origin requests |
+| `backend.env.GOOGLE_WORKSPACE_*` / `GOOGLE_POLICY_*` | off | Google Workspace group → policy sync; mount the service-account key via `backend.extraVolumes` / `extraVolumeMounts` |
+| `backend.env.VAULT_JWT_PATH` / `VAULT_JWT_ROLE` | `auth/jwt` / `object-storage-users` | Legacy Vault JWT login: auth mount whose JWKS is trusted, role name |
+| `backend.extraVolumes` / `backend.extraVolumeMounts` | `[]` | Extra pod volumes / backend container mounts |
 | `backend.env.OIDC_EXPECTED_ISSUER` / `VAULT_OIDC_EXPECTED_ISSUER` | `""` | Issuer the IdP/Vault advertises when it differs from the URL bkt reaches it at |
 | `backend.env.VAULT_POLICIES_AUTHORITATIVE` | `""` (false) | Vault `policies` claim always replaces bkt policies |
 | `backend.tls.enabled` / `backend.tls.terminatedUpstream` | `true` / `false` | Backend TLS; set `false`/`true` to terminate TLS at the ingress |

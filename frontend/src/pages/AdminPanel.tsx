@@ -1,9 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useCallback } from 'react';
 import { Settings, Users, Shield, Trash2, X, UserPlus, Lock, Unlock, Key, Plus } from 'lucide-react';
 import api, { userApi, groupApi } from '../services/api';
 import { listPolicies, attachPolicyToUser, detachPolicyFromUser, Policy } from '../services/policy';
 import type { User, Group } from '../types';
 import { getErrorMessage } from '../utils/errors';
+import { useAsyncLoad } from '../utils/useAsyncLoad';
 
 interface AccessKey {
   id: string;
@@ -26,11 +27,7 @@ export default function AdminPanel() {
   const [showCreateGroupModal, setShowCreateGroupModal] = useState(false);
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
 
-  useEffect(() => {
-    loadData();
-  }, []);
-
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
       setLoading(true);
       setLoadError('');
@@ -48,7 +45,9 @@ export default function AdminPanel() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useAsyncLoad(loadData);
 
   const loadGroups = async () => {
     try {
@@ -65,7 +64,7 @@ export default function AdminPanel() {
     try {
       await groupApi.deleteGroup(group.id);
       await loadGroups();
-    } catch (err: any) {
+    } catch (err) {
       alert(getErrorMessage(err, 'Failed to delete group'));
     }
   };
@@ -76,7 +75,7 @@ export default function AdminPanel() {
     try {
       await api.delete(`/users/${userId}`);
       await loadData();
-    } catch (err: any) {
+    } catch (err) {
       alert(getErrorMessage(err, 'Failed to delete user'));
     }
   };
@@ -93,7 +92,7 @@ export default function AdminPanel() {
     try {
       await api.post(`/users/${user.id}/${action}`);
       await loadData();
-    } catch (err: any) {
+    } catch (err) {
       alert(getErrorMessage(err, `Failed to ${action} user`));
     }
   };
@@ -434,7 +433,7 @@ function PolicyAssignmentModal({
         await attachPolicyToUser(user.id, policyId);
         setUserPolicies(prev => [...prev, policyId]);
       }
-    } catch (err: any) {
+    } catch (err) {
       alert(getErrorMessage(err, 'Failed to update policy'));
     } finally {
       setLoading(false);
@@ -513,7 +512,7 @@ function CreateUserModal({ onClose, onSuccess }: { onClose: () => void; onSucces
     try {
       await userApi.createUser(username, email, password, isAdmin);
       onSuccess();
-    } catch (err: any) {
+    } catch (err) {
       setError(getErrorMessage(err, 'Failed to create user'));
     } finally {
       setLoading(false);
@@ -608,11 +607,7 @@ function AccessKeysModal({ user, onClose }: { user: User; onClose: () => void })
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  useEffect(() => {
-    loadAccessKeys();
-  }, [user.id]);
-
-  const loadAccessKeys = async () => {
+  const loadAccessKeys = useCallback(async () => {
     try {
       setLoading(true);
       setError('');
@@ -624,7 +619,9 @@ function AccessKeysModal({ user, onClose }: { user: User; onClose: () => void })
     } finally {
       setLoading(false);
     }
-  };
+  }, [user.id]);
+
+  useAsyncLoad(loadAccessKeys);
 
   const handleDeleteKey = async (keyId: string) => {
     if (!confirm('Are you sure you want to delete this access key? This action cannot be undone.')) return;
@@ -632,7 +629,7 @@ function AccessKeysModal({ user, onClose }: { user: User; onClose: () => void })
     try {
       await api.delete(`/users/${user.id}/access-keys/${keyId}`);
       await loadAccessKeys();
-    } catch (err: any) {
+    } catch (err) {
       alert(getErrorMessage(err, 'Failed to delete access key'));
     }
   };
@@ -731,7 +728,7 @@ function CreateGroupModal({ onClose, onSuccess }: { onClose: () => void; onSucce
     try {
       await groupApi.createGroup(name.trim(), description.trim() || undefined);
       onSuccess();
-    } catch (err: any) {
+    } catch (err) {
       setError(getErrorMessage(err, 'Failed to create group'));
     } finally {
       setLoading(false);
@@ -825,7 +822,7 @@ function GroupDetailModal({
     try {
       await fn();
       await onChanged();
-    } catch (err: any) {
+    } catch (err) {
       setError(getErrorMessage(err, fallback));
     } finally {
       setBusy(false);

@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useState } from 'react'
 import { Key, Plus, Trash2, Copy, Eye, EyeOff, Clock, X } from 'lucide-react'
 import { useAuthStore } from '../store/authStore'
 import { accessKeyApi, stsApi } from '../services/api'
 import type { AccessKey, AccessKeyResponse } from '../types'
 import { getErrorMessage } from '../utils/errors'
+import { useAsyncLoad } from '../utils/useAsyncLoad'
 
 export default function Profile() {
   const { user } = useAuthStore()
@@ -27,11 +28,7 @@ export default function Profile() {
   } | null>(null)
   const [showStsSecret, setShowStsSecret] = useState(false)
 
-  useEffect(() => {
-    loadAccessKeys()
-  }, [])
-
-  const loadAccessKeys = async () => {
+  const loadAccessKeys = useCallback(async () => {
     try {
       setLoadError('')
       const data = await accessKeyApi.listAccessKeys()
@@ -42,14 +39,16 @@ export default function Profile() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
+
+  useAsyncLoad(loadAccessKeys)
 
   const handleGenerateKey = async () => {
     try {
       const key = await accessKeyApi.createAccessKey()
       setNewKey(key)
       loadAccessKeys()
-    } catch (error: any) {
+    } catch (error) {
       alert(getErrorMessage(error, 'Failed to generate access key'))
     }
   }
@@ -62,7 +61,7 @@ export default function Profile() {
     try {
       await accessKeyApi.revokeAccessKey(id)
       loadAccessKeys()
-    } catch (error: any) {
+    } catch (error) {
       alert(getErrorMessage(error, 'Failed to revoke access key'))
     }
   }
@@ -94,7 +93,7 @@ export default function Profile() {
     try {
       const result = await stsApi.issueTemporaryCredentials(stsDuration, stsReadOnly)
       setStsResult(result)
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to issue temporary credentials:', error)
       setStsError(getErrorMessage(error, 'Failed to issue temporary credentials'))
     } finally {

@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { FolderOpen, Plus, Trash2, Calendar, Globe } from 'lucide-react'
 import { bucketApi, s3ConfigApi } from '../services/api'
 import { useAuthStore } from '../store/authStore'
 import type { Bucket, S3Configuration } from '../types'
 import { getErrorMessage } from '../utils/errors'
+import { useAsyncLoad } from '../utils/useAsyncLoad'
 
 export default function Buckets() {
   const { user } = useAuthStore()
@@ -21,17 +22,7 @@ export default function Buckets() {
   const [error, setError] = useState('')
   const [loadError, setLoadError] = useState('')
 
-  useEffect(() => {
-    loadBuckets()
-  }, [])
-
-  useEffect(() => {
-    if (storageBackend === 's3' && showCreateModal) {
-      loadS3Configs()
-    }
-  }, [storageBackend, showCreateModal])
-
-  const loadBuckets = async () => {
+  const loadBuckets = useCallback(async () => {
     try {
       setLoadError('')
       const data = await bucketApi.listBuckets()
@@ -42,9 +33,11 @@ export default function Buckets() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
 
-  const loadS3Configs = async () => {
+  useAsyncLoad(loadBuckets)
+
+  const loadS3Configs = useCallback(async () => {
     try {
       setLoadingS3Configs(true)
       const data = await s3ConfigApi.listS3Configs()
@@ -59,7 +52,10 @@ export default function Buckets() {
     } finally {
       setLoadingS3Configs(false)
     }
-  }
+  }, [])
+
+  // Load the S3 backends once the create dialog switches to S3 storage
+  useAsyncLoad(loadS3Configs, storageBackend === 's3' && showCreateModal)
 
   const handleCreateBucket = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -80,7 +76,7 @@ export default function Buckets() {
       setStorageBackend('local')
       setSelectedS3ConfigId('')
       loadBuckets()
-    } catch (err: any) {
+    } catch (err) {
       setError(getErrorMessage(err, 'Failed to create bucket'))
     } finally {
       setCreating(false)
@@ -95,7 +91,7 @@ export default function Buckets() {
     try {
       await bucketApi.deleteBucket(bucketName)
       loadBuckets()
-    } catch (error: any) {
+    } catch (error) {
       alert(getErrorMessage(error, 'Failed to delete bucket'))
     }
   }

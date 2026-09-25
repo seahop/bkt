@@ -1,10 +1,11 @@
-import { useEffect, useState, useRef } from 'react'
+import { useCallback, useEffect, useState, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { FolderOpen, Upload, Download, Trash2, File as FileIcon, ArrowLeft, RefreshCw, Folder, FolderPlus, Home, Loader2, Pencil, Columns2, Info, Copy, ExternalLink, Search, X, Calendar, Filter, ChevronRight, CheckCircle2, XCircle, Link2, Check, History, Settings2 } from 'lucide-react'
 import { bucketApi } from '../services/api'
 import type { ObjectVersion } from '../services/api'
 import type { Object as StorageObject, Bucket } from '../types'
-import { getErrorMessage } from '../utils/errors'
+import { getErrorMessage, getErrorStatus } from '../utils/errors'
+import { useAsyncLoad } from '../utils/useAsyncLoad'
 import {
   INLINE_OPEN_MAX_BYTES,
   closeTab,
@@ -154,16 +155,7 @@ export default function BucketDetails() {
     }
   }, [])
 
-  // The listing is fetched unscoped (see loadObjects), so folder navigation
-  // doesn't need a refetch — only a bucket change does.
-  useEffect(() => {
-    if (bucketName) {
-      loadObjects()
-      loadActiveUploads()
-    }
-  }, [bucketName])
-
-  const loadObjects = async () => {
+  const loadObjects = useCallback(async () => {
     if (!bucketName) return
 
     try {
@@ -184,13 +176,13 @@ export default function BucketDetails() {
         setTruncated(false)
         setContinuationToken(undefined)
       }
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to load objects:', error)
       setError(getErrorMessage(error, 'Failed to load objects'))
     } finally {
       setLoading(false)
     }
-  }
+  }, [bucketName])
 
   // Fetch the next page of objects (when the listing was truncated) and append.
   const loadMoreObjects = async () => {
@@ -209,7 +201,7 @@ export default function BucketDetails() {
         setTruncated(false)
         setContinuationToken(undefined)
       }
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to load more objects:', error)
       setError(getErrorMessage(error, 'Failed to load more objects'))
     } finally {
@@ -217,38 +209,8 @@ export default function BucketDetails() {
     }
   }
 
-  const loadActiveUploads = async () => {
-    try {
-      // Load uploads that are pending or processing
-      const uploads = await bucketApi.listUploads('processing')
-      const pendingUploads = await bucketApi.listUploads('pending')
-
-      const allActiveUploads = [...uploads, ...pendingUploads]
-
-      // Convert to ActiveUpload format and start polling
-      const activeUploadsList: ActiveUpload[] = allActiveUploads.map(upload => ({
-        uploadId: upload.id,
-        filename: upload.filename,
-        progress: upload.progress_percent,
-        status: upload.status,
-        error: upload.error_message
-      }))
-
-      setActiveUploads(activeUploadsList)
-
-      // Start polling for each active upload
-      allActiveUploads.forEach(upload => {
-        if (upload.status === 'pending' || upload.status === 'processing') {
-          pollUploadStatus(upload.id, upload.filename)
-        }
-      })
-    } catch (error) {
-      console.error('Failed to load active uploads:', error)
-    }
-  }
-
   // Poll upload status
-  const pollUploadStatus = async (uploadId: string, filename: string) => {
+  const pollUploadStatus = useCallback((uploadId: string) => {
     const maxAttempts = 600 // 10 minutes with 1 second intervals
     let attempts = 0
 
@@ -299,7 +261,43 @@ export default function BucketDetails() {
     }
 
     poll()
-  }
+  }, [loadObjects])
+
+  const loadActiveUploads = useCallback(async () => {
+    try {
+      // Load uploads that are pending or processing
+      const uploads = await bucketApi.listUploads('processing')
+      const pendingUploads = await bucketApi.listUploads('pending')
+
+      const allActiveUploads = [...uploads, ...pendingUploads]
+
+      // Convert to ActiveUpload format and start polling
+      const activeUploadsList: ActiveUpload[] = allActiveUploads.map(upload => ({
+        uploadId: upload.id,
+        filename: upload.filename,
+        progress: upload.progress_percent,
+        status: upload.status,
+        error: upload.error_message
+      }))
+
+      setActiveUploads(activeUploadsList)
+
+      // Start polling for each active upload
+      allActiveUploads.forEach(upload => {
+        if (upload.status === 'pending' || upload.status === 'processing') {
+          pollUploadStatus(upload.id)
+        }
+      })
+    } catch (error) {
+      console.error('Failed to load active uploads:', error)
+    }
+  }, [pollUploadStatus])
+
+  // The listing is fetched unscoped (see loadObjects), so folder navigation
+  // doesn't need a refetch — only a bucket change does (loadObjects and
+  // loadActiveUploads are memoized on bucketName).
+  useAsyncLoad(loadObjects, !!bucketName)
+  useAsyncLoad(loadActiveUploads, !!bucketName)
 
   // Parse objects into folders and files for a given prefix
   const getBrowserItemsForPrefix = (prefix: string): BrowserItem[] => {
@@ -344,13 +342,6 @@ export default function BucketDetails() {
     } else {
       setCurrentPrefix(prefix)
     }
-  }
-
-  const navigateUp = () => {
-    if (currentPrefix === '') return
-    const parts = currentPrefix.slice(0, -1).split('/')
-    parts.pop()
-    setCurrentPrefix(parts.length > 0 ? parts.join('/') + '/' : '')
   }
 
   const getBreadcrumbsForPrefix = (prefix: string) => {
@@ -451,66 +442,6 @@ export default function BucketDetails() {
       .map(obj => ({ ...obj, isFolder: false as const }))
   }
 
-  // Filter browser items based on search query and filters (for current directory view)
-  const filterBrowserItems = (items: BrowserItem[]): BrowserItem[] => {
-    if (!hasActiveFilters) return items
-
-    return items.filter(item => {
-      // Get the name to search
-      const name = item.isFolder ? item.name : item.key.split('/').pop() || ''
-
-      // Search query filter (with wildcard support)
-      if (searchQuery) {
-        const pattern = wildcardToRegex(searchQuery)
-        if (!pattern.test(name)) {
-          // Also check if it's a partial match without wildcards
-          if (!name.toLowerCase().includes(searchQuery.toLowerCase())) {
-            return false
-          }
-        }
-      }
-
-      // Extension filter (only for files)
-      if (filterExtension && !item.isFolder) {
-        const ext = name.split('.').pop()?.toLowerCase() || ''
-        const filterExts = filterExtension.toLowerCase().split(',').map(e => e.trim().replace(/^\./, ''))
-        if (!filterExts.some(fe => ext === fe || wildcardToRegex(fe).test(ext))) {
-          return false
-        }
-      }
-
-      // Date filters (only for files)
-      if (!item.isFolder) {
-        const fileItem = item as FileItem
-        const fileDate = new Date(fileItem.updated_at)
-
-        if (filterDateFrom) {
-          const fromDate = new Date(filterDateFrom)
-          if (fileDate < fromDate) return false
-        }
-
-        if (filterDateTo) {
-          const toDate = new Date(filterDateTo)
-          toDate.setHours(23, 59, 59, 999) // End of day
-          if (fileDate > toDate) return false
-        }
-
-        // Size filters
-        if (filterMinSize) {
-          const minBytes = parseSize(filterMinSize)
-          if (minBytes !== null && fileItem.size < minBytes) return false
-        }
-
-        if (filterMaxSize) {
-          const maxBytes = parseSize(filterMaxSize)
-          if (maxBytes !== null && fileItem.size > maxBytes) return false
-        }
-      }
-
-      return true
-    })
-  }
-
   // Get folder path for a file (for display in search results)
   const getFolderPath = (key: string): string => {
     const parts = key.split('/')
@@ -585,8 +516,8 @@ export default function BucketDetails() {
             ])
 
             // Start polling for status
-            pollUploadStatus(response.upload_id, file.name)
-          } catch (error: any) {
+            pollUploadStatus(response.upload_id)
+          } catch (error) {
             console.error('Failed to start async upload:', error)
             setError(getErrorMessage(error, `Failed to upload ${file.name}`))
           }
@@ -603,7 +534,7 @@ export default function BucketDetails() {
       if (fileInputRef.current) {
         fileInputRef.current.value = ''
       }
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to upload file:', error)
       setError(getErrorMessage(error, 'Failed to upload file'))
     } finally {
@@ -630,7 +561,7 @@ export default function BucketDetails() {
       setShowCreateFolderModal(false)
       setNewFolderName('')
       await loadObjects()
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to create folder:', error)
       setError(getErrorMessage(error, 'Failed to create folder'))
     }
@@ -642,7 +573,7 @@ export default function BucketDetails() {
     try {
       const blob = await bucketApi.downloadObject(bucketName, object.key)
       saveBlob(blob, object.key)
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to download object:', error)
       setError(getErrorMessage(error, 'Failed to download object'))
     }
@@ -656,7 +587,7 @@ export default function BucketDetails() {
       setError('')
       await bucketApi.deleteObject(bucketName, object.key)
       await loadObjects()
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to delete object:', error)
       setError(getErrorMessage(error, 'Failed to delete object'))
     }
@@ -681,7 +612,7 @@ export default function BucketDetails() {
       setRenameTarget(null)
       setNewFileName('')
       await loadObjects()
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to rename object:', error)
       setError(getErrorMessage(error, 'Failed to rename object'))
     }
@@ -731,7 +662,7 @@ export default function BucketDetails() {
         setError('')
         await bucketApi.moveFolder(bucketName, draggedItem.prefix, destinationPrefix)
         await loadObjects()
-      } catch (error: any) {
+      } catch (error) {
         console.error('Failed to move folder:', error)
         setError(getErrorMessage(error, 'Failed to move folder'))
       } finally {
@@ -752,7 +683,7 @@ export default function BucketDetails() {
         setError('')
         await bucketApi.moveObject(bucketName, draggedItem.key, destinationKey)
         await loadObjects()
-      } catch (error: any) {
+      } catch (error) {
         console.error('Failed to move object:', error)
         setError(getErrorMessage(error, 'Failed to move object'))
       } finally {
@@ -827,9 +758,9 @@ export default function BucketDetails() {
     try {
       const result = await bucketApi.presignObject(bucketName, shareTarget, shareExpiry)
       setShareResult(result)
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to generate share link:', error)
-      if (error?.response?.status === 409) {
+      if (getErrorStatus(error) === 409) {
         setShareNeedsKey(true)
       } else {
         setShareError(getErrorMessage(error, 'Failed to generate share link'))
@@ -863,7 +794,7 @@ export default function BucketDetails() {
       )
       setVersions(sorted)
       setVersionsBucketState(data.versioning || '')
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to load object versions:', error)
       setVersionsError(getErrorMessage(error, 'Failed to load version history'))
     } finally {
@@ -895,7 +826,7 @@ export default function BucketDetails() {
       await bucketApi.restoreObjectVersion(bucketName, versionsTarget, versionId)
       await loadVersions(versionsTarget)
       await loadObjects()
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to restore version:', error)
       setVersionsError(getErrorMessage(error, 'Failed to restore version'))
     }
@@ -910,7 +841,7 @@ export default function BucketDetails() {
       await bucketApi.deleteObjectVersion(bucketName, versionsTarget, versionId)
       await loadVersions(versionsTarget)
       await loadObjects()
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to delete version:', error)
       setVersionsError(getErrorMessage(error, 'Failed to delete version'))
     }
@@ -1009,7 +940,7 @@ export default function BucketDetails() {
       const bucket = await bucketApi.getBucket(bucketName)
       setBucketInfo(bucket)
       applySettingsPrefill(bucket)
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to save bucket settings:', error)
       setSettingsError(getErrorMessage(error, 'Failed to save bucket settings'))
     } finally {
@@ -1030,7 +961,7 @@ export default function BucketDetails() {
       setBucketInfo(bucket)
       applyLifecyclePrefill(bucket)
       applySettingsPrefill(bucket)
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to load bucket:', error)
       setSettingsError(getErrorMessage(error, 'Failed to load bucket settings'))
     } finally {
@@ -1055,9 +986,9 @@ export default function BucketDetails() {
       const bucket = await bucketApi.getBucket(bucketName)
       setBucketInfo(bucket)
       setSettingsSuccess(versioning === 'enabled' ? 'Versioning enabled' : 'Versioning suspended')
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to update versioning:', error)
-      if (error?.response?.status === 403) {
+      if (getErrorStatus(error) === 403) {
         setSettingsError('Only the bucket owner or an admin can change this')
       } else {
         setSettingsError(getErrorMessage(error, 'Failed to update versioning'))
@@ -1087,9 +1018,9 @@ export default function BucketDetails() {
       const bucket = await bucketApi.getBucket(bucketName)
       setBucketInfo(bucket)
       applyLifecyclePrefill(bucket)
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to save lifecycle rules:', error)
-      if (error?.response?.status === 403) {
+      if (getErrorStatus(error) === 403) {
         setSettingsError('Only the bucket owner or an admin can change this')
       } else {
         setSettingsError(getErrorMessage(error, 'Failed to save lifecycle rules'))

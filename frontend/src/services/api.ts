@@ -1,4 +1,7 @@
 import axios from 'axios'
+import type { InternalAxiosRequestConfig } from 'axios'
+import { withCrossTabLock } from '../utils/crossTabLock'
+import { isJwtExpired } from '../utils/jwt'
 import type { AuthResponse, User, Bucket, AccessKey, AccessKeyResponse, Object as StorageObject, S3Configuration, Group } from '../types'
 
 // Shape returned by the objects endpoint when the backend paginates results.
@@ -27,16 +30,163 @@ export interface ListObjectVersionsResponse {
   versions: ObjectVersion[]
 }
 
+// Every console request carries this header. The backend then keeps the
+// refresh token out of JSON bodies (it lives only in the httpOnly bkt_refresh
+// cookie, out of reach of page script) and accepts that cookie at
+// /auth/refresh. Being a custom header, it also forces a CORS preflight on any
+// cross-origin attempt to use the cookie.
+const CLIENT_HEADERS = { 'X-Bkt-Client': 'console' }
+
 // Use relative URL to leverage Vite's proxy configuration
 // The proxy will forward /api/* requests to the backend
 const api = axios.create({
   baseURL: '/api',
+  headers: CLIENT_HEADERS,
 })
+
+// ---------------------------------------------------------------------------
+// Session bridge. The auth store (store/authStore.ts) is the single source of
+// truth for the access token; it registers these accessors at load time so
+// this module never touches token storage itself (and needs no circular
+// import). The refresh token is never visible to script: it is the httpOnly
+// bkt_refresh cookie, which the browser attaches to /api/auth/* requests.
+// ---------------------------------------------------------------------------
+
+export interface AuthSessionBridge {
+  /** Access token this tab currently holds in memory. */
+  current(): string | null
+  /** Access token as persisted in localStorage — newer than memory if another tab just refreshed. */
+  persisted(): string | null
+  /** Store a renewed access token; must persist synchronously before returning. */
+  update(token: string): void
+  /** Drop the local session without calling the server (it is already invalid). */
+  expire(): void
+}
+
+let session: AuthSessionBridge | null = null
+
+export function registerAuthSession(bridge: AuthSessionBridge): void {
+  session = bridge
+}
+
+// Bare client for /auth/refresh: no interceptors, so a failed refresh can
+// never recurse into another refresh.
+const refreshClient = axios.create({ baseURL: '/api', headers: CLIENT_HEADERS })
+
+const REFRESH_LOCK = 'bkt-auth-refresh'
+let inflightRefresh: Promise<string> | null = null
+
+const statusOf = (err: unknown): number | undefined =>
+  axios.isAxiosError(err) ? err.response?.status : undefined
+
+// Exchanges the refresh cookie for a new access token. Empty body: the
+// browser sends the cookie (same-origin; withCredentials for good measure),
+// and the response's Set-Cookie carries the rotated refresh token.
+async function exchangeRefreshCookie(): Promise<string> {
+  const { data } = await refreshClient.post<{ token: string }>('/auth/refresh', undefined, {
+    withCredentials: true,
+  })
+  if (!data?.token) {
+    throw new Error('Malformed refresh response')
+  }
+  return data.token
+}
+
+// A token another tab stored that we can use instead of refreshing ourselves.
+const adoptable = (candidate: string | null, stale: string | null): candidate is string =>
+  !!candidate && candidate !== stale && !isJwtExpired(candidate, 5_000)
+
+// Runs under the cross-tab lock. `staleToken` is the access token the caller
+// found wanting (the one a request was rejected with, or the one about to
+// expire).
+async function performRefresh(staleToken: string | null): Promise<string> {
+  if (!session) throw new Error('Auth session not initialised')
+
+  // Read the freshest token: another tab may have refreshed while we waited
+  // for the lock (its storage event may not have reached this tab yet).
+  const latest = session.persisted() ?? session.current()
+  if (!latest) throw new Error('Not signed in')
+
+  // Someone already replaced the stale token — adopt theirs instead of
+  // rotating again. All tabs share one cookie, so a second rotation right
+  // behind theirs is wasted at best.
+  if (adoptable(latest, staleToken)) {
+    session.update(latest)
+    return latest
+  }
+
+  try {
+    const token = await exchangeRefreshCookie()
+    session.update(token) // persist before releasing the lock
+    return token
+  } catch (err) {
+    // Without Web Locks another tab can still race us and rotate the cookie
+    // under our feet. If it has already stored a fresh access token, use it;
+    // otherwise try exactly once more — the browser now sends the latest
+    // cookie.
+    if (statusOf(err) === 401) {
+      const newer = session.persisted()
+      if (adoptable(newer, latest)) {
+        session.update(newer)
+        return newer
+      }
+      const token = await exchangeRefreshCookie()
+      session.update(token)
+      return token
+    }
+    throw err
+  }
+}
+
+/**
+ * Obtain a fresh access token. Single-flight within the tab (concurrent
+ * callers share one request) and serialised across tabs, so the same refresh
+ * cookie is never presented twice (the server treats a replayed, already
+ * rotated refresh token as theft). Rejects if the session can't be renewed.
+ */
+export function refreshAccessToken(staleToken: string | null): Promise<string> {
+  if (!inflightRefresh) {
+    inflightRefresh = withCrossTabLock(REFRESH_LOCK, () => performRefresh(staleToken)).finally(() => {
+      inflightRefresh = null
+    })
+  }
+  return inflightRefresh
+}
+
+/** Refresh failed for good: drop the session and go to the sign-in page. */
+export function handleSessionExpired(): void {
+  session?.expire()
+  const path = window.location.pathname
+  if (!path.includes('/login') && !path.includes('/register') && !path.includes('/callback')) {
+    window.location.href = '/login'
+  }
+}
+
+// Every /auth/* endpoint is either public (login, register, refresh, SSO) or
+// the logout call itself: a 401 there must never trigger a refresh.
+const isAuthEndpoint = (url: string | undefined): boolean =>
+  !!url && /^\/?auth\//.test(url.replace(/^\/api\//, ''))
+
+const bearerOf = (config: InternalAxiosRequestConfig): string | null => {
+  const header = config.headers?.Authorization
+  return typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : null
+}
+
+type RetriableRequest = InternalAxiosRequestConfig & { _authRetried?: boolean }
+
+declare module 'axios' {
+  interface AxiosRequestConfig {
+    /** Carries its own credentials: a 401 is returned to the caller as-is (no refresh, no logout). */
+    skipAuthRefresh?: boolean
+  }
+}
 
 // Request interceptor to add auth token and set Content-Type
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('token')
-  if (token) {
+  // A caller may pass an explicit token (SSO callback, before the session is
+  // stored); otherwise use the store's.
+  const token = session?.current()
+  if (token && !config.headers.Authorization) {
     config.headers.Authorization = `Bearer ${token}`
   }
 
@@ -49,35 +199,45 @@ api.interceptors.request.use((config) => {
   return config
 })
 
-// Response interceptor to handle errors
+// Response interceptor: on a 401 from an authenticated call, renew the access
+// token once (silently) and replay the request; log out only if that fails.
 api.interceptors.response.use(
   (response) => response,
-  async (error) => {
-    if (error.response?.status === 401) {
-      // Clear all auth data
-      localStorage.removeItem('token')
-      localStorage.removeItem('refresh_token')
-      localStorage.removeItem('auth-storage') // Clear persisted Zustand state
-      sessionStorage.removeItem('auth_timestamp')
-
-      // Import authStore dynamically to avoid circular dependency
-      const { useAuthStore } = await import('../store/authStore')
-
-      // Clear the auth store state
-      useAuthStore.setState({
-        user: null,
-        token: null,
-        isAuthenticated: false,
-        lastAuthTime: null
-      })
-
-      // Only redirect if not already on login page and not on callback pages
-      const path = window.location.pathname
-      if (!path.includes('/login') && !path.includes('/callback')) {
-        window.location.href = '/login'
-      }
+  async (error: unknown) => {
+    if (!axios.isAxiosError(error) || error.response?.status !== 401 || !error.config) {
+      return Promise.reject(error)
     }
-    return Promise.reject(error)
+    const config = error.config as RetriableRequest
+    if (config.skipAuthRefresh || isAuthEndpoint(config.url)) {
+      return Promise.reject(error)
+    }
+
+    const usedToken = bearerOf(config)
+    if (config._authRetried || !usedToken) {
+      // Already replayed with a fresh token, or we weren't signed in at all.
+      handleSessionExpired()
+      return Promise.reject(error)
+    }
+    config._authRetried = true
+
+    try {
+      // A refresh may already have landed while this request was in flight:
+      // then just replay with the current token.
+      const current = session?.current()
+      if (!current || current === usedToken || isJwtExpired(current, 5_000)) {
+        await refreshAccessToken(usedToken)
+      }
+    } catch (refreshError) {
+      console.warn('Session refresh failed:', refreshError)
+      handleSessionExpired()
+      return Promise.reject(error)
+    }
+
+    const fresh = session?.current()
+    if (fresh) {
+      config.headers.Authorization = `Bearer ${fresh}`
+    }
+    return api(config)
   }
 )
 
@@ -93,20 +253,21 @@ export const authApi = {
     return data
   },
 
+  // Revokes the access token and the refresh token server-side (the latter
+  // arrives as the bkt_refresh cookie), and makes the server clear the cookie.
   logout: async (): Promise<void> => {
-    await api.post('/auth/logout')
-  },
-
-  refreshToken: async (refreshToken: string): Promise<{ token: string }> => {
-    const { data } = await api.post<{ token: string }>('/auth/refresh', { refresh_token: refreshToken })
-    return data
+    await api.post('/auth/logout', {}, { withCredentials: true })
   },
 }
 
 // User API
 export const userApi = {
-  getCurrentUser: async (): Promise<User> => {
-    const { data } = await api.get<User>('/users/me')
+  // `accessToken` overrides the stored session token (used by the SSO
+  // callback to look the user up before committing the session).
+  getCurrentUser: async (accessToken?: string): Promise<User> => {
+    const { data } = await api.get<User>('/users/me', accessToken
+      ? { headers: { Authorization: `Bearer ${accessToken}` }, skipAuthRefresh: true }
+      : undefined)
     return data
   },
 

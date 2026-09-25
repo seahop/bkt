@@ -290,7 +290,7 @@ const docTemplate = `{
         },
         "/api/auth/login": {
             "post": {
-                "description": "Authenticates a user with username and password and returns JWT access and refresh tokens.",
+                "description": "Authenticates a user with username and password and returns JWT access and refresh tokens. The refresh token is also set in the httpOnly bkt_refresh cookie; with the X-Bkt-Client: console header it is omitted from the body.",
                 "consumes": [
                     "application/json"
                 ],
@@ -353,7 +353,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "Revokes the current access token and optionally the refresh token by blacklisting their JTIs.",
+                "description": "Revokes the current access token, its sibling refresh token, and any refresh token presented in the body or the bkt_refresh console cookie; always clears the cookie.",
                 "consumes": [
                     "application/json"
                 ],
@@ -386,7 +386,7 @@ const docTemplate = `{
         },
         "/api/auth/refresh": {
             "post": {
-                "description": "Generates a new JWT access token using a valid refresh token.",
+                "description": "Exchanges a refresh token (from the JSON body, or from the bkt_refresh cookie together with the X-Bkt-Client: console header) for a new access token and a rotated refresh token. The rotated refresh token is set in the cookie and, for non-console clients, returned in the body.",
                 "consumes": [
                     "application/json"
                 ],
@@ -399,10 +399,9 @@ const docTemplate = `{
                 "summary": "Refresh access token",
                 "parameters": [
                     {
-                        "description": "Refresh token",
+                        "description": "Refresh token (optional when using the bkt_refresh cookie)",
                         "name": "request",
                         "in": "body",
-                        "required": true,
                         "schema": {
                             "type": "object"
                         }
@@ -427,6 +426,12 @@ const docTemplate = `{
                             "$ref": "#/definitions/models.ErrorResponse"
                         }
                     },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
@@ -438,7 +443,7 @@ const docTemplate = `{
         },
         "/api/auth/register": {
             "post": {
-                "description": "Creates a new user account and returns JWT access and refresh tokens. Registration must be enabled in server configuration.",
+                "description": "Creates a new user account and returns JWT access and refresh tokens. The refresh token is also set in the httpOnly bkt_refresh cookie; with the X-Bkt-Client: console header it is omitted from the body. Registration must be enabled in server configuration.",
                 "consumes": [
                     "application/json"
                 ],

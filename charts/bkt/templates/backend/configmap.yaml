@@ -32,9 +32,13 @@ data:
   S3_PUBLIC_ENDPOINT: {{ .Values.backend.env.S3_PUBLIC_ENDPOINT | default "" | quote }}
   AUTH_RATE_LIMIT: {{ .Values.backend.env.AUTH_RATE_LIMIT | default "20" | quote }}
   AUTH_REFRESH_RATE_LIMIT: {{ .Values.backend.env.AUTH_REFRESH_RATE_LIMIT | default "30" | quote }}
+  ACCESS_TOKEN_EXPIRY: {{ include "bkt.env" (list . "ACCESS_TOKEN_EXPIRY" "15m") | quote }}
+  REFRESH_TOKEN_EXPIRY: {{ include "bkt.env" (list . "REFRESH_TOKEN_EXPIRY" "168h") | quote }}
   SWAGGER_ENABLED: {{ .Values.backend.env.SWAGGER_ENABLED | default "" | quote }}
+  HSTS_MAX_AGE: {{ include "bkt.env" (list . "HSTS_MAX_AGE" "31536000") | quote }}
   CONTENT_TYPE_ENFORCEMENT: {{ .Values.backend.env.CONTENT_TYPE_ENFORCEMENT | default "false" | quote }}
   CORS_ALLOWED_ORIGINS: {{ .Values.backend.env.CORS_ALLOWED_ORIGINS | default "" | quote }}
+  CORS_ALLOW_CREDENTIALS: {{ include "bkt.env" (list . "CORS_ALLOW_CREDENTIALS" "true") | quote }}
   TRUSTED_PROXIES: {{ include "bkt.trustedProxies" . | quote }}
   S3_RATE_LIMIT: {{ .Values.backend.env.S3_RATE_LIMIT | default "0" | quote }}
   AUDIT_RETENTION_DAYS: {{ .Values.backend.env.AUDIT_RETENTION_DAYS | default "90" | quote }}
@@ -58,6 +62,11 @@ data:
   GOOGLE_CLIENT_ID: {{ .Values.backend.env.GOOGLE_CLIENT_ID | default "" | quote }}
   GOOGLE_REDIRECT_URL: {{ .Values.backend.env.GOOGLE_REDIRECT_URL | default "" | quote }}
   GOOGLE_ALLOWED_DOMAINS: {{ .Values.backend.env.GOOGLE_ALLOWED_DOMAINS | default "" | quote }}
+  GOOGLE_WORKSPACE_ENABLED: {{ include "bkt.env" (list . "GOOGLE_WORKSPACE_ENABLED" "false") | quote }}
+  GOOGLE_SERVICE_ACCOUNT_KEY_FILE: {{ include "bkt.env" (list . "GOOGLE_SERVICE_ACCOUNT_KEY_FILE" "") | quote }}
+  GOOGLE_WORKSPACE_ADMIN_EMAIL: {{ include "bkt.env" (list . "GOOGLE_WORKSPACE_ADMIN_EMAIL" "") | quote }}
+  GOOGLE_POLICY_SYNC_MODE: {{ include "bkt.env" (list . "GOOGLE_POLICY_SYNC_MODE" "direct") | quote }}
+  GOOGLE_POLICY_GROUP_PREFIX: {{ include "bkt.env" (list . "GOOGLE_POLICY_GROUP_PREFIX" "") | quote }}
   VAULT_ADDR: {{ .Values.backend.env.VAULT_ADDR | default "" | quote }}
   VAULT_OIDC_ENABLED: {{ .Values.backend.env.VAULT_OIDC_ENABLED | default "false" | quote }}
   VAULT_OIDC_CLIENT_ID: {{ .Values.backend.env.VAULT_OIDC_CLIENT_ID | default "" | quote }}
@@ -69,6 +78,8 @@ data:
   VAULT_SSO_ENABLED: {{ .Values.backend.env.VAULT_SSO_ENABLED | default "false" | quote }}
   VAULT_JWT_AUDIENCE: {{ .Values.backend.env.VAULT_JWT_AUDIENCE | default "" | quote }}
   VAULT_JWT_ISSUER: {{ .Values.backend.env.VAULT_JWT_ISSUER | default "" | quote }}
+  VAULT_JWT_PATH: {{ include "bkt.env" (list . "VAULT_JWT_PATH" "auth/jwt") | quote }}
+  VAULT_JWT_ROLE: {{ include "bkt.env" (list . "VAULT_JWT_ROLE" "object-storage-users") | quote }}
   FRONTEND_URL: {{ .Values.backend.env.FRONTEND_URL | default "" | quote }}
 {{- if and (not .Values.backend.tls.enabled) (not .Values.backend.tls.terminatedUpstream) (has (lower (.Values.backend.env.GO_ENV | default "production")) (list "production" "prod")) }}
 {{- fail "backend.tls.enabled=false in production: the backend refuses to serve plain HTTP. If an ingress/reverse proxy terminates TLS in front of bkt, also set backend.tls.terminatedUpstream=true; otherwise keep backend.tls.enabled=true." }}

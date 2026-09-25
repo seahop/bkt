@@ -620,8 +620,9 @@ paths:
     post:
       consumes:
       - application/json
-      description: Authenticates a user with username and password and returns JWT
-        access and refresh tokens.
+      description: 'Authenticates a user with username and password and returns JWT
+        access and refresh tokens. The refresh token is also set in the httpOnly bkt_refresh
+        cookie; with the X-Bkt-Client: console header it is omitted from the body.'
       parameters:
       - description: Login credentials
         in: body
@@ -659,8 +660,9 @@ paths:
     post:
       consumes:
       - application/json
-      description: Revokes the current access token and optionally the refresh token
-        by blacklisting their JTIs.
+      description: Revokes the current access token, its sibling refresh token, and
+        any refresh token presented in the body or the bkt_refresh console cookie;
+        always clears the cookie.
       parameters:
       - description: Optional refresh token to also revoke
         in: body
@@ -683,12 +685,14 @@ paths:
     post:
       consumes:
       - application/json
-      description: Generates a new JWT access token using a valid refresh token.
+      description: 'Exchanges a refresh token (from the JSON body, or from the bkt_refresh
+        cookie together with the X-Bkt-Client: console header) for a new access token
+        and a rotated refresh token. The rotated refresh token is set in the cookie
+        and, for non-console clients, returned in the body.'
       parameters:
-      - description: Refresh token
+      - description: Refresh token (optional when using the bkt_refresh cookie)
         in: body
         name: request
-        required: true
         schema:
           type: object
       produces:
@@ -706,6 +710,10 @@ paths:
           description: Unauthorized
           schema:
             $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
@@ -717,8 +725,10 @@ paths:
     post:
       consumes:
       - application/json
-      description: Creates a new user account and returns JWT access and refresh tokens.
-        Registration must be enabled in server configuration.
+      description: 'Creates a new user account and returns JWT access and refresh
+        tokens. The refresh token is also set in the httpOnly bkt_refresh cookie;
+        with the X-Bkt-Client: console header it is omitted from the body. Registration
+        must be enabled in server configuration.'
       parameters:
       - description: Registration credentials
         in: body

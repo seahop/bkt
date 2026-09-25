@@ -1,6 +1,8 @@
 package api
 
 import (
+	"errors"
+	"io"
 	"net/http"
 	"time"
 	"unicode/utf8"
@@ -45,6 +47,19 @@ func truncateForAudit(s string) string {
 	return s[:cut]
 }
 
+// deliverRefreshToken hands a freshly issued refresh token to the client: it
+// always sets the httpOnly console cookie (bkt_refresh) and returns the value
+// to put in the JSON body — "" for the web console (X-Bkt-Client: console),
+// which must never see the token from script, and the token itself for
+// API/script clients, which keep the body-based flow.
+func (h *AuthHandler) deliverRefreshToken(c *gin.Context, refreshToken string) string {
+	auth.SetRefreshCookie(c, h.config, refreshToken)
+	if auth.IsConsoleClient(c) {
+		return ""
+	}
+	return refreshToken
+}
+
 type AuthHandler struct {
 	config       *config.Config
 	loginGuard   *loginGuard
@@ -61,7 +76,7 @@ func NewAuthHandler(cfg *config.Config) *AuthHandler {
 
 // Register creates a new user account
 // @Summary Register a new user
-// @Description Creates a new user account and returns JWT access and refresh tokens. Registration must be enabled in server configuration.
+// @Description Creates a new user account and returns JWT access and refresh tokens. The refresh token is also set in the httpOnly bkt_refresh cookie; with the X-Bkt-Client: console header it is omitted from the body. Registration must be enabled in server configuration.
 // @Tags auth
 // @Accept json
 // @Produce json
@@ -89,6 +104,10 @@ func (h *AuthHandler) Register(c *gin.Context) {
 			Error:   "Invalid request",
 			Message: err.Error(),
 		})
+		return
+	}
+
+	if rejectOverlongPassword(c, req.Password) {
 		return
 	}
 
@@ -152,14 +171,14 @@ func (h *AuthHandler) Register(c *gin.Context) {
 
 	c.JSON(http.StatusCreated, models.AuthResponse{
 		Token:        token,
-		RefreshToken: refreshToken,
+		RefreshToken: h.deliverRefreshToken(c, refreshToken),
 		User:         user,
 	})
 }
 
 // Login authenticates a user and returns JWT tokens
 // @Summary Login with username and password
-// @Description Authenticates a user with username and password and returns JWT access and refresh tokens.
+// @Description Authenticates a user with username and password and returns JWT access and refresh tokens. The refresh token is also set in the httpOnly bkt_refresh cookie; with the X-Bkt-Client: console header it is omitted from the body.
 // @Tags auth
 // @Accept json
 // @Produce json
@@ -280,30 +299,33 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	c.JSON(http.StatusOK, models.AuthResponse{
 		Token:        token,
-		RefreshToken: refreshToken,
+		RefreshToken: h.deliverRefreshToken(c, refreshToken),
 		User:         user,
 	})
 }
 
 // RefreshToken generates a new access token using a refresh token
 // @Summary Refresh access token
-// @Description Generates a new JWT access token using a valid refresh token.
+// @Description Exchanges a refresh token (from the JSON body, or from the bkt_refresh cookie together with the X-Bkt-Client: console header) for a new access token and a rotated refresh token. The rotated refresh token is set in the cookie and, for non-console clients, returned in the body.
 // @Tags auth
 // @Accept json
 // @Produce json
-// @Param request body object true "Refresh token" SchemaExample({"refresh_token":"eyJ..."})
+// @Param request body object false "Refresh token (optional when using the bkt_refresh cookie)" SchemaExample({"refresh_token":"eyJ..."})
 // @Success 200 {object} object "New access token"
 // @Failure 400 {object} models.ErrorResponse
 // @Failure 401 {object} models.ErrorResponse
+// @Failure 403 {object} models.ErrorResponse
 // @Failure 500 {object} models.ErrorResponse
 // @Router /api/auth/refresh [post]
 func (h *AuthHandler) RefreshToken(c *gin.Context) {
 	limitAuthBody(c)
 	var req struct {
-		RefreshToken string `json:"refresh_token" binding:"required"`
+		RefreshToken string `json:"refresh_token"`
 	}
 
-	if err := c.ShouldBindJSON(&req); err != nil {
+	// The body is optional (the console sends none and relies on the cookie);
+	// an empty body is fine, a malformed one is not.
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error:   "Invalid request",
 			Message: err.Error(),
@@ -311,8 +333,32 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 		return
 	}
 
+	// Scripts/API clients present the token in the body (unchanged). The
+	// console's lives in the httpOnly bkt_refresh cookie; using it requires the
+	// console's custom header, which a cross-site page cannot send without a
+	// CORS preflight that the origin allowlist refuses (SameSite=Strict already
+	// keeps the cookie off cross-site requests — this is defence in depth).
+	refreshToken := req.RefreshToken
+	if refreshToken == "" {
+		refreshToken = auth.RefreshTokenFromCookie(c)
+		if refreshToken == "" {
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{
+				Error:   "Invalid request",
+				Message: "refresh_token is required",
+			})
+			return
+		}
+		if !auth.IsConsoleClient(c) {
+			c.JSON(http.StatusForbidden, models.ErrorResponse{
+				Error:   "Missing client header",
+				Message: "Refreshing with the session cookie requires the " + auth.ClientHeader + ": " + auth.ClientConsole + " header",
+			})
+			return
+		}
+	}
+
 	// Validate refresh token signature and expiry
-	claims, err := auth.ValidateToken(req.RefreshToken, h.config.Auth.JWTSecret)
+	claims, err := auth.ValidateToken(refreshToken, h.config.Auth.JWTSecret)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, models.ErrorResponse{
 			Error:   "Invalid refresh token",
@@ -412,15 +458,16 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"token":         newToken,
-		"refresh_token": newRefresh,
-	})
+	resp := gin.H{"token": newToken}
+	if body := h.deliverRefreshToken(c, newRefresh); body != "" {
+		resp["refresh_token"] = body
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
-// Logout revokes the current access token (and optionally the refresh token) by blacklisting their JTIs
+// Logout revokes the current access token and its refresh token(s) by blacklisting their JTIs
 // @Summary Logout and revoke tokens
-// @Description Revokes the current access token and optionally the refresh token by blacklisting their JTIs.
+// @Description Revokes the current access token, its sibling refresh token, and any refresh token presented in the body or the bkt_refresh console cookie; always clears the cookie.
 // @Tags auth
 // @Accept json
 // @Produce json
@@ -444,9 +491,10 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	}
 
 	// Revoke the sibling refresh token via the pair JTI embedded in the access
-	// token — the frontend deliberately never stores the refresh token, so this
-	// is the only way logout can reach it. Expiry is bounded by the configured
-	// refresh duration (the row is pruned once it lapses).
+	// token, so logout reaches it even when the client presents no refresh
+	// token (API clients that don't send it; a console whose cookie is gone).
+	// Expiry is bounded by the configured refresh duration (the row is pruned
+	// once it lapses).
 	if pairJTI, ok := c.Get("token_pair_jti"); ok {
 		if pairStr, _ := pairJTI.(string); pairStr != "" {
 			refreshDur, _ := time.ParseDuration(h.config.Auth.RefreshTokenExpiry)
@@ -459,24 +507,40 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 		}
 	}
 
-	// Optionally revoke the refresh token too (client should send it on logout)
+	// Also revoke the refresh token the client presents: in the JSON body
+	// (API/script clients) and/or the httpOnly bkt_refresh cookie (the web
+	// console, which never holds the token in script). After rotations it may
+	// no longer be the access token's sibling, so the pair JTI alone isn't
+	// enough.
 	limitAuthBody(c)
 	var body struct {
 		RefreshToken string `json:"refresh_token"`
 	}
 	if err := c.ShouldBindJSON(&body); err == nil && body.RefreshToken != "" {
-		// Parse without expiry enforcement — we want to blacklist even if already expired
-		if claims, err := auth.ParseTokenClaims(body.RefreshToken, h.config.Auth.JWTSecret); err == nil && claims.ID != "" {
-			database.DB.Create(&models.RevokedToken{
-				JTI:       claims.ID,
-				UserID:    uid,
-				Reason:    models.RevokedReasonLogout,
-				ExpiresAt: claims.ExpiresAt.Time,
-			})
-		}
+		h.revokeRefreshToken(body.RefreshToken, uid)
 	}
+	if cookieToken := auth.RefreshTokenFromCookie(c); cookieToken != "" && cookieToken != body.RefreshToken {
+		h.revokeRefreshToken(cookieToken, uid)
+	}
+	// Always drop the console cookie, whatever was (or wasn't) revoked.
+	auth.ClearRefreshCookie(c, h.config)
 
 	c.JSON(http.StatusOK, models.SuccessResponse{
 		Message: "Successfully logged out",
+	})
+}
+
+// revokeRefreshToken blacklists a presented refresh token's JTI. Parsed
+// without expiry enforcement: even an expired token is recorded.
+func (h *AuthHandler) revokeRefreshToken(token string, uid uuid.UUID) {
+	claims, err := auth.ParseTokenClaims(token, h.config.Auth.JWTSecret)
+	if err != nil || claims.ID == "" || claims.ExpiresAt == nil {
+		return
+	}
+	database.DB.Create(&models.RevokedToken{
+		JTI:       claims.ID,
+		UserID:    uid,
+		Reason:    models.RevokedReasonLogout,
+		ExpiresAt: claims.ExpiresAt.Time,
 	})
 }

@@ -93,7 +93,7 @@ func SetupConsoleRouter(cfg *config.Config) *gin.Engine {
 	router.Use(cors.New(cors.Config{
 		AllowOrigins:     cfg.CORS.AllowedOrigins,
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "X-Amz-Date", "X-Amz-Content-Sha256", "X-Request-ID", "Idempotency-Key"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "X-Amz-Date", "X-Amz-Content-Sha256", "X-Request-ID", "Idempotency-Key", "X-Bkt-Client"},
 		ExposeHeaders:    []string{"Content-Length", "ETag", "X-Amz-Request-Id", "X-Request-ID"},
 		AllowCredentials: cfg.CORS.AllowCredentials,
 	}))
@@ -147,14 +147,14 @@ func SetupS3Router(cfg *config.Config) *gin.Engine {
 		s3.PUT("/:bucket", s3Handler.CreateBucket)      // 409 BucketAlreadyOwnedByYou for an existing bucket
 
 		// Object-level operations
-		s3.HEAD("/:bucket/*key", s3Handler.HeadObject)
+		s3.HEAD("/:bucket/*key", BucketOr(s3Handler.HeadBucket, s3Handler.HeadObject))
 		// GET also handles ListParts (?uploadId). S3ObjectResponseHeaders adds
 		// nosniff and serves active content (HTML/SVG/XML/JS) as an attachment
 		// so a presigned link can't render uploader-controlled markup.
-		s3.GET("/:bucket/*key", middleware.S3ObjectResponseHeaders(), s3Handler.GetObject)
-		s3.PUT("/:bucket/*key", s3Handler.PutObject)         // also handles UploadPart (?partNumber&uploadId)
-		s3.POST("/:bucket/*key", s3Handler.HandleObjectPost) // CreateMultipartUpload (?uploads) or CompleteMultipartUpload (?uploadId)
-		s3.DELETE("/:bucket/*key", s3Handler.DeleteObject)   // also handles AbortMultipartUpload (?uploadId)
+		s3.GET("/:bucket/*key", middleware.S3ObjectResponseHeaders(), BucketOr(s3Handler.ListObjects, s3Handler.GetObject))
+		s3.PUT("/:bucket/*key", BucketOr(s3Handler.CreateBucket, s3Handler.PutObject))                   // also handles UploadPart (?partNumber&uploadId)
+		s3.POST("/:bucket/*key", BucketOr(s3Handler.HandleBucketPost, s3Handler.HandleObjectPost))       // CreateMultipartUpload (?uploads) or CompleteMultipartUpload (?uploadId)
+		s3.DELETE("/:bucket/*key", BucketOr(s3Handler.DeleteBucketNotSupported, s3Handler.DeleteObject)) // also handles AbortMultipartUpload (?uploadId)
 	}
 
 	return router

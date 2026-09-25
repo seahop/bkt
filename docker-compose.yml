@@ -71,6 +71,9 @@ services:
       TLS_CERT_FILE: ${TLS_CERT_FILE:-/certs/backend.crt}
       TLS_KEY_FILE: ${TLS_KEY_FILE:-/certs/backend.key}
       TLS_CA_FILE: ${TLS_CA_FILE:-/certs/ca.crt}
+      # true (with TLS_ENABLED=false) when a reverse proxy terminates TLS in
+      # front of the backend; satisfies the production TLS requirement.
+      TLS_TERMINATED_UPSTREAM: ${TLS_TERMINATED_UPSTREAM:-false}
       # Admin Configuration (from .env file)
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
@@ -79,8 +82,13 @@ services:
       AUTH_RATE_LIMIT: ${AUTH_RATE_LIMIT:-60}
       # Separate per-IP budget for /api/auth/refresh (backend default 30/min).
       AUTH_REFRESH_RATE_LIMIT: ${AUTH_REFRESH_RATE_LIMIT:-}
+      # JWT lifetimes (Go durations, e.g. 15m, 168h).
+      ACCESS_TOKEN_EXPIRY: ${ACCESS_TOKEN_EXPIRY:-15m}
+      REFRESH_TOKEN_EXPIRY: ${REFRESH_TOKEN_EXPIRY:-168h}
       # Swagger UI at /api/docs (default: on in development, off in production).
       SWAGGER_ENABLED: ${SWAGGER_ENABLED:-}
+      # Strict-Transport-Security max-age (seconds) when TLS is on; 0 disables.
+      HSTS_MAX_AGE: ${HSTS_MAX_AGE:-31536000}
       # Comma-separated proxy CIDRs/IPs whose X-Forwarded-For is trusted for
       # rate limiting; empty (default) = trust none.
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
@@ -93,6 +101,9 @@ services:
       # Comma-separated hostnames/IPs/CIDRs webhook deliveries may reach even
       # though they are private/loopback (SSRF guard); empty = public only.
       WEBHOOK_ALLOWED_HOSTS: ${WEBHOOK_ALLOWED_HOSTS:-}
+      # Explicit http(s) egress proxy for webhook deliveries (may carry
+      # user:pass); empty = connect directly. HTTP(S)_PROXY is never used.
+      WEBHOOK_PROXY_URL: ${WEBHOOK_PROXY_URL:-}
       # Base URL embedded in console-generated presigned URLs. The dev stack
       # fronts the backend with the vite proxy, so host derivation would see the
       # internal service name — pin the browser-facing S3 endpoint instead.
@@ -139,6 +150,9 @@ services:
       VAULT_SSO_ENABLED: ${VAULT_SSO_ENABLED:-false}
       VAULT_JWT_AUDIENCE: ${VAULT_JWT_AUDIENCE:-}
       VAULT_JWT_ISSUER: ${VAULT_JWT_ISSUER:-}
+      # Vault JWT auth mount (JWKS: <VAULT_ADDR>/v1/<path>/.well-known/jwks.json)
+      VAULT_JWT_PATH: ${VAULT_JWT_PATH:-auth/jwt}
+      VAULT_JWT_ROLE: ${VAULT_JWT_ROLE:-object-storage-users}
       VAULT_OIDC_CLIENT_ID: ${VAULT_OIDC_CLIENT_ID:-}
       VAULT_OIDC_PROVIDER_URL: ${VAULT_OIDC_PROVIDER_URL:-}
       VAULT_OIDC_REDIRECT_URL: ${VAULT_OIDC_REDIRECT_URL:-https://localhost:9443/api/auth/vault/callback}
@@ -158,6 +172,8 @@ services:
       # Storage Configuration
       STORAGE_BACKEND: ${STORAGE_BACKEND:-local}  # "local" or "s3"
       STORAGE_ROOT: ${STORAGE_ROOT:-/data/buckets}
+      # Detect content types from magic bytes and reject unsafe ones.
+      CONTENT_TYPE_ENFORCEMENT: ${CONTENT_TYPE_ENFORCEMENT:-false}
       # S3 Storage Configuration (optional, for S3 backend)
       S3_ENABLED: ${S3_ENABLED:-false}
       S3_ENDPOINT: ${S3_ENDPOINT:-s3.amazonaws.com}

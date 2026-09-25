@@ -25,13 +25,11 @@ const VaultLoginModal: React.FC<VaultLoginModalProps> = ({ isOpen, onClose }) =>
     try {
       const response = await loginWithVault(token);
 
-      // Go through the auth store exactly like password/SSO login: writing
-      // only localStorage.token left isAuthenticated false, so PrivateRoute
-      // bounced straight back to /login. setAuth persists the access token
-      // (never the refresh token) and marks the session fresh.
+      // Go through the auth store exactly like password/SSO login: setAuth
+      // persists the access token and marks the session fresh. The refresh
+      // token (for silent renewal) arrived as the httpOnly bkt_refresh cookie.
       setAuth({
         token: response.token,
-        refresh_token: response.refresh_token,
         user: response.user,
       });
       setToken('');

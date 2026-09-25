@@ -12,6 +12,7 @@ export interface User {
 
 export interface AuthResponse {
   token: string
+  /** Sent only to non-console API clients; the console's is the httpOnly bkt_refresh cookie. */
   refresh_token?: string
   user: User
 }
@@ -58,7 +59,7 @@ export interface Object {
   size: number
   content_type: string
   etag: string
-  metadata?: Record<string, any>
+  metadata?: Record<string, unknown>
   created_at: string
   updated_at: string
 }

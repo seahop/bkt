@@ -25,6 +25,10 @@ type SSOConfigResponse struct {
 	OIDCEnabled      bool   `json:"oidc_enabled"`
 	OIDCAuthURL      string `json:"oidc_auth_url,omitempty"`
 	OIDCProviderName string `json:"oidc_provider_name,omitempty"`
+	// AllowRegistration mirrors ALLOW_REGISTRATION: whether POST
+	// /api/auth/register accepts self-service sign-ups, so the login page can
+	// offer a "Create account" link only when it would work.
+	AllowRegistration bool `json:"allow_registration"`
 }
 
 // GetSSOConfig returns the SSO configuration for the frontend
@@ -33,8 +37,9 @@ func (h *SSOConfigHandler) GetSSOConfig(c *gin.Context) {
 	vaultEnabled := h.config.VaultSSO.Enabled || h.config.VaultSSO.OIDCEnabled
 
 	response := SSOConfigResponse{
-		GoogleEnabled: h.config.GoogleSSO.OIDCEnabled,
-		VaultEnabled:  vaultEnabled,
+		GoogleEnabled:     h.config.GoogleSSO.OIDCEnabled,
+		VaultEnabled:      vaultEnabled,
+		AllowRegistration: h.config.Auth.AllowRegistration,
 	}
 
 	// Only include auth URL if Google OIDC is enabled

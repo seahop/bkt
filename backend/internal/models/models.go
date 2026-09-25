@@ -9,22 +9,22 @@ import (
 
 // User represents a user in the system
 type User struct {
-	ID        uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
-	Username  string    `gorm:"uniqueIndex;not null" json:"username"`
-	Email     string    `gorm:"uniqueIndex;not null" json:"email"`
-	Password  string    `gorm:"" json:"-"` // Nullable for SSO users, never serialize
-	IsAdmin   bool      `gorm:"default:false" json:"is_admin"`
-	IsLocked  bool      `gorm:"default:false" json:"is_locked"` // Account lock status
+	ID       uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
+	Username string    `gorm:"uniqueIndex;not null" json:"username"`
+	Email    string    `gorm:"uniqueIndex;not null" json:"email"`
+	Password string    `gorm:"" json:"-"` // Nullable for SSO users, never serialize
+	IsAdmin  bool      `gorm:"default:false" json:"is_admin"`
+	IsLocked bool      `gorm:"default:false" json:"is_locked"` // Account lock status
 	// TokenVersion is bumped to invalidate all outstanding JWTs for this user
 	// (lock, delete, password change, admin demotion, "sign out everywhere").
 	TokenVersion int       `gorm:"default:0;not null" json:"-"`
 	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 
 	// SSO fields
 	SSOProvider string `gorm:"index" json:"sso_provider,omitempty"` // "google", "vault", or empty for local
 	SSOID       string `gorm:"index" json:"sso_id,omitempty"`       // Unique ID from SSO provider
-	SSOEmail    string `gorm:"" json:"sso_email,omitempty"`          // Email from SSO (may differ from Email)
+	SSOEmail    string `gorm:"" json:"sso_email,omitempty"`         // Email from SSO (may differ from Email)
 
 	// Relationships
 	Buckets    []Bucket    `gorm:"foreignKey:OwnerID" json:"buckets,omitempty"`
@@ -42,19 +42,19 @@ func (u *User) BeforeCreate(tx *gorm.DB) error {
 
 // AccessKey represents API access credentials
 type AccessKey struct {
-	ID                 uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
-	UserID             uuid.UUID `gorm:"type:uuid;not null;index" json:"user_id"`
-	AccessKey          string    `gorm:"uniqueIndex;not null" json:"access_key"`
-	SecretKeyHash      string    `gorm:"not null" json:"-"` // Never serialize secret (bcrypt hash for API auth)
-	SecretKeyEncrypted string    `gorm:"not null" json:"-"` // Never serialize secret (AES-encrypted for S3 auth)
-	Name               string    `gorm:"" json:"name,omitempty"`                // Human label to tell keys apart
-	Temporary          bool      `gorm:"default:false;index" json:"temporary,omitempty"` // bkt-STS short-lived credential: excluded from the key limit, hard-deleted after expiry
-	IssuerTokenVersion *int      `json:"-"`                                             // STS only: user's TokenVersion at issuance; a later bump (password change, lock, reuse detection) revokes it
-	IsActive           bool      `gorm:"default:true" json:"is_active"`
-	ReadOnly           bool      `gorm:"default:false" json:"read_only"`        // Deny mutating S3 operations
-	ExpiresAt          *time.Time `gorm:"index" json:"expires_at,omitempty"`    // nil = never expires
+	ID                 uuid.UUID  `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
+	UserID             uuid.UUID  `gorm:"type:uuid;not null;index" json:"user_id"`
+	AccessKey          string     `gorm:"uniqueIndex;not null" json:"access_key"`
+	SecretKeyHash      string     `gorm:"not null" json:"-"`                              // Never serialize secret (bcrypt hash for API auth)
+	SecretKeyEncrypted string     `gorm:"not null" json:"-"`                              // Never serialize secret (AES-encrypted for S3 auth)
+	Name               string     `gorm:"" json:"name,omitempty"`                         // Human label to tell keys apart
+	Temporary          bool       `gorm:"default:false;index" json:"temporary,omitempty"` // bkt-STS short-lived credential: excluded from the key limit, hard-deleted after expiry
+	IssuerTokenVersion *int       `json:"-"`                                              // STS only: user's TokenVersion at issuance; a later bump (password change, lock, reuse detection) revokes it
+	IsActive           bool       `gorm:"default:true" json:"is_active"`
+	ReadOnly           bool       `gorm:"default:false" json:"read_only"`    // Deny mutating S3 operations
+	ExpiresAt          *time.Time `gorm:"index" json:"expires_at,omitempty"` // nil = never expires
 	LastUsedAt         *time.Time `json:"last_used_at,omitempty"`
-	CreatedAt          time.Time `json:"created_at"`
+	CreatedAt          time.Time  `json:"created_at"`
 
 	// Relationships
 	User User `gorm:"foreignKey:UserID" json:"user,omitempty"`
@@ -69,18 +69,18 @@ func (a *AccessKey) BeforeCreate(tx *gorm.DB) error {
 
 // S3Configuration represents an S3 storage configuration
 type S3Configuration struct {
-	ID                   uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
-	Name                 string    `gorm:"uniqueIndex;not null" json:"name"`
-	Endpoint             string    `gorm:"not null" json:"endpoint"`
-	Region               string    `gorm:"not null" json:"region"`
-	AccessKeyID          string    `gorm:"not null" json:"access_key_id"`
-	SecretAccessKey      string    `gorm:"not null" json:"-"` // Encrypted, never serialize
-	BucketPrefix         string    `json:"bucket_prefix,omitempty"`
-	UseSSL               bool      `gorm:"default:true" json:"use_ssl"`
-	ForcePathStyle       bool      `gorm:"default:false" json:"force_path_style"`
-	IsDefault            bool      `gorm:"default:false" json:"is_default"`
-	CreatedAt            time.Time `json:"created_at"`
-	UpdatedAt            time.Time `json:"updated_at"`
+	ID              uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
+	Name            string    `gorm:"uniqueIndex;not null" json:"name"`
+	Endpoint        string    `gorm:"not null" json:"endpoint"`
+	Region          string    `gorm:"not null" json:"region"`
+	AccessKeyID     string    `gorm:"not null" json:"access_key_id"`
+	SecretAccessKey string    `gorm:"not null" json:"-"` // Encrypted, never serialize
+	BucketPrefix    string    `json:"bucket_prefix,omitempty"`
+	UseSSL          bool      `gorm:"default:true" json:"use_ssl"`
+	ForcePathStyle  bool      `gorm:"default:false" json:"force_path_style"`
+	IsDefault       bool      `gorm:"default:false" json:"is_default"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 
 	// Relationships
 	Buckets []Bucket `gorm:"foreignKey:S3ConfigID" json:"buckets,omitempty"`
@@ -100,7 +100,7 @@ type Bucket struct {
 	OwnerID        uuid.UUID  `gorm:"type:uuid;not null;index" json:"owner_id"`
 	IsPublic       bool       `gorm:"default:false" json:"is_public"`
 	Region         string     `gorm:"default:'us-east-1'" json:"region"`
-	StorageBackend string     `gorm:"default:'local'" json:"storage_backend"` // "local" or "s3"
+	StorageBackend string     `gorm:"default:'local'" json:"storage_backend"`  // "local" or "s3"
 	S3ConfigID     *uuid.UUID `gorm:"type:uuid" json:"s3_config_id,omitempty"` // Optional: specific S3 config to use
 	// Versioning state: "" (never enabled), "enabled", or "suspended".
 	// Suspended keeps existing versions browsable but stops creating new ones
@@ -109,6 +109,11 @@ type Bucket struct {
 	// Lifecycle holds the bucket's lifecycle configuration as JSON (see
 	// LifecycleConfig); nil = no lifecycle rules.
 	Lifecycle *string `gorm:"type:jsonb" json:"lifecycle,omitempty"`
+	// Lifecycle provenance, recorded whenever lifecycle is set (cleared with
+	// it). The sweep expires keys only with the configuring user's CURRENT
+	// s3:DeleteObject permission (per key). Nil on legacy configs.
+	LifecycleConfiguredBy *uuid.UUID `gorm:"type:uuid" json:"-"`
+	LifecycleConfiguredAt *time.Time `json:"-"`
 	// QuotaBytes caps the total size of CURRENT objects in the bucket
 	// (version storage is not counted). 0 = unlimited.
 	QuotaBytes int64 `gorm:"default:0" json:"quota_bytes"`
@@ -138,9 +143,9 @@ type Bucket struct {
 	UpdatedAt time.Time `json:"updated_at"`
 
 	// Relationships
-	Owner    User              `gorm:"foreignKey:OwnerID" json:"owner,omitempty"`
-	Objects  []Object          `gorm:"foreignKey:BucketID" json:"objects,omitempty"`
-	S3Config *S3Configuration  `gorm:"foreignKey:S3ConfigID" json:"s3_config,omitempty"`
+	Owner    User             `gorm:"foreignKey:OwnerID" json:"owner,omitempty"`
+	Objects  []Object         `gorm:"foreignKey:BucketID" json:"objects,omitempty"`
+	S3Config *S3Configuration `gorm:"foreignKey:S3ConfigID" json:"s3_config,omitempty"`
 }
 
 func (b *Bucket) BeforeCreate(tx *gorm.DB) error {
@@ -158,15 +163,15 @@ type Object struct {
 	Size        int64     `gorm:"not null" json:"size"`
 	ContentType string    `json:"content_type"`
 	ETag        string    `json:"etag"`
-	SHA256      string    `json:"sha256,omitempty"` // SHA256 hash of content
-	StoragePath string    `gorm:"not null" json:"-"` // Internal file system path
+	SHA256      string    `json:"sha256,omitempty"`                     // SHA256 hash of content
+	StoragePath string    `gorm:"not null" json:"-"`                    // Internal file system path
 	Metadata    *string   `gorm:"type:jsonb" json:"metadata,omitempty"` // x-amz-meta-* user metadata (JSON map, nullable)
 	Tags        *string   `gorm:"type:jsonb" json:"tags,omitempty"`     // S3 object tags (JSON map, nullable)
 	// VersionID of the CURRENT version ("" = written while unversioned, the
 	// S3 "null" version). Non-current versions live in object_versions.
-	VersionID string `gorm:"default:''" json:"version_id,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	VersionID string    `gorm:"default:''" json:"version_id,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 
 	// Relationships
 	Bucket Bucket `gorm:"foreignKey:BucketID" json:"bucket,omitempty"`
@@ -226,7 +231,7 @@ type CreateBucketRequest struct {
 	Name           string  `json:"name" binding:"required,min=3,max=63"`
 	IsPublic       bool    `json:"is_public"`
 	Region         string  `json:"region"`
-	StorageBackend string  `json:"storage_backend"` // "local" or "s3"
+	StorageBackend string  `json:"storage_backend"`        // "local" or "s3"
 	S3ConfigID     *string `json:"s3_config_id,omitempty"` // Optional: specific S3 config to use
 }
 
@@ -277,20 +282,20 @@ type AuthResponse struct {
 
 // AuditLog represents a logged administrative action for compliance and security
 type AuditLog struct {
-	ID          uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
-	UserID      uuid.UUID `gorm:"type:uuid;index;not null" json:"user_id"`
-	Username    string    `gorm:"index;not null" json:"username"`           // Denormalized for faster queries
-	Action      string    `gorm:"index;not null" json:"action"`             // e.g., "CreateUser", "DeleteBucket", "UpdatePolicy"
-	ResourceType string   `gorm:"index" json:"resource_type"`               // e.g., "User", "Bucket", "Policy"
-	ResourceID  string    `gorm:"index" json:"resource_id,omitempty"`       // ID of affected resource
-	ResourceName string   `gorm:"" json:"resource_name,omitempty"`          // Name of affected resource (for readability)
-	IPAddress   string    `gorm:"index" json:"ip_address"`                  // Client IP for forensics
-	UserAgent   string    `gorm:"" json:"user_agent,omitempty"`             // Client User-Agent
-	RequestID   string    `gorm:"index" json:"request_id,omitempty"`        // Correlation ID for tracing
-	Status      string    `gorm:"index;not null" json:"status"`             // "success", "failure", "denied"
-	ErrorMessage string   `gorm:"" json:"error_message,omitempty"`          // Error details if failed
-	Metadata    string    `gorm:"type:jsonb" json:"metadata,omitempty"`     // Additional context (JSON)
-	CreatedAt   time.Time `gorm:"index" json:"created_at"`
+	ID           uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
+	UserID       uuid.UUID `gorm:"type:uuid;index;not null" json:"user_id"`
+	Username     string    `gorm:"index;not null" json:"username"`       // Denormalized for faster queries
+	Action       string    `gorm:"index;not null" json:"action"`         // e.g., "CreateUser", "DeleteBucket", "UpdatePolicy"
+	ResourceType string    `gorm:"index" json:"resource_type"`           // e.g., "User", "Bucket", "Policy"
+	ResourceID   string    `gorm:"index" json:"resource_id,omitempty"`   // ID of affected resource
+	ResourceName string    `gorm:"" json:"resource_name,omitempty"`      // Name of affected resource (for readability)
+	IPAddress    string    `gorm:"index" json:"ip_address"`              // Client IP for forensics
+	UserAgent    string    `gorm:"" json:"user_agent,omitempty"`         // Client User-Agent
+	RequestID    string    `gorm:"index" json:"request_id,omitempty"`    // Correlation ID for tracing
+	Status       string    `gorm:"index;not null" json:"status"`         // "success", "failure", "denied"
+	ErrorMessage string    `gorm:"" json:"error_message,omitempty"`      // Error details if failed
+	Metadata     string    `gorm:"type:jsonb" json:"metadata,omitempty"` // Additional context (JSON)
+	CreatedAt    time.Time `gorm:"index" json:"created_at"`
 
 	// NOTE: deliberately no User relation/foreign key — the audit trail must
 	// outlive the users it records (an FK would block user deletion, and
@@ -332,16 +337,16 @@ func (r *RevokedToken) BeforeCreate(tx *gorm.DB) error {
 
 // IdempotencyKey represents a stored idempotency key for preventing duplicate requests
 type IdempotencyKey struct {
-	ID           uuid.UUID  `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
-	Key          string     `gorm:"uniqueIndex;not null" json:"key"`                 // Client-provided idempotency key
-	UserID       uuid.UUID  `gorm:"type:uuid;index;not null" json:"user_id"`         // User who made the request
-	Method       string     `gorm:"not null" json:"method"`                          // HTTP method (POST, PUT, etc.)
-	Path         string     `gorm:"not null" json:"path"`                            // Request path
-	StatusCode   int        `gorm:"not null" json:"status_code"`                     // Response status code
-	ResponseBody string     `gorm:"type:text" json:"response_body"`                  // Cached response body
-	RequestHash  string     `gorm:"not null" json:"request_hash"`                    // SHA256 hash of request body
-	CreatedAt    time.Time  `gorm:"index" json:"created_at"`
-	ExpiresAt    time.Time  `gorm:"index;not null" json:"expires_at"`                // TTL expiration
+	ID           uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
+	Key          string    `gorm:"uniqueIndex;not null" json:"key"`         // Client-provided idempotency key
+	UserID       uuid.UUID `gorm:"type:uuid;index;not null" json:"user_id"` // User who made the request
+	Method       string    `gorm:"not null" json:"method"`                  // HTTP method (POST, PUT, etc.)
+	Path         string    `gorm:"not null" json:"path"`                    // Request path
+	StatusCode   int       `gorm:"not null" json:"status_code"`             // Response status code
+	ResponseBody string    `gorm:"type:text" json:"response_body"`          // Cached response body
+	RequestHash  string    `gorm:"not null" json:"request_hash"`            // SHA256 hash of request body
+	CreatedAt    time.Time `gorm:"index" json:"created_at"`
+	ExpiresAt    time.Time `gorm:"index;not null" json:"expires_at"` // TTL expiration
 
 	// Relationships
 	User User `gorm:"foreignKey:UserID" json:"user,omitempty"`

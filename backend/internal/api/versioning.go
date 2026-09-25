@@ -134,9 +134,12 @@ func promoteNewestVersionIfNeeded(backend storage.StorageBackend, bucket *models
 	if database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, key).First(&existing).Error == nil {
 		return nil
 	}
+	// Same total order as the version listings (versionOrder), so the version
+	// promoted is exactly the one ListObjectVersions reported as next-newest
+	// even when several were archived in the same instant.
 	var newest models.ObjectVersion
 	if err := database.DB.Where("bucket_id = ? AND key = ?", bucket.ID, key).
-		Order("versioned_at DESC").First(&newest).Error; err != nil {
+		Order(versionOrder).First(&newest).Error; err != nil {
 		return nil // no versions left — key is simply gone
 	}
 	if newest.IsDeleteMarker {
@@ -164,10 +167,6 @@ func promoteNewestVersionIfNeeded(backend storage.StorageBackend, bucket *models
 	return database.DB.Delete(&models.ObjectVersion{}, "id = ?", newest.ID).Error
 }
 
-// deleteSpecificVersion permanently removes one version of a key: the current
-// version (by its version id), an archived version, or a delete marker.
-// Removing the current version or a latest delete marker promotes the next-
-// newest surviving version, matching S3 semantics.
 // retentionBlocks reports whether WORM retention forbids permanently
 // removing data written at t.
 func retentionBlocks(bucket *models.Bucket, t time.Time) bool {
@@ -190,6 +189,10 @@ type retentionError struct{ msg string }
 func (e *retentionError) Error() string        { return e.msg }
 func (e *retentionError) Is(target error) bool { return target == errUnderRetention }
 
+// deleteSpecificVersion permanently removes one version of a key: the current
+// version (by its version id), an archived version, or a delete marker.
+// Removing the current version or a latest delete marker promotes the next-
+// newest surviving version, matching S3 semantics.
 func deleteSpecificVersion(backend storage.StorageBackend, bucket *models.Bucket, key, versionID string) error {
 	// Current version addressed by id?
 	var current models.Object

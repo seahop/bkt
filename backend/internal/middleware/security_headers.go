@@ -101,6 +101,12 @@ func S3ObjectResponseHeaders() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("X-Content-Type-Options", "nosniff")
 
+		// "/bucket/" (empty key) is a bucket-level request, not an object read.
+		if k := c.Param("key"); k == "" || k == "/" {
+			c.Next()
+			return
+		}
+
 		q := c.Request.URL.Query()
 		// Sub-resource reads return S3 XML documents (ListParts, tagging, ...),
 		// not object bytes.

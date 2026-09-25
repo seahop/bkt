@@ -207,13 +207,15 @@ func openObjectFile(p string) (*os.File, error) {
 // only after a successful Sync+Close, so a failed or interrupted write never
 // leaves a truncated object at the live key. It returns the hex MD5 of the
 // bytes written (computed in the same pass — no second read).
-func writeAtomic(dir, finalPath string, data io.Reader) (string, error) {
-	if err := os.MkdirAll(dir, 0750); err != nil {
-		return "", fmt.Errorf("failed to create directory: %w", err)
-	}
-	tmp, err := os.CreateTemp(dir, ".tmp-upload-*")
+//
+// The directory is (re)created race-safely against concurrent pruning (see
+// createTempIn). Once the temp file exists the directory is non-empty and can
+// no longer be pruned, so the final rename cannot lose its directory. On
+// failure, directories left empty are pruned up to (excluding) pruneRoot.
+func writeAtomic(pruneRoot, dir, finalPath string, data io.Reader) (string, error) {
+	tmp, err := createTempIn(dir, ".tmp-upload-*")
 	if err != nil {
-		return "", fmt.Errorf("failed to create temp file: %w", err)
+		return "", err
 	}
 	tmpName := tmp.Name()
 	committed := false
@@ -221,6 +223,7 @@ func writeAtomic(dir, finalPath string, data io.Reader) (string, error) {
 		if !committed {
 			_ = tmp.Close()
 			_ = os.Remove(tmpName)
+			pruneEmptyDirs(pruneRoot, dir)
 		}
 	}()
 
@@ -239,6 +242,25 @@ func writeAtomic(dir, finalPath string, data io.Reader) (string, error) {
 	}
 	committed = true
 	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// createTempIn creates dir (and its parents) and a temp file in it, retrying
+// when a concurrent delete prunes the freshly created directory before the
+// temp file exists (see withDirRetry / pruneEmptyDirs).
+func createTempIn(dir, pattern string) (*os.File, error) {
+	var tmp *os.File
+	err := withDirRetry(dir, func() error {
+		f, cerr := os.CreateTemp(dir, pattern)
+		if cerr != nil {
+			return cerr
+		}
+		tmp = f
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp file: %w", err)
+	}
+	return tmp, nil
 }
 
 // CreateBucket creates a bucket directory in the local filesystem
@@ -293,7 +315,11 @@ func (ls *LocalStorage) PutObject(bucketName, objectKey string, data io.Reader, 
 		return err
 	}
 	ls.upgradeLegacyMarker(bucketName, objectKey)
-	if _, err := writeAtomic(filepath.Dir(objectPath), objectPath, data); err != nil {
+	bucketDir, err := ls.bucketDir(bucketName)
+	if err != nil {
+		return err
+	}
+	if _, err := writeAtomic(bucketDir, filepath.Dir(objectPath), objectPath, data); err != nil {
 		return err
 	}
 	return nil
@@ -340,6 +366,9 @@ func (ls *LocalStorage) DeleteObject(bucketName, objectKey string) error {
 	if err := os.Remove(objectPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to delete file: %w", err)
 	}
+	// Don't leave the key's now-empty directory chain behind (a folder that
+	// still holds its ".bkt-folder" marker or other objects is kept).
+	ls.pruneObjectParents(bucketName, objectPath)
 	return nil
 }
 
@@ -353,6 +382,12 @@ func (ls *LocalStorage) ListObjects(bucketName, prefix string) ([]ObjectInfo, er
 
 	walkErr := filepath.Walk(bucketPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			// A file deleted — or an emptied directory pruned — by a
+			// concurrent request between readdir and lstat is simply no
+			// longer part of the listing; it must not fail the whole walk.
+			if path != bucketPath && isNotExist(err) {
+				return nil
+			}
 			return err
 		}
 		if info.IsDir() {
@@ -494,7 +529,11 @@ func (ls *LocalStorage) CopyObject(bucketName, srcKey, dstKey string) error {
 	defer src.Close() //nolint:errcheck // best-effort close of read-only file
 
 	ls.upgradeLegacyMarker(bucketName, dstKey)
-	if _, err := writeAtomic(filepath.Dir(dstPath), dstPath, src); err != nil {
+	bucketDir, err := ls.bucketDir(bucketName)
+	if err != nil {
+		return err
+	}
+	if _, err := writeAtomic(bucketDir, filepath.Dir(dstPath), dstPath, src); err != nil {
 		return err
 	}
 	return nil
@@ -564,7 +603,7 @@ func (ls *LocalStorage) UploadPart(bucketName, objectKey, uploadID string, partN
 	partPath := filepath.Join(dir, fmt.Sprintf("part.%05d", partNumber))
 	// Atomic part write: concurrent retries of the same part number can't
 	// produce a torn file with a valid-looking MD5.
-	etag, err := writeAtomic(dir, partPath, data)
+	etag, err := writeAtomic(dir, dir, partPath, data)
 	if err != nil {
 		return "", err
 	}
@@ -599,14 +638,15 @@ func (ls *LocalStorage) CompleteMultipartUpload(bucketName, objectKey, uploadID 
 		return err
 	}
 	ls.upgradeLegacyMarker(bucketName, objectKey)
-	if err := os.MkdirAll(filepath.Dir(finalPath), 0750); err != nil {
-		return fmt.Errorf("failed to create object dir: %w", err)
+	bucketDir, err := ls.bucketDir(bucketName)
+	if err != nil {
+		return err
 	}
 
 	// Assemble into a temp file in the object's directory, then rename into
 	// place. A failure part-way through never leaves a partial object at the
-	// live key.
-	tmp, err := os.CreateTemp(filepath.Dir(finalPath), ".tmp-assemble-*")
+	// live key (nor, after pruning, an empty directory chain).
+	tmp, err := createTempIn(filepath.Dir(finalPath), ".tmp-assemble-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp object: %w", err)
 	}
@@ -616,6 +656,7 @@ func (ls *LocalStorage) CompleteMultipartUpload(bucketName, objectKey, uploadID 
 		if !committed {
 			_ = tmp.Close()
 			_ = os.Remove(tmpName)
+			pruneEmptyDirs(bucketDir, filepath.Dir(finalPath))
 		}
 	}()
 

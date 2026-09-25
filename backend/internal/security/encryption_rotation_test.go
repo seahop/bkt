@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"bkt/internal/database/pgtest"
+
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -69,15 +71,20 @@ func TestDecryptSecretKeyStatusReportsStale(t *testing.T) {
 	}
 }
 
-// Integration test against a real PostgreSQL (set BKT_TEST_POSTGRES_DSN).
+// Integration test against a real PostgreSQL. With BKT_TEST_POSTGRES_HOST
+// (and _PASSWORD etc., see pgtest) it runs in a throwaway database of its own
+// — it creates and DROPs tables, so it must never share one with other
+// packages' tests. BKT_TEST_POSTGRES_DSN (a dedicated database) still works.
 func TestReencryptStoredSecretsPostgres(t *testing.T) {
-	dsn := os.Getenv("BKT_TEST_POSTGRES_DSN")
-	if dsn == "" {
-		t.Skip("BKT_TEST_POSTGRES_DSN not set")
-	}
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: logger.Discard})
-	if err != nil {
-		t.Fatal(err)
+	var db *gorm.DB
+	if dsn := os.Getenv("BKT_TEST_POSTGRES_DSN"); dsn != "" {
+		var err error
+		if db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: logger.Discard}); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		s, name := pgtest.NewDatabase(t, "security")
+		db = pgtest.Open(t, s, name)
 	}
 	for _, stmt := range []string{
 		`DROP TABLE IF EXISTS access_keys`, `DROP TABLE IF EXISTS s3_configurations`, `DROP TABLE IF EXISTS buckets`,

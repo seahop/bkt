@@ -27,6 +27,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // OIDCProviderSettings describes one OpenID Connect provider slot. The same
@@ -447,9 +448,20 @@ func (h *OIDCHandler) Callback(c *gin.Context) {
 	// Admin membership is the IdP's call whenever an admin group is configured:
 	// re-apply it on every login so promotions and demotions take effect at
 	// once (AuthMiddleware reads is_admin from the live row).
+	//
+	// A demotion that would leave zero active admins is refused: the user
+	// stays admin (loudly logged + audited) so an IdP group misconfiguration
+	// cannot lock every administrator out of bkt.
 	if h.s.AdminGroup != "" && user.IsAdmin != isAdmin {
-		if err := database.DB.Model(user).Update("is_admin", isAdmin).Error; err == nil {
-			user.IsAdmin = isAdmin
+		kept, err := syncAdminFlag(database.DB, user, isAdmin)
+		switch {
+		case err != nil:
+			log.Printf("oidc: failed to sync is_admin=%v for user %q: %v", isAdmin, user.Username, err)
+		case kept:
+			log.Printf("⚠️  WARNING: %s says user %q is no longer in admin group %q, but they are the LAST active bkt admin — keeping them admin. Fix the IdP group membership or promote another admin.", h.s.DisplayName, user.Username, h.s.AdminGroup)
+			meta := h.auditMeta(identity)
+			meta["admin_group"] = h.s.AdminGroup
+			_ = audit.LogDenied(c, user.ID, user.Username, "user.admin_demote", "user", user.ID.String(), user.Username, "IdP demotion refused: last active admin", meta)
 		}
 	}
 
@@ -481,8 +493,57 @@ func (h *OIDCHandler) Callback(c *gin.Context) {
 		return
 	}
 
-	// Tokens travel in the URL fragment so they never reach server logs.
-	c.Redirect(http.StatusTemporaryRedirect, h.frontendCallback()+"#token="+url.QueryEscape(jwtToken)+"&refresh_token="+url.QueryEscape(refreshToken))
+	// The access token travels in the URL fragment (never reaches server
+	// logs); the refresh token only in the httpOnly bkt_refresh cookie.
+	completeBrowserSSO(c, h.cfg, h.frontendCallback(), jwtToken, refreshToken)
+}
+
+// syncAdminFlag applies the IdP-derived admin flag to user. A demotion runs in
+// a transaction holding row locks on every admin row (like DeleteUser), so two
+// concurrent demotions can't both pass the check and leave no admin. It
+// returns kept=true when the demotion was refused because user is the last
+// active (unlocked) admin; user.IsAdmin is updated to the stored value.
+func syncAdminFlag(db *gorm.DB, user *models.User, isAdmin bool) (kept bool, err error) {
+	err = db.Transaction(func(tx *gorm.DB) error {
+		if !isAdmin {
+			var admins []models.User
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("is_admin = ?", true).Find(&admins).Error; err != nil {
+				return err
+			}
+			if !stillAdmin(admins, user.ID) {
+				return nil // already demoted concurrently
+			}
+			if lastActiveAdmin(admins, user.ID) {
+				kept = true
+				return nil
+			}
+		}
+		return tx.Model(&models.User{}).Where("id = ?", user.ID).Update("is_admin", isAdmin).Error
+	})
+	if err == nil {
+		user.IsAdmin = isAdmin || kept
+	}
+	return kept, err
+}
+
+func stillAdmin(admins []models.User, id uuid.UUID) bool {
+	for _, a := range admins {
+		if a.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// lastActiveAdmin reports whether no admin other than id is active (unlocked).
+// Locked admins don't count: they cannot log in to administer anything.
+func lastActiveAdmin(admins []models.User, id uuid.UUID) bool {
+	for _, a := range admins {
+		if a.ID != id && !a.IsLocked {
+			return false
+		}
+	}
+	return true
 }
 
 // authenticate performs the network half of the callback — code exchange,

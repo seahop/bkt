@@ -8,6 +8,31 @@ The authentication API handles user registration, login, token refresh, and logo
 https://localhost:9443/api/auth
 ```
 
+## Console sessions vs. API clients
+
+The same endpoints serve two kinds of clients, told apart by one request header:
+
+| | Web console | API / script clients |
+|---|---|---|
+| Marker | sends `X-Bkt-Client: console` on every request | no `X-Bkt-Client` header |
+| Access token | JSON body (`token`) | JSON body (`token`) |
+| Refresh token | **only** in the `bkt_refresh` cookie; never in a JSON body or redirect URL | JSON body (`refresh_token`), as before |
+| Refresh | `POST /auth/refresh` with an empty body; the browser sends the cookie | `POST /auth/refresh` with `{"refresh_token": "…"}` |
+
+Every successful login, registration, token refresh and SSO completion (OIDC, Google, Vault OIDC callback, Vault JWT login) sets the refresh token in the `bkt_refresh` cookie:
+
+```
+Set-Cookie: bkt_refresh=<refresh token>; Path=/api/auth; Max-Age=<REFRESH_TOKEN_EXPIRY in seconds>; HttpOnly; Secure; SameSite=Strict
+```
+
+- `HttpOnly`: page script cannot read it, so an XSS bug cannot exfiltrate the long-lived credential (the short-lived access token is still held by the console).
+- `SameSite=Strict`, `Path=/api/auth`, no `Domain` (host-only): only sent on same-site requests to the auth endpoints.
+- `Secure` whenever `TLS_ENABLED=true` or `TLS_TERMINATED_UPSTREAM=true` (or the request arrived over TLS).
+- Refreshing **with the cookie** additionally requires the `X-Bkt-Client: console` header (`403` otherwise). A cross-origin page can only send that custom header after a CORS preflight, which the `CORS_ALLOWED_ORIGINS` allowlist refuses — defence in depth on top of `SameSite=Strict`.
+- Logout revokes the cookie's refresh token and always clears the cookie (`Max-Age=0`).
+
+API clients can ignore the cookie; nothing changed for them.
+
 ## Endpoints
 ### Register New User
 
@@ -36,11 +61,11 @@ When disabled, this endpoint returns:
 {
   "username": "string",      // 3-50 characters, required
   "email": "string",          // Valid email, required
-  "password": "string"        // Min 8 characters, required
+  "password": "string"        // 8-72 bytes (bcrypt limit), required
 }
 ```
 
-**Success Response (201 Created):** *(only when registration is enabled)*
+**Success Response (201 Created):** *(only when registration is enabled; `refresh_token` is omitted for the console — see [Console sessions](#console-sessions-vs-api-clients))*
 ```json
 {
   "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
@@ -58,7 +83,7 @@ When disabled, this endpoint returns:
 
 **Error Responses:**
 - `403 Forbidden` - Registration is disabled (default)
-- `400 Bad Request` - Invalid input
+- `400 Bad Request` - Invalid input, or a password longer than 72 bytes (`"Password too long"`; bcrypt's limit — multi-byte characters count several bytes). The same limit applies to `POST /api/users` and to password changes via `PUT /api/users/me`.
 - `409 Conflict` - Username or email already exists
 
 **Example:**
@@ -111,7 +136,7 @@ Authenticate and receive access tokens.
 }
 ```
 
-**Success Response (200 OK):**
+**Success Response (200 OK):** *(the refresh token is also set in the `bkt_refresh` cookie; with `X-Bkt-Client: console`, `refresh_token` is omitted from the body)*
 ```json
 {
   "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
@@ -155,9 +180,9 @@ Get a new token pair using a refresh token.
 
 **Endpoint:** `POST /auth/refresh`
 
-**Authentication:** None required (refresh token in body)
+**Authentication:** None required — the refresh token comes from the JSON body (API clients) or, when the body has none, from the `bkt_refresh` cookie (web console; requires the `X-Bkt-Client: console` header).
 
-**Request Body:**
+**Request Body (API clients):**
 ```json
 {
   "refresh_token": "string"
@@ -171,14 +196,16 @@ Get a new token pair using a refresh token.
   "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
 }
 ```
+With `X-Bkt-Client: console` the body is just `{"token": "…"}`; the rotated refresh token arrives only in the `Set-Cookie: bkt_refresh=…` header (it is set for every successful refresh).
 
-**Rotation:** every successful refresh **rotates** the refresh token — the token you sent is revoked and the response contains a new pair. Always replace your stored refresh token with the one from the response.
+**Rotation:** every successful refresh **rotates** the refresh token — the token you sent is revoked and the response contains a new pair. Always replace your stored refresh token with the one from the response (the console's cookie is replaced by the browser automatically).
 
 **Reuse detection:** replaying a refresh token that was already rotated is treated as a theft indicator (per the OAuth security BCP): **all of that user's sessions are revoked** and the event is logged to the audit trail as `auth.refresh_reuse`. Replaying a token that was revoked by logout is simply rejected without revoking other sessions.
 
 **Error Responses:**
-- `400 Bad Request` - Missing or invalid refresh token
+- `400 Bad Request` - No refresh token (neither body nor cookie), or a malformed body
 - `401 Unauthorized` - Expired, invalid, rotated, or revoked refresh token
+- `403 Forbidden` - Refresh token taken from the cookie without the `X-Bkt-Client: console` header
 
 **Example:**
 ```bash
@@ -193,7 +220,7 @@ curl -k -X POST https://localhost:9443/api/auth/refresh \
 
 ### Logout
 
-Invalidate the current session. Logout revokes **both tokens**: the access token you present, and its sibling refresh token (whose ID is embedded in the access token, so the pair is revoked even when the client never sends the refresh token). You may also pass a refresh token explicitly in the body to blacklist it.
+Invalidate the current session. Logout revokes **both tokens**: the access token you present, and its sibling refresh token (whose ID is embedded in the access token, so the pair is revoked even when the client never sends the refresh token). It also revokes a refresh token passed in the body and the one in the `bkt_refresh` cookie (the console's — after rotations it may no longer be the access token's sibling), and always clears that cookie (`Set-Cookie: bkt_refresh=; Path=/api/auth; Max-Age=0`).
 
 **Endpoint:** `POST /auth/logout`
 
@@ -241,7 +268,7 @@ curl -k -X GET https://localhost:9443/api/users/me \
 ## Token Management Best Practices
 
 1. **Store Securely**
-   - Never store tokens in localStorage (XSS vulnerable)
+   - Keep long-lived credentials out of browser script storage (localStorage is readable by any XSS). The bkt console follows this: its refresh token is the httpOnly `bkt_refresh` cookie, and only the 15-minute access token is kept in localStorage
    - Use httpOnly cookies or secure storage mechanisms
    - Never commit tokens to version control
 
@@ -257,6 +284,8 @@ curl -k -X GET https://localhost:9443/api/users/me \
    - Implement exponential backoff on refresh failures
 
 ## Example Token Refresh Flow
+
+For an API client holding the refresh token itself (a browser app on the console's origin would instead send `X-Bkt-Client: console` and an empty body, and let the cookie carry the token):
 
 ```javascript
 async function apiRequest(url, options = {}) {
@@ -281,8 +310,9 @@ async function apiRequest(url, options = {}) {
     });
 
     if (refreshResponse.ok) {
-      const { token: newToken } = await refreshResponse.json();
+      const { token: newToken, refresh_token: newRefresh } = await refreshResponse.json();
       setAccessToken(newToken);
+      setRefreshToken(newRefresh); // tokens rotate: the old one is now revoked
 
       // Retry original request
       response = await fetch(url, {
@@ -309,7 +339,8 @@ async function apiRequest(url, options = {}) {
 - JWT tokens are signed with HS256
 - Tokens include user ID, username, and admin status
 - Refresh tokens have longer expiration for better UX, rotate on every use, and carry reuse detection (replay of a rotated token revokes all sessions)
-- Logout revokes both the access and refresh token
+- Logout revokes both the access and refresh token (and clears the console's `bkt_refresh` cookie)
+- The web console never exposes its refresh token to JavaScript: it lives in an httpOnly, `SameSite=Strict` cookie scoped to `/api/auth`
 - Login attempts are rate-limited per IP (`AUTH_RATE_LIMIT`, default 5/min)
 - All logins — including SSO logins, with provider metadata — are recorded in the audit log
 
@@ -368,7 +399,7 @@ Your JWT can include a `policies` claim with an array of policy names:
 }
 ```
 
-**Response (200 OK):**
+**Response (200 OK):** *(the refresh token is also set in the `bkt_refresh` cookie; with `X-Bkt-Client: console`, `refresh_token` is omitted from the body)*
 ```json
 {
   "token": "eyJhbGciOiJIUzI1NiIs...",
@@ -435,7 +466,7 @@ The discovery `issuer` must equal `OIDC_ISSUER_URL`; UserInfo is used only when 
 
 **Flow:**
 1. The browser hits `GET /api/auth/oidc/login`. bkt mints a PKCE verifier, `state` and `nonce` (HttpOnly, `SameSite=Lax` cookies, 10 min) and redirects to the IdP's authorization endpoint with `code_challenge_method=S256`.
-2. The IdP redirects to `GET /api/auth/oidc/callback?code=…&state=…`. bkt checks `state`, exchanges the code with the `code_verifier` (and client secret, if configured), verifies the ID token, calls UserInfo, resolves role and policies from claims, creates or updates the user, and redirects to `FRONTEND_URL/auth/oidc/callback#token=…&refresh_token=…`.
+2. The IdP redirects to `GET /api/auth/oidc/callback?code=…&state=…`. bkt checks `state`, exchanges the code with the `code_verifier` (and client secret, if configured), verifies the ID token, calls UserInfo, resolves role and policies from claims, creates or updates the user, sets the refresh token in the httpOnly `bkt_refresh` cookie, and redirects to `FRONTEND_URL/auth/oidc/callback#token=…` — only the access token travels in the URL fragment; the refresh token never appears in a URL.
 3. Failures redirect to the same page with `#error=<code>&error_description=…`. Codes include `invalid_state`, `authentication_failed`, `access_denied_no_groups`, `access_denied_group`, `account_locked`, `user_error`.
 
 Successful and denied logins are recorded in the audit log with `provider`, `subject` and `groups` metadata.
@@ -467,7 +498,7 @@ https://localhost:9443/api/auth/google/login
 After authentication, Google redirects to `/api/auth/google/callback` which:
 1. Creates user account on first login
 2. If Google Workspace is enabled: fetches user's groups and syncs policies
-3. Returns tokens to the frontend
+3. Sets the refresh token in the httpOnly `bkt_refresh` cookie and redirects to `FRONTEND_URL/auth/google/callback#token=…` (access token only)
 
 **With Google Workspace Integration:**
 

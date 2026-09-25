@@ -29,6 +29,13 @@ import (
 // followed and environment proxies are ignored (a proxy would dial on our
 // behalf, bypassing the check). URLs are also validated when configured.
 //
+// WEBHOOK_PROXY_URL (explicit opt-in, http:// or https:// proxy URL) routes
+// deliveries through that proxy instead. The dialer then only connects to
+// the proxy's own address, and the target is checked before every attempt
+// (incl. retries) by resolving it here and refusing it if any address is
+// blocked. The proxy resolves the name again, so DNS-rebinding protection is
+// weaker in this mode: enforce private-range egress rules on the proxy too.
+//
 // WEBHOOK_ALLOWED_HOSTS (comma-separated hostnames, IPs or CIDRs) exempts
 // legitimate internal receivers from the private-address block: a listed
 // hostname may resolve to any address; a listed IP/CIDR may be connected to
@@ -274,9 +281,26 @@ func webhookDialContext(allowlist func() *webhookAllowlist) func(ctx context.Con
 // newWebhookClient builds the delivery client: SSRF-guarded dialer, no
 // proxies, no redirects (a 3xx is a failed delivery), bounded timeouts.
 func newWebhookClient(allowlist func() *webhookAllowlist) *http.Client {
+	return newWebhookClientVia(allowlist, nil)
+}
+
+// newWebhookClientVia is newWebhookClient with an optional explicit
+// WEBHOOK_PROXY_URL. With a proxy, every connection goes to the proxy (plain
+// http as absolute-form requests, https via CONNECT), so the dial guard
+// admits exactly the proxy's own address — typically internal — and refuses
+// anything else; the TARGET is checked before each attempt by
+// webhookTargetPreflight instead. Environment proxies (HTTP(S)_PROXY) are
+// never used.
+func newWebhookClientVia(allowlist func() *webhookAllowlist, proxy *url.URL) *http.Client {
+	dial := webhookDialContext(allowlist)
+	var proxyFn func(*http.Request) (*url.URL, error)
+	if proxy != nil {
+		proxyFn = http.ProxyURL(proxy)
+		dial = webhookProxyDialContext(webhookProxyAddr(proxy), dial)
+	}
 	transport := &http.Transport{
-		Proxy:                 nil,
-		DialContext:           webhookDialContext(allowlist),
+		Proxy:                 proxyFn,
+		DialContext:           dial,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          64,
 		MaxIdleConnsPerHost:   webhookWorkersPerHost,
@@ -291,6 +315,107 @@ func newWebhookClient(allowlist func() *webhookAllowlist) *http.Client {
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
+	}
+}
+
+// errWebhookProxyInvalid marks deliveries refused because WEBHOOK_PROXY_URL
+// is set but unusable (fail closed: never silently bypass the proxy).
+var errWebhookProxyInvalid = errors.New("WEBHOOK_PROXY_URL is invalid; webhook deliveries are disabled")
+
+// parseWebhookProxyURL validates WEBHOOK_PROXY_URL: an absolute http(s) URL
+// with a host (optionally user:pass for Basic proxy auth), nothing else.
+func parseWebhookProxyURL(raw string) (*url.URL, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return nil, errors.New("not a valid URL")
+	}
+	if s := strings.ToLower(u.Scheme); s != "http" && s != "https" {
+		return nil, errors.New("scheme must be http or https")
+	}
+	if u.Hostname() == "" || u.Opaque != "" {
+		return nil, errors.New("must be an absolute URL with a host")
+	}
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return nil, errors.New("must not have a path, query or fragment")
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	return u, nil
+}
+
+// webhookProxyFromEnv reads WEBHOOK_PROXY_URL: (nil, nil) when unset.
+func webhookProxyFromEnv() (*url.URL, error) {
+	raw := strings.TrimSpace(os.Getenv("WEBHOOK_PROXY_URL"))
+	if raw == "" {
+		return nil, nil
+	}
+	return parseWebhookProxyURL(raw)
+}
+
+// webhookProxyAddr is the host:port the transport dials for proxy (default
+// port per scheme, like net/http's canonicalAddr).
+func webhookProxyAddr(proxy *url.URL) string {
+	port := proxy.Port()
+	if port == "" {
+		port = "80"
+		if proxy.Scheme == "https" {
+			port = "443"
+		}
+	}
+	return net.JoinHostPort(strings.ToLower(proxy.Hostname()), port)
+}
+
+// webhookProxyDialContext dials proxyAddr without the IP check (the operator
+// chose it) and sends any other address through the regular guard.
+func webhookProxyDialContext(proxyAddr string, guarded func(ctx context.Context, network, addr string) (net.Conn, error)) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	d := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if h, p, err := net.SplitHostPort(addr); err == nil && net.JoinHostPort(strings.ToLower(h), p) == proxyAddr {
+			return d.DialContext(ctx, network, addr)
+		}
+		return guarded(ctx, network, addr)
+	}
+}
+
+// webhookTargetPreflight returns the per-attempt target check used when
+// deliveries go through WEBHOOK_PROXY_URL (the proxy, not our dialer,
+// connects to the target). It re-runs ValidateWebhookURL and then resolves
+// the hostname itself, refusing the delivery if ANY resolved address is
+// blocked and not allowlisted. This is weaker than the direct-mode dial
+// guard against DNS rebinding — the proxy resolves the name again and may
+// get a different answer — so proxy-side egress rules should also deny
+// private ranges.
+func webhookTargetPreflight(allowlist func() *webhookAllowlist, lookup func(ctx context.Context, host string) ([]net.IPAddr, error)) func(ctx context.Context, rawURL string) error {
+	return func(ctx context.Context, rawURL string) error {
+		if err := ValidateWebhookURL(rawURL); err != nil {
+			return fmt.Errorf("%w: %v", errWebhookBlocked, err)
+		}
+		u, _ := url.Parse(rawURL) // valid: checked above
+		host := u.Hostname()
+		al := allowlist()
+		if al.allowsHost(host) {
+			return nil
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			if al.allowsIP(ip) || !isBlockedWebhookIP(ip) {
+				return nil
+			}
+			return fmt.Errorf("%w: %s", errWebhookBlocked, ip)
+		}
+		lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		addrs, err := lookup(lctx, host)
+		if err != nil {
+			return fmt.Errorf("webhook target lookup failed: %w", err)
+		}
+		if len(addrs) == 0 {
+			return fmt.Errorf("webhook target %s did not resolve", host)
+		}
+		for _, a := range addrs {
+			if !al.allowsIP(a.IP) && isBlockedWebhookIP(a.IP) {
+				return fmt.Errorf("%w: %s resolves to %s", errWebhookBlocked, host, a.IP)
+			}
+		}
+		return nil
 	}
 }
 

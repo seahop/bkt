@@ -292,8 +292,39 @@ docker compose ps
 ### Invalid Token
 
 Access tokens are short-lived (15 minutes by default, configurable with
-`ACCESS_TOKEN_EXPIRY`); when one expires — in the web console or in scripts —
-simply log in again for a new token:
+`ACCESS_TOKEN_EXPIRY`).
+
+The web console renews them silently with the refresh token (valid for
+`REFRESH_TOKEN_EXPIRY`, 7 days by default), shortly before expiry and on any
+401, so you stay signed in while the refresh token is valid. The console's
+refresh token is kept in an httpOnly cookie (`bkt_refresh`, `SameSite=Strict`,
+scoped to `/api/auth`) that page JavaScript cannot read; the console identifies
+itself with the `X-Bkt-Client: console` request header, and the server then
+leaves the refresh token out of JSON responses. Refresh tokens are rotated on
+every use; all open tabs share one session (signing out in one tab signs out
+the others). You are sent back to the sign-in page only when the session can
+no longer be renewed (refresh token expired, signed out elsewhere, password
+changed, account locked).
+
+> Upgrading from a release that stored the refresh token in the browser's
+> localStorage: that copy is deleted on the first page load, so an existing
+> console session lasts only until its current access token expires — sign in
+> once more.
+
+Scripts and API clients (no `X-Bkt-Client` header) are unaffected: login and
+refresh responses still include `refresh_token` in the JSON body. In scripts,
+either exchange the refresh token for a new pair (always keep the **new**
+`refresh_token` from the response: presenting an already-used refresh token
+revokes all of the user's sessions):
+
+```bash
+curl -k -X POST https://localhost:9443/api/auth/refresh \
+  -H 'Content-Type: application/json' \
+  -d '{"refresh_token": "YOUR_REFRESH_TOKEN"}'
+# -> {"token": "...", "refresh_token": "..."}
+```
+
+or simply log in again for a new token:
 
 ```bash
 curl -k -X POST https://localhost:9443/api/auth/login \

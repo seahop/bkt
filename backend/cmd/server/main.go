@@ -7,6 +7,7 @@ import (
 	"bkt/internal/metrics"
 	"bkt/internal/middleware"
 	"bkt/internal/security"
+	"bkt/internal/services"
 	"bkt/internal/storage"
 	"context"
 	"log"
@@ -54,6 +55,14 @@ func main() {
 			}
 		}()
 	}
+
+	// Encrypt bucket webhook secrets still stored in plaintext (written before
+	// secrets were sealed at rest). Idempotent; per-row compare-and-swap.
+	go func() {
+		if _, err := services.SealLegacyWebhookSecrets(database.DB); err != nil {
+			log.Printf("ERROR: sealing legacy plaintext webhook secrets stopped: %v (will retry on next start)", err)
+		}
+	}()
 
 	// Initialize default admin user
 	if err := database.InitializeDefaultAdmin(cfg); err != nil {

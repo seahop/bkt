@@ -96,14 +96,23 @@ backend:
 
     # CORS — set to your frontend domain
     CORS_ALLOWED_ORIGINS: ""
+    # Allow credentialed (cookie/Authorization) cross-origin requests.
+    CORS_ALLOW_CREDENTIALS: "true"
     # Login/register attempts per minute per client IP. Per-account lockout
     # (login guard) still applies. Raise further for large shared egress IPs.
     AUTH_RATE_LIMIT: "20"
     # Token refreshes per minute per client IP (separate budget from logins).
     AUTH_REFRESH_RATE_LIMIT: "30"
+    # Access / refresh token lifetimes (Go durations, e.g. "15m", "168h").
+    ACCESS_TOKEN_EXPIRY: "15m"
+    REFRESH_TOKEN_EXPIRY: "168h"
     # Serve the Swagger UI at /api/docs. Empty = backend default (off in
     # production). "true" publishes the full API description.
     SWAGGER_ENABLED: ""
+    # Strict-Transport-Security max-age in seconds, sent on the console when
+    # TLS is on or terminated upstream (never for localhost/IP hosts).
+    # "0" disables the header.
+    HSTS_MAX_AGE: "31536000"
     # Detect content types from magic bytes and reject unsafe ones (off by
     # default — S3's contract is client-declared Content-Type).
     CONTENT_TYPE_ENFORCEMENT: "false"
@@ -132,6 +141,12 @@ backend:
     # IPs or CIDRs listed here are exempt (e.g. an in-cluster receiver:
     # "hooks.my-ns.svc.cluster.local,10.96.0.0/12").
     WEBHOOK_ALLOWED_HOSTS: ""
+    # Explicit http(s) egress proxy for webhook deliveries, e.g.
+    # "http://user:pass@egress-proxy.infra.svc:3128". The target is still
+    # checked against the SSRF rules before each attempt, but the proxy
+    # resolves it again — also deny private ranges on the proxy. Empty =
+    # connect directly (HTTP(S)_PROXY is never used). Stored in the Secret.
+    WEBHOOK_PROXY_URL: ""
 
     # Generic OIDC SSO (any OpenID Connect IdP; authorization code + PKCE).
     # Enabled automatically when OIDC_ISSUER_URL and OIDC_CLIENT_ID are set.
@@ -161,6 +176,14 @@ backend:
     GOOGLE_CLIENT_SECRET: ""
     GOOGLE_REDIRECT_URL: ""
     GOOGLE_ALLOWED_DOMAINS: ""
+    # Google Workspace group -> bkt policy sync (needs a service account with
+    # domain-wide delegation). Mount the key JSON with backend.extraVolumes /
+    # backend.extraVolumeMounts and point GOOGLE_SERVICE_ACCOUNT_KEY_FILE at it.
+    GOOGLE_WORKSPACE_ENABLED: "false"
+    GOOGLE_SERVICE_ACCOUNT_KEY_FILE: ""
+    GOOGLE_WORKSPACE_ADMIN_EMAIL: ""
+    GOOGLE_POLICY_SYNC_MODE: "direct"    # "direct" or "prefix"
+    GOOGLE_POLICY_GROUP_PREFIX: ""       # prefix mode, e.g. "bkt-"
 
     # Vault base URL (e.g. https://vault.example.com:8200). Required for the
     # legacy Vault JWT login (its JWKS is fetched from here).
@@ -182,6 +205,10 @@ backend:
     VAULT_SSO_ENABLED: "false"
     VAULT_JWT_AUDIENCE: ""
     VAULT_JWT_ISSUER: ""
+    # Vault JWT auth mount; JWKS is fetched from
+    # <VAULT_ADDR>/v1/<VAULT_JWT_PATH>/.well-known/jwks.json.
+    VAULT_JWT_PATH: "auth/jwt"
+    VAULT_JWT_ROLE: "object-storage-users"
 
     # Public console URL SSO flows redirect back to (e.g. https://bkt.example.com).
     # Empty = https://localhost:9443 (only right for port-forwarding).
@@ -231,6 +258,19 @@ backend:
   tmpDir:
     sizeLimit: ""
 
+  # Extra volumes / mounts for the backend pod, e.g. a Google Workspace
+  # service-account key:
+  #   extraVolumes:
+  #     - name: google-sa
+  #       secret: {secretName: bkt-google-sa}
+  #   extraVolumeMounts:
+  #     - name: google-sa
+  #       mountPath: /etc/bkt/google
+  #       readOnly: true
+  #   env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE: /etc/bkt/google/key.json
+  extraVolumes: []
+  extraVolumeMounts: []
+
   # Which env vars should be treated as Secrets (stored in K8s Secret, not ConfigMap)
   secretEnvKeys:
     - JWT_SECRET
@@ -241,6 +281,9 @@ backend:
     - S3_SECRET_ACCESS_KEY
     - S3_ACCESS_KEY_ID
     - METRICS_TOKEN
+    - WEBHOOK_PROXY_URL
+    - ENCRYPTION_KEY_PREVIOUS
+    - ENCRYPTION_LEGACY_JWT_SECRET
 
 # ─────────────────────────────────────────
 # ─────────────────────────────────────────

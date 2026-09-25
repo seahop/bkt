@@ -22,7 +22,7 @@ type ReencryptStats struct {
 // column with a prefix are only handled when they carry it (the prefix is
 // kept): bucket webhook secrets are stored as "enc:v2:" + EncryptSecretKey
 // (services.SealWebhookSecret); legacy plaintext webhook secrets (no prefix)
-// are left alone and get sealed when next saved.
+// are left alone here — services.SealLegacyWebhookSecrets seals them at startup.
 var encryptedColumns = []struct {
 	table   string
 	columns []string

@@ -10,11 +10,14 @@ export interface SSOConfig {
   oidc_enabled: boolean;
   oidc_auth_url?: string;
   oidc_provider_name?: string;
+  /** Self-service sign-up (ALLOW_REGISTRATION) is enabled on the server. */
+  allow_registration?: boolean;
 }
 
 export interface SSOLoginResponse {
   token: string;
-  refresh_token: string;
+  /** Only for API clients; the console gets it as the httpOnly bkt_refresh cookie instead. */
+  refresh_token?: string;
   /** The full user record (backend models.User), same shape as /auth/login. */
   user: User;
   is_new_user: boolean;

@@ -1402,6 +1402,25 @@ func (h *S3APIHandler) s3Error(c *gin.Context, code, message, resource string, s
 // existing bucket this answers like AWS does: 409 BucketAlreadyOwnedByYou
 // when the caller has access to it (clients treat that as success), 409
 // BucketAlreadyExists otherwise. Creating a new bucket stays AccessDenied.
+// BucketOr routes a request addressed as "/bucket/" (trailing slash, empty
+// key — e.g. `mc mb`, some SDKs in path-style mode) to the bucket-level
+// handler instead of the object handler, which would reject the empty key.
+func BucketOr(bucketLevel, objectLevel gin.HandlerFunc) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if k := c.Param("key"); k == "" || k == "/" {
+			bucketLevel(c)
+			return
+		}
+		objectLevel(c)
+	}
+}
+
+// DeleteBucketNotSupported answers DELETE /bucket/: like bucket creation,
+// bucket deletion is only available from the web console / REST API.
+func (h *S3APIHandler) DeleteBucketNotSupported(c *gin.Context) {
+	h.s3Error(c, "AccessDenied", "Bucket deletion via S3 API is not supported. Use web UI.", "", http.StatusForbidden)
+}
+
 func (h *S3APIHandler) CreateBucket(c *gin.Context) {
 	if _, ok := c.GetQuery("versioning"); ok {
 		h.PutBucketVersioning(c)

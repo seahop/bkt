@@ -223,12 +223,11 @@ func (h *GoogleOAuthHandler) HandleGoogleCallback(c *gin.Context) {
 		return
 	}
 
-	// Redirect to frontend with tokens in URL fragment (keeps them out of server logs)
+	// Redirect to the frontend with the access token in the URL fragment
+	// (keeps it out of server logs); the refresh token goes only into the
+	// httpOnly bkt_refresh cookie.
 	frontendURL := strings.TrimSuffix(h.config.Server.FrontendURL, "/")
-	redirectURL := frontendURL + "/auth/google/callback#token=" + url.QueryEscape(jwtToken) +
-		"&refresh_token=" + url.QueryEscape(refreshToken)
-
-	c.Redirect(http.StatusTemporaryRedirect, redirectURL)
+	completeBrowserSSO(c, h.config, frontendURL+"/auth/google/callback", jwtToken, refreshToken)
 }
 
 // redirectWithError redirects to frontend callback with error in URL fragment

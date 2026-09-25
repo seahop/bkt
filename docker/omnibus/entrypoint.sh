@@ -242,9 +242,13 @@ fi
 # into a private runtime dir instead of changing the operator's files.
 if [ "${TLS_ENABLED:-false}" = "true" ]; then
   if [ "$TLS_CERT_FILE" = "$CERT_DIR/tls.crt" ] && [ "$TLS_KEY_FILE" = "$CERT_DIR/tls.key" ]; then
-    chown bkt:bkt "$TLS_CERT_FILE" "$TLS_KEY_FILE"
+    # Older releases created $CERT_DIR as root 0700 (global umask 077), which
+    # bkt can't traverse even when the files themselves are chowned.
+    chown bkt:bkt "$CERT_DIR" "$TLS_CERT_FILE" "$TLS_KEY_FILE"
+    chmod 750 "$CERT_DIR"
     chmod 600 "$TLS_KEY_FILE"
-  elif ! su-exec bkt test -r "$TLS_KEY_FILE" || ! su-exec bkt test -r "$TLS_CERT_FILE"; then
+  fi
+  if ! su-exec bkt test -r "$TLS_KEY_FILE" || ! su-exec bkt test -r "$TLS_CERT_FILE"; then
     RUN_TLS=/run/bkt-tls
     install -d -o bkt -g bkt -m 700 "$RUN_TLS"
     install -o bkt -g bkt -m 644 "$TLS_CERT_FILE" "$RUN_TLS/tls.crt"

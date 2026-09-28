@@ -12,6 +12,13 @@ the flow.
 | bob   | bkt-users                | logged in, not admin  |
 | carol | unrelated                | denied, audit-logged  |
 
+bob is also in the Keycloak group `Eng-Team`: `sso-groups-e2e.sh` links it
+(as `eng-team`, matching is case-insensitive) to a bkt group with a bucket
+policy, and after bob signs in again asserts the synced membership and
+bucket access, removal from a linked group he is not in, untouched manual
+and local-user memberships, and the `sso_groups_added`/`sso_groups_removed`
+audit metadata.
+
 Assertions include the PKCE `code_challenge`/`S256`, `state`, `nonce` and
 `openid` scope on the authorize request, `/api/users/me` identity fields,
 admin/non-admin mapping, repeat login mapping to the same account, audit log

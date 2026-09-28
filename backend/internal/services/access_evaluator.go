@@ -24,19 +24,19 @@ import (
 //   - an admin is allowed everything;
 //   - a missing bucket denies everything for non-admins;
 //   - otherwise user and bucket policies are evaluated (bucket-policy
-//     Principals match the username) and an explicit Deny from either wins.
+//     Principals match the username), an explicit Deny from either wins, and
+//     on a public-read bucket an object read no policy denies is allowed
+//     (objectPolicies.allowed, shared with CheckObjectAccess).
 //
 // It is intended for sweeps (replication, lifecycle) that check many keys.
 // The snapshot is taken at construction; build a new evaluator per sweep.
 type AccessEvaluator struct {
 	bucketName  string
-	username    string
 	userMissing bool
 	userLocked  bool
 	isAdmin     bool
 	bucketFound bool
-	userDocs    []*security.PolicyDocument
-	bucketDoc   *security.PolicyDocument
+	policies    objectPolicies
 }
 
 // NewAccessEvaluator loads the data needed to authorize userID's actions on
@@ -52,13 +52,13 @@ func (s *PolicyService) NewAccessEvaluator(userID uuid.UUID, bucketName string) 
 	}
 
 	var bucketPolicy *models.BucketPolicy
-	bucketFound := false
+	var found *models.Bucket
 	if !user.IsAdmin && !user.IsLocked {
 		var bucket models.Bucket
 		err := database.DB.Where("name = ?", bucketName).First(&bucket).Error
 		switch {
 		case err == nil:
-			bucketFound = true
+			found = &bucket
 			var bp models.BucketPolicy
 			perr := database.DB.Where("bucket_id = ?", bucket.ID).First(&bp).Error
 			if perr == nil {
@@ -71,32 +71,22 @@ func (s *PolicyService) NewAccessEvaluator(userID uuid.UUID, bucketName string) 
 			return nil, fmt.Errorf("failed to fetch bucket: %w", err)
 		}
 	}
-	return NewAccessEvaluatorFromData(user, bucketName, bucketFound, bucketPolicy), nil
+	return NewAccessEvaluatorFromData(user, bucketName, found, bucketPolicy), nil
 }
 
 // NewAccessEvaluatorFromData builds an evaluator from already-loaded data (no
-// DB): the user with its effective policies, whether the bucket exists, and
-// its bucket policy (nil = none). Documents that fail to parse are skipped,
-// exactly as evaluatePolicy's callers skip them.
-func NewAccessEvaluatorFromData(user *models.User, bucketName string, bucketFound bool, bucketPolicy *models.BucketPolicy) *AccessEvaluator {
-	e := &AccessEvaluator{
+// DB): the user with its effective policies, the bucket (nil = it does not
+// exist; its is_public flag enables the public-read grant), and its bucket
+// policy (nil = none). Documents that fail to parse are skipped, exactly as
+// CheckObjectAccess skips them.
+func NewAccessEvaluatorFromData(user *models.User, bucketName string, bucket *models.Bucket, bucketPolicy *models.BucketPolicy) *AccessEvaluator {
+	return &AccessEvaluator{
 		bucketName:  bucketName,
-		username:    user.Username,
 		userLocked:  user.IsLocked,
 		isAdmin:     user.IsAdmin,
-		bucketFound: bucketFound,
+		bucketFound: bucket != nil,
+		policies:    parseObjectPolicies(user, bucketPolicy, bucket != nil && bucket.IsPublic),
 	}
-	for _, p := range user.Policies {
-		if doc, err := security.ParseStoredPolicyDocument(p.Document); err == nil {
-			e.userDocs = append(e.userDocs, doc)
-		}
-	}
-	if bucketPolicy != nil {
-		if doc, err := security.ParseStoredPolicyDocument(bucketPolicy.PolicyDocument); err == nil {
-			e.bucketDoc = doc
-		}
-	}
-	return e
 }
 
 // UserMissing reports whether the user no longer exists.
@@ -119,32 +109,7 @@ func (e *AccessEvaluator) Allowed(action, key string) bool {
 	if !e.bucketFound {
 		return false
 	}
-	ctx := &security.PolicyEvaluationContext{
-		Username: e.username,
-		Action:   action,
-		Resource: fmt.Sprintf("arn:aws:s3:::%s/%s", e.bucketName, key),
-	}
-	userResult := security.PolicyNoMatch
-	for _, doc := range e.userDocs {
-		r, ok := safeEvaluate(doc, ctx)
-		if !ok {
-			continue // a panicking policy is skipped, as evaluatePolicy's error is
-		}
-		if r == security.PolicyDeny {
-			userResult = security.PolicyDeny
-			break
-		}
-		if r == security.PolicyAllow {
-			userResult = security.PolicyAllow
-		}
-	}
-	bucketResult := security.PolicyNoMatch
-	if e.bucketDoc != nil {
-		if r, ok := safeEvaluate(e.bucketDoc, ctx); ok {
-			bucketResult = r
-		}
-	}
-	return decide(userResult, bucketResult)
+	return e.policies.allowed(e.bucketName, key, action)
 }
 
 // safeEvaluate runs security.EvaluatePolicy with the same panic recovery as

@@ -276,6 +276,7 @@ func registerAPIRoutes(router *gin.Engine, cfg *config.Config) {
 				groups.GET("", groupHandler.ListGroups)
 				groups.POST("", groupHandler.CreateGroup)
 				groups.DELETE("/:id", groupHandler.DeleteGroup)
+				groups.PUT("/:id/sso-groups", groupHandler.SetGroupSSOGroups)
 				groups.POST("/:id/members", groupHandler.AddGroupMember)
 				groups.DELETE("/:id/members/:user_id", groupHandler.RemoveGroupMember)
 				groups.POST("/:id/policies", groupHandler.AttachGroupPolicy)

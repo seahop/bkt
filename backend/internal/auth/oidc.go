@@ -72,6 +72,10 @@ type OIDCProviderSettings struct {
 	PoliciesReplaceOnlyOnMatch bool
 	LinkByEmail                bool
 
+	// GroupsClaimEnv names the setting that configures GroupsClaim, for the
+	// warning logged when the claim is missing (empty: not configurable).
+	GroupsClaimEnv string
+
 	// VaultLegacyURLs enables the Vault UI-URL fallback for providers whose
 	// discovery document omits endpoints (older Vault releases).
 	VaultLegacyURLs bool
@@ -166,6 +170,7 @@ func NewOIDCHandler(cfg *config.Config) *OIDCHandler {
 		CookiePrefix:          "oidc_",
 		UsernameClaim:         o.UsernameClaim,
 		GroupsClaim:           o.GroupsClaim,
+		GroupsClaimEnv:        "OIDC_GROUPS_CLAIM",
 		AdminGroup:            o.AdminGroup,
 		UserGroup:             o.UserGroup,
 		PoliciesClaim:         o.PoliciesClaim,
@@ -483,7 +488,17 @@ func (h *OIDCHandler) Callback(c *gin.Context) {
 		database.DB.Preload("Policies").First(user, user.ID)
 	}
 
-	_ = audit.LogSuccess(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, h.auditMeta(identity))
+	// SSO group → bkt group mapping: membership in SSO-linked bkt groups
+	// follows the groups claim. A missing claim fails closed (removed from
+	// all linked groups). Independent of the admin flag above.
+	groupsAdded, groupsRemoved, err := SyncSSOGroupMemberships(database.DB, user, identity.Groups, identity.HasGroups, h.groupsClaimSource())
+	if err != nil {
+		_ = audit.LogFailure(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, "group sync failed: "+err.Error(), h.auditMeta(identity))
+		h.redirectWithError(c, "group_sync_failed", "Could not apply your group memberships; please try again or contact an administrator.")
+		return
+	}
+
+	_ = audit.LogSuccess(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, addSSOGroupAudit(h.auditMeta(identity), groupsAdded, groupsRemoved))
 
 	accessTokenDuration, _ := time.ParseDuration(h.cfg.Auth.AccessTokenExpiry)
 	refreshTokenDuration, _ := time.ParseDuration(h.cfg.Auth.RefreshTokenExpiry)
@@ -1034,6 +1049,14 @@ func (h *OIDCHandler) auditMeta(identity *oidcIdentity) map[string]interface{} {
 		m["groups"] = g
 	}
 	return m
+}
+
+// groupsClaimSource describes the expected groups claim for log messages.
+func (h *OIDCHandler) groupsClaimSource() string {
+	if h.s.GroupsClaimEnv != "" {
+		return fmt.Sprintf("the %q claim (%s) in the ID token or UserInfo", h.s.GroupsClaim, h.s.GroupsClaimEnv)
+	}
+	return fmt.Sprintf("the %q claim in the ID token or UserInfo", h.s.GroupsClaim)
 }
 
 func (h *OIDCHandler) frontendCallback() string {

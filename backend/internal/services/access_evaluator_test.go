@@ -43,17 +43,19 @@ func TestAccessEvaluatorMatchesCheckObjectAccess(t *testing.T) {
 		{"legacy condition doc", models.User{Username: "alice", Policies: []models.Policy{pol(legacyCond), pol(allowAll)}}, nil},
 		{"malformed skipped", models.User{Username: "alice", Policies: []models.Policy{pol(malformed), pol(readOnly)}}, &models.BucketPolicy{PolicyDocument: malformed}},
 	}
-	actions := []string{ActionGetObject, ActionPutObject, ActionDeleteObject, ActionListBucket}
+	actions := []string{ActionGetObject, ActionHeadObject, ActionPutObject, ActionDeleteObject, ActionListBucket}
 	keys := []string{"a.txt", "x.txt", "secret/k", "pub/p", "x/y", "deep/secret/z"}
 
 	ps := NewPolicyService()
-	for _, s := range setups {
-		ev := NewAccessEvaluatorFromData(&s.user, bucket, true, s.bucket)
-		for _, a := range actions {
-			for _, k := range keys {
-				want := ps.objectAccessDecision(&s.user, bucket, s.bucket, k, a)
-				if got := ev.Allowed(a, k); got != want {
-					t.Errorf("%s: Allowed(%s,%s)=%v, CheckObjectAccess=%v", s.name, a, k, got, want)
+	for _, public := range []bool{false, true} {
+		for _, s := range setups {
+			ev := NewAccessEvaluatorFromData(&s.user, bucket, &models.Bucket{IsPublic: public}, s.bucket)
+			for _, a := range actions {
+				for _, k := range keys {
+					want := ps.objectAccessDecision(&s.user, bucket, public, s.bucket, k, a)
+					if got := ev.Allowed(a, k); got != want {
+						t.Errorf("%s (public=%v): Allowed(%s,%s)=%v, CheckObjectAccess=%v", s.name, public, a, k, got, want)
+					}
 				}
 			}
 		}
@@ -61,7 +63,7 @@ func TestAccessEvaluatorMatchesCheckObjectAccess(t *testing.T) {
 
 	// Spot-check the key semantics explicitly (not just equivalence).
 	u := models.User{Username: "alice", Policies: []models.Policy{pol(allowAll), pol(denySecret)}}
-	ev := NewAccessEvaluatorFromData(&u, bucket, true, nil)
+	ev := NewAccessEvaluatorFromData(&u, bucket, &models.Bucket{}, nil)
 	if ev.Allowed(ActionGetObject, "secret/k") || !ev.Allowed(ActionGetObject, "a.txt") || !ev.Allowed(ActionPutObject, "secret/k") {
 		t.Error("narrow Deny must deny only the matching key/action")
 	}
@@ -70,11 +72,11 @@ func TestAccessEvaluatorMatchesCheckObjectAccess(t *testing.T) {
 func TestAccessEvaluatorDeniesLockedMissingAndNoBucket(t *testing.T) {
 	allowAll := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:*"],"Resource":["*"]}]}`
 	locked := models.User{Username: "alice", IsLocked: true, Policies: []models.Policy{pol(allowAll)}}
-	if NewAccessEvaluatorFromData(&locked, "b", true, nil).Allowed(ActionGetObject, "k") {
+	if NewAccessEvaluatorFromData(&locked, "b", &models.Bucket{}, nil).Allowed(ActionGetObject, "k") {
 		t.Error("locked user must be denied")
 	}
 	lockedAdmin := models.User{Username: "root", IsAdmin: true, IsLocked: true}
-	ev := NewAccessEvaluatorFromData(&lockedAdmin, "b", true, nil)
+	ev := NewAccessEvaluatorFromData(&lockedAdmin, "b", &models.Bucket{}, nil)
 	if ev.Allowed(ActionGetObject, "k") || ev.IsAdmin() {
 		t.Error("locked admin must be denied")
 	}
@@ -86,18 +88,18 @@ func TestAccessEvaluatorDeniesLockedMissingAndNoBucket(t *testing.T) {
 		t.Error("nil evaluator must deny")
 	}
 	u := models.User{Username: "alice", Policies: []models.Policy{pol(allowAll)}}
-	if NewAccessEvaluatorFromData(&u, "b", false, nil).Allowed(ActionGetObject, "k") {
+	if NewAccessEvaluatorFromData(&u, "b", nil, nil).Allowed(ActionGetObject, "k") {
 		t.Error("missing bucket must deny non-admins")
 	}
 	admin := models.User{Username: "root", IsAdmin: true}
-	if !NewAccessEvaluatorFromData(&admin, "b", false, nil).Allowed(ActionDeleteObject, "k") {
+	if !NewAccessEvaluatorFromData(&admin, "b", nil, nil).Allowed(ActionDeleteObject, "k") {
 		t.Error("admin must be allowed")
 	}
 }
 
 func BenchmarkAccessEvaluatorAllowed(b *testing.B) {
 	u := models.User{Username: "alice", Policies: []models.Policy{pol(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:*"],"Resource":["arn:aws:s3:::b/*"]}]}`)}}
-	ev := NewAccessEvaluatorFromData(&u, "b", true, nil)
+	ev := NewAccessEvaluatorFromData(&u, "b", &models.Bucket{}, nil)
 	for i := 0; i < b.N; i++ {
 		ev.Allowed(ActionGetObject, fmt.Sprintf("k%d", i))
 	}

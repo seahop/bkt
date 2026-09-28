@@ -235,7 +235,7 @@ legacy-format values are examined).
 | `OIDC_CLIENT_SECRET` | — | Optional; makes bkt a confidential client (PKCE is always used) |
 | `OIDC_REDIRECT_URL` | `https://localhost:9443/api/auth/oidc/callback` | Backend callback registered at the IdP |
 | `OIDC_SCOPES` / `OIDC_PROVIDER_NAME` | `openid profile email` / `SSO` | Scopes to request; login button label |
-| `OIDC_USERNAME_CLAIM` / `OIDC_GROUPS_CLAIM` / `OIDC_POLICIES_CLAIM` | — / `groups` / `policies` | Claims mapping (see [SSO guide](../guides/sso-setup.md)) |
+| `OIDC_USERNAME_CLAIM` / `OIDC_GROUPS_CLAIM` / `OIDC_POLICIES_CLAIM` | — / `groups` / `policies` | Claims mapping (see [SSO guide](../guides/sso-setup.md)). The groups claim also drives [IdP group → bkt group mapping](../guides/sso-setup.md#mapping-idp-groups-to-bkt-groups) |
 | `OIDC_ADMIN_GROUP` / `OIDC_USER_GROUP` | — | Group that grants admin; group required for access (optional) |
 | `OIDC_POLICIES_AUTHORITATIVE` | `true` if `OIDC_POLICIES_CLAIM` is set, else `false` | A *missing* policies claim also clears the user's policies (a present claim, even empty, always replaces them) |
 | `OIDC_LINK_BY_EMAIL` | `false` | Link new subjects to existing OIDC accounts by verified, IdP-asserted email (exactly one match required) |
@@ -245,6 +245,7 @@ legacy-format values are examined).
 | `GOOGLE_ALLOWED_DOMAINS` | — | Comma-separated Workspace domains allowed to sign in (`hd` claim and email domain must both match). **Unset: new Google users are only auto-provisioned when `ALLOW_REGISTRATION=true`** |
 | `VAULT_JWT_AUDIENCE` | `object-storage` | Required `aud` for Vault JWT login |
 | `VAULT_JWT_ISSUER` | — | If set, required `iss` for Vault JWT login |
+| `VAULT_JWT_GROUPS_CLAIM` | `groups` | Vault JWT login: claim carrying the user's group names, used to map IdP groups to bkt groups ([details](../guides/sso-setup.md#mapping-idp-groups-to-bkt-groups)). An absent claim removes the user from all SSO-linked bkt groups |
 | `VAULT_SSO_ENABLED` | `false` | Enable the legacy Vault JWT login (`POST /api/auth/vault/login`) |
 | `VAULT_ADDR` | `https://vault.example.com:8200` | Vault base URL; the legacy JWT login fetches its JWKS from here |
 | `VAULT_JWT_PATH` | `auth/jwt` | Vault JWT auth mount; JWKS = `<VAULT_ADDR>/v1/<VAULT_JWT_PATH>/.well-known/jwks.json` |

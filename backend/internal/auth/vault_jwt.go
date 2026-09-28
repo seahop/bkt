@@ -136,9 +136,23 @@ func (h *VaultJWTHandler) LoginWithVaultJWT(c *gin.Context) {
 		return
 	}
 
-	// MinIO-style: Check if user has any policies
-	// If no policies, deny access with clear message
-	if !user.IsAdmin && len(user.Policies) == 0 {
+	// SSO group → bkt group mapping from the groups claim
+	// (VAULT_JWT_GROUPS_CLAIM). An absent claim fails closed: the user is
+	// removed from every SSO-linked bkt group.
+	idpGroups, groupsKnown := vaultJWTGroups(req.Token, h.groupsClaim())
+	groupsAdded, groupsRemoved, err := SyncSSOGroupMemberships(database.DB, user, idpGroups, groupsKnown,
+		fmt.Sprintf("the %q claim (VAULT_JWT_GROUPS_CLAIM)", h.groupsClaim()))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to sync groups",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	// MinIO-style: Check if user has any policies (direct or through a
+	// group). If none, deny access with a clear message.
+	if !user.IsAdmin && len(user.Policies) == 0 && !userHasGroupPolicies(user) {
 		c.JSON(http.StatusForbidden, models.ErrorResponse{
 			Error:   "No permissions",
 			Message: "Your account has been created but has no permissions. Please contact your administrator to grant access.",
@@ -146,7 +160,8 @@ func (h *VaultJWTHandler) LoginWithVaultJWT(c *gin.Context) {
 		return
 	}
 
-	_ = services.NewAuditService().LogSuccess(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, map[string]interface{}{"provider": "vault-jwt"})
+	_ = services.NewAuditService().LogSuccess(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username,
+		addSSOGroupAudit(map[string]interface{}{"provider": "vault-jwt"}, groupsAdded, groupsRemoved))
 
 	// Generate our access+refresh pair (access carries the refresh JTI so
 	// logout can revoke the sibling refresh token).
@@ -298,4 +313,36 @@ func (h *VaultJWTHandler) syncUserPoliciesFromClaims(user *models.User, policyNa
 		return fmt.Errorf("failed to sync policies: %w", err)
 	}
 	return nil
+}
+
+// groupsClaim is the JWT claim carrying IdP group names (default "groups").
+func (h *VaultJWTHandler) groupsClaim() string {
+	if h.config.VaultSSO.JWTGroupsClaim != "" {
+		return h.config.VaultSSO.JWTGroupsClaim
+	}
+	return "groups"
+}
+
+// vaultJWTGroups reads the groups claim from a token that validateVaultJWT
+// has ALREADY verified (signature, audience, expiry) — it must never be
+// called on an unverified token. ok=false when the claim is absent.
+func vaultJWTGroups(token, claim string) (groups []string, ok bool) {
+	claims := jwt.MapClaims{}
+	if _, _, err := jwt.NewParser().ParseUnverified(token, claims); err != nil {
+		return nil, false
+	}
+	v, present := claims[claim]
+	if !present || v == nil {
+		return nil, false
+	}
+	return claimToStringSlice(v), true
+}
+
+// userHasGroupPolicies reports whether any policy reaches user through group
+// membership.
+func userHasGroupPolicies(user *models.User) bool {
+	var n int64
+	database.DB.Raw(`SELECT COUNT(*) FROM user_groups ug JOIN group_policies gp ON gp.group_id = ug.group_id
+		WHERE ug.user_id = ?`, user.ID).Scan(&n)
+	return n > 0
 }

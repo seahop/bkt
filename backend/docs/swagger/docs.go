@@ -1984,6 +1984,33 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/groups/{id}/sso-groups": {
+            "put": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "groups"
+                ],
+                "summary": "Replace a group's linked SSO (IdP) groups",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.Group"
+                        }
+                    }
+                }
+            }
+        },
         "/api/policies": {
             "get": {
                 "security": [
@@ -3533,6 +3560,13 @@ const docTemplate = `{
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/models.Policy"
+                    }
+                },
+                "sso_groups": {
+                    "description": "SSOGroups are the identity-provider group names linked to this group\n(from GroupSSOLink; not a column). SSO users whose IdP groups match any\nof them (case-insensitively) are made members at sign-in, and removed\nwhen they no longer match. A group with at least one link is\n\"SSO-managed\"; groups without links are purely manual.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
                     }
                 },
                 "updated_at": {

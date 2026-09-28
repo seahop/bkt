@@ -39,16 +39,23 @@ func NewGoogleWorkspaceService(cfg *config.Config) *GoogleWorkspaceService {
 
 // GetUserGroups fetches all groups a user belongs to via Google Workspace Admin SDK
 func (s *GoogleWorkspaceService) GetUserGroups(ctx context.Context, userEmail string) ([]string, error) {
+	names, _, err := s.GetUserGroupIdentifiers(ctx, userEmail)
+	return names, err
+}
+
+// GetUserGroupIdentifiers returns the user's Workspace groups both as names
+// (the group address's local part, e.g. "engineering") and as full group
+// addresses ("engineering@example.com").
+func (s *GoogleWorkspaceService) GetUserGroupIdentifiers(ctx context.Context, userEmail string) (names, emails []string, err error) {
 	if !s.config.GoogleSSO.WorkspaceEnabled {
-		return nil, nil
+		return nil, nil, nil
 	}
 	adminService, err := s.directory(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Fetch groups for the user
-	var groups []string
 	pageToken := ""
 
 	for {
@@ -59,13 +66,13 @@ func (s *GoogleWorkspaceService) GetUserGroups(ctx context.Context, userEmail st
 
 		result, err := call.Do()
 		if err != nil {
-			return nil, fmt.Errorf("failed to fetch groups for user %s: %w", userEmail, err)
+			return nil, nil, fmt.Errorf("failed to fetch groups for user %s: %w", userEmail, err)
 		}
 
 		for _, group := range result.Groups {
-			// Extract group name (email prefix) or full email based on config
-			groupName := extractGroupName(group.Email)
-			groups = append(groups, groupName)
+			// Group name = the group address's local part.
+			names = append(names, extractGroupName(group.Email))
+			emails = append(emails, group.Email)
 		}
 
 		pageToken = result.NextPageToken
@@ -74,7 +81,7 @@ func (s *GoogleWorkspaceService) GetUserGroups(ctx context.Context, userEmail st
 		}
 	}
 
-	return groups, nil
+	return names, emails, nil
 }
 
 // GetManagedPolicyNames returns the set of policy names the group→policy

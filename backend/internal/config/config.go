@@ -129,6 +129,11 @@ type VaultSSOConfig struct {
 	Role     string
 	Audience string
 	Issuer   string // VAULT_JWT_ISSUER: when set, the JWT "iss" must match
+	// JWTGroupsClaim (VAULT_JWT_GROUPS_CLAIM, default "groups") is the JWT
+	// claim holding the user's IdP group names, used for SSO group → bkt
+	// group mapping. An absent claim means "no group information" (the user
+	// is removed from all SSO-linked bkt groups).
+	JWTGroupsClaim string
 	// OIDC with PKCE (public client - no secret needed)
 	OIDCEnabled bool
 	ClientID    string
@@ -281,6 +286,7 @@ func Load() *Config {
 
 			OIDCExpectedIssuer:    strings.TrimSpace(getEnv("VAULT_OIDC_EXPECTED_ISSUER", "")),
 			PoliciesAuthoritative: getEnvBool("VAULT_POLICIES_AUTHORITATIVE", false),
+			JWTGroupsClaim:        strings.TrimSpace(getEnv("VAULT_JWT_GROUPS_CLAIM", "groups")),
 		},
 		OIDC: loadOIDCConfig(),
 	}

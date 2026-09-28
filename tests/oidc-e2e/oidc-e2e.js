@@ -7,6 +7,10 @@ let failures = 0;
 const meta = (l) => { try { return typeof l.metadata === 'string' ? JSON.parse(l.metadata) : (l.metadata || {}); } catch { return {}; } };
 const check = (ok, msg) => { console.log((ok ? 'PASS ' : 'FAIL ') + msg); if (!ok) failures++; };
 
+// The console keeps its session in the zustand store persisted under
+// localStorage "auth-storage" ({state: {token}}); older builds used "token".
+const readToken = `() => { try { const s = JSON.parse(localStorage.getItem('auth-storage') || '{}'); return (s.state && s.state.token) || localStorage.getItem('token'); } catch { return localStorage.getItem('token'); } }`;
+
 async function loginVia(browser, user, pass, name) {
   const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } });
   const page = await ctx.newPage();
@@ -29,11 +33,11 @@ async function loginVia(browser, user, pass, name) {
   await page.click('#kc-login');
   // Back at bkt: either the app (success) or the callback page showing an error.
   await page.waitForURL(u => u.origin === base, { timeout: 20000 }).catch(() => {});
-  await page.waitForFunction(() => !!localStorage.getItem('token') || !!document.querySelector('.alert-error'), null, { timeout: 15000 }).catch(() => {});
+  await page.waitForFunction(`!!(${readToken})() || !!document.querySelector('.alert-error')`, null, { timeout: 15000 }).catch(() => {});
   await page.waitForTimeout(500);
   await page.screenshot({ path: `${outDir}/${name}-03-after.png` });
   const url = page.url();
-  const token = await page.evaluate(() => localStorage.getItem('token'));
+  const token = await page.evaluate(`(${readToken})()`);
   const bodyText = await page.locator('body').innerText();
   return { ctx, page, url, token, bodyText };
 }
@@ -51,6 +55,10 @@ async function loginVia(browser, user, pass, name) {
     check(list.status() === 200, `bob relogin: policy assigned in bkt survives SSO re-login (list iam-allowed → ${list.status()})`);
     const forb = await r.ctx.request.get(`${base}/api/buckets/iam-forbidden/objects`, { headers: { Authorization: `Bearer ${r.token}` } });
     check(forb.status() === 403, `bob relogin: still denied on iam-forbidden (${forb.status()})`);
+    // sso-groups-e2e.sh setup linked Keycloak group Eng-Team (bob is a member)
+    // to bkt group e2e-sso-eng, whose policy grants bucket sso-eng.
+    const eng = await r.ctx.request.get(`${base}/api/buckets/sso-eng/objects`, { headers: { Authorization: `Bearer ${r.token}` } });
+    check(eng.status() === 200, `bob relogin: access to sso-eng granted through the synced SSO group (${eng.status()})`);
     await r.ctx.close(); await browser.close();
     console.log(failures ? `E2E FAILED (${failures})` : 'E2E OK'); process.exit(failures ? 1 : 0);
   }

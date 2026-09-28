@@ -454,7 +454,7 @@ func (h *S3APIHandler) GetObject(c *gin.Context) {
 	if anonymous {
 		allowed = h.anonymousReadAllowed(c, &bucket, objectKey)
 	} else {
-		allowed, _ = h.policyService.CheckObjectAccess(userUUID, bucketName, objectKey, services.ActionGetObject)
+		allowed = h.signedReadAllowed(c, userUUID, bucketName, objectKey)
 	}
 	if !allowed {
 		h.s3Error(c, "AccessDenied", "Access Denied", objectKey, http.StatusForbidden)
@@ -552,6 +552,19 @@ func (h *S3APIHandler) anonymousReadAllowed(c *gin.Context, bucket *models.Bucke
 		return false
 	}
 	return !h.policyService.AnonymousObjectAccessDenied(bucket, objectKey, services.ActionGetObject)
+}
+
+// signedReadAllowed authorizes a signed object GET/HEAD as s3:GetObject. On a
+// public-read bucket CheckObjectAccess allows it unless a policy explicitly
+// denies it; public-read covers only the current version, so a
+// versionId-addressed read (AWS s3:GetObjectVersion) needs a policy grant.
+func (h *S3APIHandler) signedReadAllowed(c *gin.Context, userUUID uuid.UUID, bucketName, objectKey string) bool {
+	check := h.policyService.CheckObjectAccess
+	if c.Query("versionId") != "" {
+		check = h.policyService.CheckObjectAccessWithoutPublicRead
+	}
+	allowed, _ := check(userUUID, bucketName, objectKey, services.ActionGetObject)
+	return allowed
 }
 
 // responseHeaderOverrides maps the GetObject response-* query parameters to
@@ -998,7 +1011,7 @@ func (h *S3APIHandler) HeadObject(c *gin.Context) {
 	if anonymous {
 		allowed = h.anonymousReadAllowed(c, &bucket, objectKey)
 	} else {
-		allowed, _ = h.policyService.CheckObjectAccess(userUUID, bucketName, objectKey, services.ActionGetObject)
+		allowed = h.signedReadAllowed(c, userUUID, bucketName, objectKey)
 	}
 	if !allowed {
 		c.Status(http.StatusForbidden)

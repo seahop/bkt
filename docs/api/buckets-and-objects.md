@@ -280,9 +280,11 @@ Download an object from a bucket.
 
 **Authentication:** Required
 
-**Authorization:** Admin, or `s3:GetObject` on the object. This console
-endpoint always requires a token; unauthenticated downloads from a
-[public-read bucket](#public-read-buckets) go through the S3 listener.
+**Authorization:** Admin, or `s3:GetObject` on the object — on a
+[public-read bucket](#public-read-buckets) granted to every signed-in user
+unless a policy explicitly denies it. This console endpoint always requires a
+token; unauthenticated downloads from a public-read bucket go through the S3
+listener.
 
 **Query Parameters:**
 - `download=true` - Force download (sets Content-Disposition: attachment)
@@ -329,9 +331,10 @@ Get object metadata without downloading the file (HEAD request).
 
 **Authentication:** Required
 
-**Authorization:** Admin, or `s3:GetObject` on the object (a token is always
-required here; see [public-read buckets](#public-read-buckets) for
-unauthenticated access on the S3 listener).
+**Authorization:** Admin, or `s3:GetObject` on the object — on a
+[public-read bucket](#public-read-buckets) granted to every signed-in user
+unless a policy explicitly denies it (a token is always required here;
+unauthenticated access goes through the S3 listener).
 
 **Success Response (200 OK):**
 - Headers only (no body):
@@ -392,6 +395,10 @@ Generate a time-limited, shareable download URL for an object. The URL is signed
 **Endpoint:** `POST /buckets/:name/objects/presign`
 
 **Authentication:** Required (and at least one active access key — generate one in Profile first)
+
+**Authorization:** Admin, or `s3:GetObject` on the object — on a
+[public-read bucket](#public-read-buckets) granted to every signed-in user
+unless a policy explicitly denies it.
 
 **Request Body:**
 ```json
@@ -484,8 +491,21 @@ What is public, precisely:
 - **Logging:** anonymous reads appear in the access log and in the
   `bkt_http_requests_total` metrics (route-template labels) but are not
   written to the audit log.
-- **Signed requests are unchanged.** A signed request on a public bucket is
-  authorized by policies alone, as on any other bucket.
+- **Signed-in users can read too (AWS semantics).** Public-read applies to
+  every principal, not only anonymous ones: an authenticated user (signed S3
+  request, presigned URL, or console session) may read an object of a public
+  bucket even with no policy granting `s3:GetObject`, **unless a policy
+  explicitly denies it** — a user or group policy `Deny`, or a bucket-policy
+  `Deny` whose `Principal` names that user, is `"*"`, or is absent. The order
+  is: explicit Deny > Allow > public-read (object reads only) > implicit
+  deny (see [Policy Evaluation](policies.md#policy-evaluation)). This covers
+  S3 `GetObject`/`HeadObject`, console download and `HEAD`, presigned-link
+  creation (and the link itself), the source side of `CopyObject` /
+  `UploadPartCopy`, and replication source reads. It does **not** cover
+  listing (`s3:ListBucket` — a public bucket is also not shown in the
+  console's bucket list to users with no grant on it), object versions
+  (`?versionId`, version listings), tagging, writes, deletes or moves (a move
+  still needs `s3:PutObject` and `s3:DeleteObject`). Admins are unaffected.
 
 `is_public` is set at creation (admin only, like bucket creation) and can be
 changed later by an admin through [bucket settings](#public-read-access-is_public).

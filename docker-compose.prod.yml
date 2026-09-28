@@ -178,6 +178,8 @@ services:
       VAULT_SSO_ENABLED: ${VAULT_SSO_ENABLED:-false}
       VAULT_JWT_AUDIENCE: ${VAULT_JWT_AUDIENCE:-}
       VAULT_JWT_ISSUER: ${VAULT_JWT_ISSUER:-}
+      # Claim with the user's group names (SSO group -> bkt group mapping); empty = "groups".
+      VAULT_JWT_GROUPS_CLAIM: ${VAULT_JWT_GROUPS_CLAIM:-}
       # Vault JWT auth mount (JWKS: <VAULT_ADDR>/v1/<path>/.well-known/jwks.json)
       VAULT_JWT_PATH: ${VAULT_JWT_PATH:-auth/jwt}
       VAULT_JWT_ROLE: ${VAULT_JWT_ROLE:-object-storage-users}

@@ -27,6 +27,7 @@ claim, account linking) that `OIDC_*` adds.
 - **Automatic User Provisioning**: Users are created on first SSO login
 - **Policy Sync from Token Claims**: the ID token can include a `policies` claim (JSON array of policy names) that auto-assigns on login
 - **SSO as Source of Truth**: Policies sync on every login (changes in SSO propagate immediately)
+- **IdP group → bkt group mapping**: link identity-provider groups to bkt groups once, and SSO users' group memberships follow the IdP at every sign-in (see [Mapping IdP groups to bkt groups](#mapping-idp-groups-to-bkt-groups))
 - **Hybrid Support**: SSO users and local users can coexist
 - **Audited**: every SSO login is recorded in the audit log with provider metadata
 
@@ -84,6 +85,136 @@ Users can have multiple policies. When evaluating access:
 - Gets read access from `team-a-read`
 - Gets write access from `project-x-write`
 - Combined: read + write access
+
+---
+
+## Mapping IdP groups to bkt groups
+
+Instead of making the identity provider compute a per-user list of policy
+names (a `policies` claim), you can map **IdP groups to bkt groups**: manage
+who is in `engineering` in the IdP, and decide once in bkt what `engineering`
+may access (the policies attached to the bkt group).
+
+### How it works
+
+1. In bkt, create a group (Admin → **Groups**), attach policies to it, and
+   enter one or more **Linked SSO groups** — the IdP group names whose members
+   should belong to it. Via the API: `POST /api/groups` with `sso_groups`, or
+   `PUT /api/groups/{id}/sso-groups` `{"sso_groups": ["engineering"]}`.
+2. At **every SSO sign-in**, after the account is resolved and before the
+   session is issued, bkt compares the user's IdP groups with all links:
+   - the user is **added** to every linked bkt group one of whose SSO groups
+     they are in, and
+   - **removed** from every linked bkt group they no longer match.
+3. The user then gets those groups' policies through the normal evaluation
+   (effective policies = direct policies ∪ group policies).
+
+Rules:
+
+- **Matching is case-insensitive and exact** (after trimming whitespace):
+  the link `Engineering` matches the IdP group `engineering`, but not
+  `engineering-eu` or `/engineering`. One IdP group may be linked to several
+  bkt groups, and a bkt group may list several IdP groups (up to 100 names of
+  at most 256 characters each).
+- A bkt group with at least one link is **SSO-managed**: its membership for SSO
+  users follows the IdP. If an administrator adds an SSO user to a linked group
+  by hand (or removes them), that change is replaced at the user's next
+  sign-in. Groups **without** links are never touched by sign-in, and **local
+  (password) users are never touched** — they can be members of linked groups
+  and are managed by hand as before.
+- Changes apply at the next sign-in, not immediately (as with the policies
+  claim). A user removed from the IdP group keeps the membership until they
+  sign in again; their existing session/refresh tokens are not revoked. Lock
+  the user in bkt to cut access at once.
+- **Fail closed**: if the provider supplies **no group information at all**
+  (the OIDC groups claim is absent from both the ID token and UserInfo, or the
+  Vault JWT has no groups claim), the user is removed from **all** SSO-managed
+  groups, and bkt logs a warning naming the expected claim
+  (`SSO sign-in carried no group information ... expected=the "groups" claim (OIDC_GROUPS_CLAIM)`).
+  A present but empty claim (`"groups": []`) means "member of nothing" and has
+  the same effect. If the sync itself fails (database error), the sign-in is
+  refused rather than keeping stale memberships.
+- Each change is audited: the `auth.login` audit entry carries
+  `sso_groups_added` / `sso_groups_removed` (bkt group names), and link edits
+  are logged as `group.sso_groups_update`.
+- The admin flag (`OIDC_ADMIN_GROUP`) and access gating (`OIDC_USER_GROUP`)
+  are independent of this mapping and unchanged.
+
+### Where group names come from
+
+| Provider | Group source |
+|---|---|
+| **OIDC** (`OIDC_*`) | The `OIDC_GROUPS_CLAIM` claim (default `groups`) from the ID token or UserInfo — the same claim used for `OIDC_ADMIN_GROUP` / `OIDC_USER_GROUP`. JSON array, or a space/comma separated string. |
+| **Vault OIDC** (`VAULT_OIDC_*`) | The `groups` claim (e.g. from the scope template `"groups": {{identity.entity.groups.names}}`). |
+| **Vault JWT** (`/api/auth/vault/login`) | The `VAULT_JWT_GROUPS_CLAIM` claim (default `groups`). |
+| **Google** | Only with Workspace integration (`GOOGLE_WORKSPACE_ENABLED=true`): the user's groups from the Directory API. A link may use the group name (`engineering`) or its full address (`engineering@example.com`). A failed Directory lookup counts as "no group information" (fail closed; non-admins are refused anyway). **Without Workspace integration there is no group source and group mapping is skipped for Google users** — their memberships are left as they are. |
+
+### Interaction with the policies claim
+
+Both can be used together. The policies claim (`OIDC_POLICIES_CLAIM`, Vault
+`policies`, Google Workspace policy sync) manages the user's **direct**
+policies; group mapping manages **group memberships**, which contribute
+**group policies**. Neither touches the other. A common migration is to keep
+the policies claim for a transition period, move the grants onto bkt groups,
+and then stop emitting the policies claim (for OIDC, leave
+`OIDC_POLICIES_CLAIM`/`OIDC_POLICIES_AUTHORITATIVE` unset so an absent claim
+leaves direct policies alone; clear leftover direct policies by hand).
+
+Note that the Vault JWT login refuses users with **no** policies; policies
+reached through a synced group count.
+
+### Example: Keycloak
+
+Add a **Group Membership** mapper named `groups` to the client (or a client
+scope assigned to it), token claim name `groups`, *Add to ID token* and
+*Add to userinfo* on, **Full group path off** (so the claim carries
+`engineering`, not `/engineering`). Then in bkt link `engineering` to a bkt
+group. `OIDC_GROUPS_CLAIM` can stay at its default.
+
+### Example: Okta / Microsoft Entra ID
+
+- **Okta**: add a `groups` claim to the ID token (authorization server →
+  Claims, value type *Groups*, filter e.g. *Matches regex* `.*` or
+  *Starts with* `bkt-`). Link the Okta group names.
+- **Entra ID**: add the **groups** claim under *Token configuration*. Entra
+  emits group **object IDs** by default — either link the object IDs
+  (`8f1c…`) in bkt, or emit names (`sAMAccountName` for synced groups / cloud
+  group names via app roles). Users in more than ~200 groups get a "groups
+  overage" claim instead of the list, which bkt treats as no group
+  information — assign only relevant groups to the app ("Groups assigned to
+  the application") to stay under the limit.
+
+### Example: Vault as OIDC provider (replacing per-user policy lists)
+
+With Vault's OIDC provider you no longer need Terraform to compute a
+per-user list of policy names. Emit the user's **identity group names** from a
+scope template and request that scope:
+
+```bash
+vault write identity/oidc/scope/groups \
+  description="bkt group mapping" \
+  template='{"groups": {{identity.entity.groups.names}}}'
+
+# Add the scope to the provider bkt uses
+vault write identity/oidc/provider/default \
+  allowed_client_ids="<bkt client id>" \
+  scopes_supported="profile,groups"
+```
+
+```bash
+# Generic OIDC slot (recommended)
+OIDC_ISSUER_URL=https://vault.example.com/v1/identity/oidc/provider/default
+OIDC_SCOPES=openid profile email groups
+OIDC_GROUPS_CLAIM=groups
+# — or the legacy slot: VAULT_OIDC_SCOPES="openid profile groups" (claim is always "groups")
+```
+
+Then manage membership of Vault identity groups (`engineering`, `ops`, …) and,
+in bkt, create groups linked to those names with the policies they need.
+The `policies` claim can be dropped from the template once everything is on
+groups.
+
+---
 
 ---
 
@@ -256,6 +387,8 @@ All three are standard: use the issuer URL from the provider (Authentik:
 | `ID token verification failed: unexpected signing method` | The client is configured to sign ID tokens with HS256. Switch it to RS256 or ES256. |
 | `token response contained no id_token` | The `openid` scope is not granted to the client. |
 | `access_denied_no_groups` on the login page | The token has no groups claim: add a groups mapper/claim in the IdP. |
+| SSO users drop out of linked bkt groups; log says `SSO sign-in carried no group information` | The groups claim (`OIDC_GROUPS_CLAIM`) is missing from both ID token and UserInfo, so group mapping failed closed. Add the groups mapper/claim (and request its scope in `OIDC_SCOPES` if it is scope-gated). |
+| A linked IdP group never matches | Compare the exact names in the token (Keycloak full group path `/eng`, Entra object IDs) with the linked names; matching is case-insensitive but otherwise exact. |
 | Username is `jane_doe1` | `jane_doe` already existed (local or another provider); the SSO account was created with a suffix instead of taking over the existing one. |
 | Behind a reverse proxy the callback fails silently | bkt sets `Secure` cookies when it sees TLS or `X-Forwarded-Proto: https`; make sure the proxy forwards that header. |
 
@@ -281,6 +414,10 @@ VAULT_JWT_AUDIENCE=objectstore
 
 # Expected issuer claim (optional; enforced when set)
 VAULT_JWT_ISSUER=https://vault.company.com:8200/v1/identity/oidc
+
+# Claim carrying the user's group names, for IdP group → bkt group mapping
+# (optional; default "groups"). See "Mapping IdP groups to bkt groups".
+VAULT_JWT_GROUPS_CLAIM=groups
 ```
 
 Vault policy sync (JWT login and the `VAULT_OIDC_*` slot) is
@@ -333,7 +470,7 @@ Your JWT must include:
 | `sub` | Yes | Unique user identifier |
 | `email` | Yes | User's email address |
 | `name` | No | Display name |
-| `groups` | No | Group memberships |
+| `groups` | No | Group memberships (claim name: `VAULT_JWT_GROUPS_CLAIM`); drives [IdP group → bkt group mapping](#mapping-idp-groups-to-bkt-groups) — absent means "no group information" |
 | `policies` | No* | Policy names to assign |
 
 *Required for automatic policy assignment
@@ -637,8 +774,12 @@ With this configuration:
 If you don't have Google Workspace or prefer manual assignment:
 
 1. User logs in via Google (account created with no policies)
-2. Admin assigns policies via UI or API
+2. Admin assigns policies (or bkt group memberships) via UI or API
 3. User has access based on assigned policies
+
+Without Workspace integration bkt has no group information for Google users,
+so [IdP group → bkt group mapping](#mapping-idp-groups-to-bkt-groups) does not
+apply to them; their group memberships are managed by hand.
 
 > **Tip**: For automatic policy assignment without Workspace, consider using Vault JWT SSO instead.
 

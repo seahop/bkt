@@ -5,7 +5,7 @@
 # client "bkt", a groups mapper, users alice/bob/carol), starts the bkt omnibus
 # image configured against it, and drives the login through Chromium
 # (Playwright) asserting PKCE on the wire, admin/user/denied outcomes, subject
-# matching on repeat login, and audit entries.
+# matching on repeat login, audit entries, and IdP group → bkt group mapping.
 #
 #   ./tests/oidc-e2e/run.sh                 # builds the omnibus image from the working tree
 #   BKT_IMAGE=ghcr.io/seahop/bkt:1.4.0 ./tests/oidc-e2e/run.sh   # test a published image
@@ -54,7 +54,7 @@ for i in $(seq 1 90); do
 done
 
 echo "▸ Driving the browser (login, roles, denial, audit)"
-cp tests/oidc-e2e/oidc-e2e.js tests/oidc-e2e/iam-e2e.sh "$WORK/"
+cp tests/oidc-e2e/oidc-e2e.js tests/oidc-e2e/iam-e2e.sh tests/oidc-e2e/sso-groups-e2e.sh "$WORK/"
 docker run --rm --network $NET -v "$WORK":/work -w /work "$PW_IMAGE" bash -c \
   'npm init -y >/dev/null 2>&1; npm install --no-audit --no-fund playwright@1.58.2 >/dev/null 2>&1; node oidc-e2e.js https://oidc-e2e-bkt:9443 shots'
 
@@ -63,6 +63,14 @@ docker build -q -t bkt-tests:oidc-e2e tests/ >/dev/null
 docker run --rm --network $NET -v "$WORK":/work --entrypoint bash bkt-tests:oidc-e2e \
   /work/iam-e2e.sh https://oidc-e2e-bkt:9443 https://oidc-e2e-bkt:9000 E2E-Admin-Pass-1 /work
 
-echo "▸ Re-login: assigned policy survives a fresh SSO login"
+echo "▸ SSO group mapping: link Keycloak group Eng-Team to a bkt group"
+docker run --rm --network $NET -v "$WORK":/work --entrypoint bash bkt-tests:oidc-e2e \
+  /work/sso-groups-e2e.sh setup https://oidc-e2e-bkt:9443 E2E-Admin-Pass-1 /work
+
+echo "▸ Re-login: assigned policy survives a fresh SSO login; linked group synced"
 docker run --rm --network $NET -v "$WORK":/work -w /work "$PW_IMAGE" node oidc-e2e.js https://oidc-e2e-bkt:9443 shots --relogin-check
+
+echo "▸ SSO group mapping: memberships and audit after re-login"
+docker run --rm --network $NET -v "$WORK":/work --entrypoint bash bkt-tests:oidc-e2e \
+  /work/sso-groups-e2e.sh verify https://oidc-e2e-bkt:9443 E2E-Admin-Pass-1 /work
 echo "Screenshots: $WORK/shots"

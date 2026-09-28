@@ -6,6 +6,7 @@ import (
 	"bkt/internal/security"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -127,8 +128,25 @@ func (ps *PolicyService) CheckBucketAccess(userID uuid.UUID, bucketName, action 
 	return decide(userResult, bucketResult), nil
 }
 
-// CheckObjectAccess checks if a user has permission to perform an action on an object
-func (ps *PolicyService) CheckObjectAccess(userID uuid.UUID, bucketName, objectKey, action string) (result bool, err error) {
+// CheckObjectAccess checks if a user has permission to perform an action on an
+// object. On a public-read bucket (is_public) an object read (s3:GetObject,
+// and bkt's s3:HeadObject) that no policy explicitly denies is allowed even
+// without an Allow, as in AWS where public-read applies to every principal
+// (see objectPolicies.allowed for the evaluation order).
+func (ps *PolicyService) CheckObjectAccess(userID uuid.UUID, bucketName, objectKey, action string) (bool, error) {
+	return ps.checkObjectAccess(userID, bucketName, objectKey, action, true)
+}
+
+// CheckObjectAccessWithoutPublicRead is CheckObjectAccess without the
+// public-read grant: only policies decide. Use it for reads that public-read
+// does not cover even though bkt authorizes them as s3:GetObject — a specific
+// (versionId-addressed) or listed object version, and object tagging (AWS
+// s3:GetObjectVersion, s3:GetObjectTagging).
+func (ps *PolicyService) CheckObjectAccessWithoutPublicRead(userID uuid.UUID, bucketName, objectKey, action string) (bool, error) {
+	return ps.checkObjectAccess(userID, bucketName, objectKey, action, false)
+}
+
+func (ps *PolicyService) checkObjectAccess(userID uuid.UUID, bucketName, objectKey, action string, honorPublicRead bool) (result bool, err error) {
 	// Recover from panics to prevent service crash (fail-safe: deny access on panic)
 	defer func() {
 		if r := recover(); r != nil {
@@ -156,36 +174,134 @@ func (ps *PolicyService) CheckObjectAccess(userID uuid.UUID, bucketName, objectK
 		return false, nil
 	}
 
+	// The bucket row (loaded above, including is_public) and its policy are
+	// all the public-read rule needs. A bucket policy that cannot be loaded
+	// (other than "none") may hold a Deny, so public-read then does not apply.
 	var bucketPolicy *models.BucketPolicy
 	var bp models.BucketPolicy
-	if database.DB.Where("bucket_id = ?", bucket.ID).First(&bp).Error == nil {
+	publicRead := bucket.IsPublic && honorPublicRead
+	if perr := database.DB.Where("bucket_id = ?", bucket.ID).First(&bp).Error; perr == nil {
 		bucketPolicy = &bp
+	} else if !errors.Is(perr, gorm.ErrRecordNotFound) {
+		publicRead = false
 	}
-	return ps.objectAccessDecision(&user, bucketName, bucketPolicy, objectKey, action), nil
+	return ps.objectAccessDecision(&user, bucketName, publicRead, bucketPolicy, objectKey, action), nil
 }
 
-// objectAccessDecision is the in-memory core of CheckObjectAccess for a
-// non-admin user whose bucket exists: user (identity) and bucket (resource)
-// policies are evaluated and combined so an explicit Deny from either wins.
-// bucketPolicy may be nil (no bucket policy). AccessEvaluator must stay
-// equivalent to this (see TestAccessEvaluatorMatchesCheckObjectAccess).
-func (ps *PolicyService) objectAccessDecision(user *models.User, bucketName string, bucketPolicy *models.BucketPolicy, objectKey, action string) bool {
+// objectAccessDecision is the in-memory core of CheckObjectAccess for a user
+// whose bucket exists: it applies objectPolicies.allowed to the user's
+// effective (direct + group) policies and the bucket policy (nil = none).
+// publicRead is whether the bucket's public-read grant applies (bucket
+// is_public, and the caller honors it). AccessEvaluator shares the same core
+// (see TestAccessEvaluatorMatchesCheckObjectAccess).
+func (ps *PolicyService) objectAccessDecision(user *models.User, bucketName string, publicRead bool, bucketPolicy *models.BucketPolicy, objectKey, action string) bool {
 	if user.IsAdmin {
 		return true
 	}
-	// Build resource ARN - for objects, include the key
-	resourceARN := fmt.Sprintf("arn:aws:s3:::%s/%s", bucketName, objectKey)
+	p := parseObjectPolicies(user, bucketPolicy, publicRead)
+	return p.allowed(bucketName, objectKey, action)
+}
 
-	userResult := ps.evaluateUserPolicies(user, action, resourceARN)
+// objectPolicies is the parsed policy set that authorizes one (non-admin)
+// user's object requests in one bucket: the user's effective policies, the
+// bucket policy, and whether the bucket is public-read.
+type objectPolicies struct {
+	username  string
+	userDocs  []*security.PolicyDocument
+	bucketDoc *security.PolicyDocument
+	public    bool // the bucket's public-read grant applies
+	// unparseable is set when a stored document failed to parse. Such a
+	// document is skipped for Allow/Deny (as before), but public-read — a
+	// grant that relies on seeing every Deny — then does not apply.
+	unparseable bool
+}
 
-	bucketResult := security.PolicyNoMatch
+// parseObjectPolicies parses every document once.
+func parseObjectPolicies(user *models.User, bucketPolicy *models.BucketPolicy, public bool) objectPolicies {
+	p := objectPolicies{username: user.Username, public: public}
+	for _, pol := range user.Policies {
+		doc, err := security.ParseStoredPolicyDocument(pol.Document)
+		if err != nil {
+			p.unparseable = true
+			continue
+		}
+		p.userDocs = append(p.userDocs, doc)
+	}
 	if bucketPolicy != nil {
-		if br, perr := ps.evaluateBucketPolicy(bucketPolicy, action, resourceARN, user.Username); perr == nil {
-			bucketResult = br
+		doc, err := security.ParseStoredPolicyDocument(bucketPolicy.PolicyDocument)
+		if err != nil {
+			p.unparseable = true
+		} else {
+			p.bucketDoc = doc
 		}
 	}
+	return p
+}
 
-	return decide(userResult, bucketResult)
+// result is the combined tri-state result of the user's policies and the
+// bucket policy (bucket-policy Principals match the username): an explicit
+// Deny from any of them wins, else Allow if any allows, else NoMatch. A
+// document whose evaluation panics is skipped.
+func (p *objectPolicies) result(action, resource string) security.PolicyResult {
+	ctx := &security.PolicyEvaluationContext{Username: p.username, Action: action, Resource: resource}
+	userResult := security.PolicyNoMatch
+	for _, doc := range p.userDocs {
+		r, ok := safeEvaluate(doc, ctx)
+		if !ok {
+			continue
+		}
+		if r == security.PolicyDeny {
+			userResult = security.PolicyDeny
+			break
+		}
+		if r == security.PolicyAllow {
+			userResult = security.PolicyAllow
+		}
+	}
+	bucketResult := security.PolicyNoMatch
+	if p.bucketDoc != nil {
+		if r, ok := safeEvaluate(p.bucketDoc, ctx); ok {
+			bucketResult = r
+		}
+	}
+	return combine(userResult, bucketResult)
+}
+
+// allowed decides action on bucketName/key, in this order:
+//
+//  1. an explicit Deny in any applicable policy (user, group, or a bucket
+//     policy statement whose Principal names the user, is "*", or is absent)
+//     denies;
+//  2. otherwise an Allow in any of them allows;
+//  3. otherwise, when public-read applies (p.public), an object read —
+//     s3:GetObject, or s3:HeadObject provided s3:GetObject is not explicitly
+//     denied either (AWS authorizes HEAD as s3:GetObject) — is allowed:
+//     public-read applies to every principal, as in AWS;
+//  4. otherwise it is denied (implicit deny).
+//
+// Public-read never grants listing, versions, writes, deletes, tagging or
+// any other action. Admins are handled by the callers (always allowed).
+func (p *objectPolicies) allowed(bucketName, key, action string) bool {
+	resource := fmt.Sprintf("arn:aws:s3:::%s/%s", bucketName, key)
+	switch p.result(action, resource) {
+	case security.PolicyDeny:
+		return false
+	case security.PolicyAllow:
+		return true
+	}
+	if !p.public || p.unparseable || !isPublicReadAction(action) {
+		return false
+	}
+	if !strings.EqualFold(action, ActionGetObject) && p.result(ActionGetObject, resource) == security.PolicyDeny {
+		return false
+	}
+	return true
+}
+
+// isPublicReadAction reports whether action is an object read that a
+// public-read bucket grants to every principal.
+func isPublicReadAction(action string) bool {
+	return strings.EqualFold(action, ActionGetObject) || strings.EqualFold(action, ActionHeadObject)
 }
 
 // AnonymousObjectAccessDenied reports whether the bucket policy explicitly
@@ -286,10 +402,20 @@ func (ps *PolicyService) evaluatePolicy(policyJSON string, action, resource stri
 // allow/deny. An explicit Deny from EITHER source wins (matching IAM semantics);
 // otherwise access is granted if EITHER source allows.
 func decide(userResult, bucketResult security.PolicyResult) bool {
-	if userResult == security.PolicyDeny || bucketResult == security.PolicyDeny {
-		return false
+	return combine(userResult, bucketResult) == security.PolicyAllow
+}
+
+// combine is decide's tri-state form: Deny if either source denies, else
+// Allow if either allows, else NoMatch (implicit deny).
+func combine(userResult, bucketResult security.PolicyResult) security.PolicyResult {
+	switch {
+	case userResult == security.PolicyDeny || bucketResult == security.PolicyDeny:
+		return security.PolicyDeny
+	case userResult == security.PolicyAllow || bucketResult == security.PolicyAllow:
+		return security.PolicyAllow
+	default:
+		return security.PolicyNoMatch
 	}
-	return userResult == security.PolicyAllow || bucketResult == security.PolicyAllow
 }
 
 // GetUserPolicies retrieves all policies attached to a user

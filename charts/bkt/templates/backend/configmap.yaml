@@ -79,6 +79,7 @@ data:
   VAULT_SSO_ENABLED: {{ .Values.backend.env.VAULT_SSO_ENABLED | default "false" | quote }}
   VAULT_JWT_AUDIENCE: {{ .Values.backend.env.VAULT_JWT_AUDIENCE | default "" | quote }}
   VAULT_JWT_ISSUER: {{ .Values.backend.env.VAULT_JWT_ISSUER | default "" | quote }}
+  VAULT_JWT_GROUPS_CLAIM: {{ .Values.backend.env.VAULT_JWT_GROUPS_CLAIM | default "" | quote }}
   VAULT_JWT_PATH: {{ include "bkt.env" (list . "VAULT_JWT_PATH" "auth/jwt") | quote }}
   VAULT_JWT_ROLE: {{ include "bkt.env" (list . "VAULT_JWT_ROLE" "object-storage-users") | quote }}
   FRONTEND_URL: {{ .Values.backend.env.FRONTEND_URL | default "" | quote }}

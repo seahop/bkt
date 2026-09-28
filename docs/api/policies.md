@@ -489,6 +489,9 @@ Removes the group along with its memberships and policy attachments. The users a
 2. **EXPLICIT DENY WINS**: An explicit `Deny` overrides every `Allow` — across **both** the user's identity policies **and** the bucket (resource) policy. A user-policy Deny is honored even when a bucket policy allows the action.
 3. **ADMIN BYPASS**: Admin users automatically pass all policy checks
 4. **MULTIPLE POLICIES**: All of the user's effective policies (direct policies ∪ group policies) plus the bucket policy are evaluated; access is granted if any of them allows and none denies (union of permissions, minus any deny)
+5. **PUBLIC-READ**: On a [public-read bucket](buckets-and-objects.md#public-read-buckets) (`is_public`), an object read — `s3:GetObject` (S3 GET/HEAD, console download, presign, copy source, replication source) — that no policy allows and none explicitly denies is **allowed** for every authenticated user, as in AWS where public-read applies to all principals. The console's `HEAD` (`s3:HeadObject`) is treated the same way and is also blocked by a Deny on `s3:GetObject`. Public-read grants nothing else: listing, object versions (`?versionId`, version listings), tagging, writes and deletes still need an Allow. It is withheld if any of the user's or the bucket's stored policies cannot be parsed.
+
+In short: **explicit Deny > Allow > public-read (object reads on public buckets) > implicit deny.** A bucket-policy Deny applies to a user when its `Principal` names that user, is `"*"`, or is absent — so a `"*"` Deny on `arn:aws:s3:::bucket/private/*` keeps that prefix private from anonymous readers and signed-in users alike, while a Deny naming `alice` blocks only alice.
 
 ### Evaluation Flow
 
@@ -507,6 +510,12 @@ Removes the group along with its memberships and policy attachments. The users a
 │  Check Allows   │──Found──> ALLOW
 └────────┬────────┘
          │ None
+         ▼
+┌─────────────────────────────┐
+│  Public bucket and action   │──Yes──> ALLOW
+│  is an object read?         │
+└────────┬────────────────────┘
+         │ No
          ▼
       DENY (default)
 ```
@@ -538,7 +547,9 @@ action below on the bucket resource (`arn:aws:s3:::bucket`):
 `s3:*` covers all of them. Setting `replicate_to` additionally requires
 `s3:GetObject` on every object of the source (`arn:aws:s3:::source/*`) and
 `s3:PutObject` + `s3:DeleteObject` on every object of the target
-(`arn:aws:s3:::target/*`); prefix-scoped grants are not sufficient.
+(`arn:aws:s3:::target/*`); prefix-scoped grants are not sufficient. On a
+public-read source bucket the `s3:GetObject` requirement is met by
+public-read unless a policy denies it.
 Replication then keeps acting as the configuring user: every sync re-checks
 that user's current `s3:GetObject` (source key), `s3:PutObject` (target key)
 and `s3:DeleteObject` (target key, for mirrored deletions) per object, so an

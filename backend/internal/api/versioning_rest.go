@@ -42,7 +42,9 @@ func (h *BucketHandler) loadBucketForVersioning(c *gin.Context, action string) (
 	userID, _ := c.Get("user_id")
 	userUUID := userID.(uuid.UUID)
 
-	allowed, err := h.policyService.CheckObjectAccess(userUUID, bucketName, key, action)
+	// Version operations are never covered by public-read (AWS:
+	// s3:GetObjectVersion / s3:ListBucketVersions), so only policies decide.
+	allowed, err := h.policyService.CheckObjectAccessWithoutPublicRead(userUUID, bucketName, key, action)
 	if err != nil || !allowed {
 		c.JSON(http.StatusForbidden, models.ErrorResponse{Error: "Permission denied"})
 		return nil, "", uuid.Nil, false

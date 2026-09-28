@@ -201,7 +201,19 @@ is the entire anonymous surface:
 - **Policies** — the public flag is the grant; Allow statements play no part.
   A bucket-policy `Deny` for `Principal: "*"` (or without a Principal) still
   blocks anonymous reads; a stored bucket policy that cannot be parsed blocks
-  them all. Signed requests are evaluated exactly as for private buckets.
+  them all.
+- **Authenticated callers** — as in AWS, public-read applies to every
+  principal. For a signed-in user the object decision (one core shared by
+  `CheckObjectAccess` and the batch `AccessEvaluator`, so S3 GET/HEAD, console
+  download/HEAD, presign, copy sources and replication agree) is: explicit
+  `Deny` in any applicable user, group or bucket policy → deny; else any
+  `Allow` → allow; else, on a public bucket, `s3:GetObject` (and the
+  console's `s3:HeadObject`, unless `s3:GetObject` is denied) → allow; else
+  deny. The public grant is withheld when any of the user's or the bucket's
+  stored policies cannot be parsed or the bucket policy cannot be loaded (a
+  hidden Deny must not be bypassed). It never extends to listing, versions
+  (`?versionId`, version listings), tagging, writes or deletes, and public
+  buckets stay out of the console bucket list of users with no grant.
 - **Content** — the reserved `.bkt-versions/` keyspace stays `404`; active
   content (HTML/SVG/XML/JS) is always an attachment with `nosniff`, and an
   anonymous `response-content-disposition` cannot switch that off.

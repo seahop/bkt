@@ -76,6 +76,7 @@ Complete API reference for bkt.
 | GET | `/api/groups` | List groups |
 | POST | `/api/groups` | Create group |
 | DELETE | `/api/groups/:id` | Delete group |
+| PUT | `/api/groups/:id/sso-groups` | Replace linked SSO (IdP) groups |
 | POST | `/api/groups/:id/members` | Add group member |
 | DELETE | `/api/groups/:id/members/:user_id` | Remove group member |
 | POST | `/api/groups/:id/policies` | Attach policy to group |
@@ -291,7 +292,7 @@ Handles the OAuth callback from Google after user authentication. Creates or upd
 **Success Behavior:**
 - Creates user account if first login
 - Updates user info on subsequent logins
-- If Google Workspace enabled: syncs policies from user's groups
+- If Google Workspace enabled: syncs policies from user's groups, and memberships of bkt groups linked to those groups (`sso_groups`)
 - Redirects to frontend with token in URL fragment
 
 **Error Codes:**
@@ -322,7 +323,7 @@ Authenticate using a JWT token from HashiCorp Vault. Supports automatic policy a
 | sub | Yes | Unique user identifier |
 | email | Yes | User's email address |
 | name | No | Display name |
-| groups | No | Group memberships (array) |
+| groups | No | Group memberships (array; claim name set by `VAULT_JWT_GROUPS_CLAIM`). Syncs membership of bkt groups with linked `sso_groups`; absent = removed from all linked groups |
 | policies | No | Policy names to assign (array) |
 
 **Example JWT Payload:**
@@ -1553,7 +1554,19 @@ Groups are named sets of users that policies can attach to (admin only). A user'
 
 **Authentication:** Required (Admin)
 
-**Response (200 OK):** Array of group objects, each including its `users` (members) and `policies`.
+**Response (200 OK):** Array of group objects, each including its `users` (members; SSO users carry `sso_provider`, local users omit it), `policies`, and `sso_groups` (linked identity-provider group names, `[]` when none).
+
+```json
+[
+  {
+    "id": "…",
+    "name": "engineering",
+    "sso_groups": ["engineering", "platform-team"],
+    "users": [{"id": "…", "username": "alice", "sso_provider": "oidc"}],
+    "policies": [{"id": "…", "name": "eng-buckets"}]
+  }
+]
+```
 
 </details>
 
@@ -1567,10 +1580,12 @@ Groups are named sets of users that policies can attach to (admin only). A user'
 |-------|------|----------|-------------|
 | name | string | Yes | Group name (2-64 characters, unique) |
 | description | string | No | Group description |
+| sso_groups | string[] | No | Identity-provider group names to link (see `PUT /api/groups/:id/sso-groups` for the rules) |
 
 **Response (201 Created):** Group object
 
 **Error Codes:**
+- `400` - Invalid `sso_groups`
 - `409` - Group name already exists
 
 </details>
@@ -1578,7 +1593,7 @@ Groups are named sets of users that policies can attach to (admin only). A user'
 <details>
 <summary><code>DELETE /api/groups/:id</code> - Delete group <strong>[Admin]</strong></summary>
 
-Removes the group, its memberships, and its policy attachments. Users and policies themselves are untouched.
+Removes the group, its memberships, its policy attachments, and its SSO group links. Users and policies themselves are untouched.
 
 **Response (200 OK):**
 ```json
@@ -1590,6 +1605,25 @@ Removes the group, its memberships, and its policy attachments. Users and polici
 </details>
 
 <details>
+<summary><code>PUT /api/groups/:id/sso-groups</code> - Replace linked SSO groups <strong>[Admin]</strong></summary>
+
+Replaces the identity-provider group names linked to the group. SSO users whose IdP groups match any link (case-insensitive, exact) are added to the group at each sign-in and removed when they no longer match; groups without links, and local users, are never changed by sign-in. `[]` unlinks the group. Memberships change at each user's next sign-in. See [Mapping IdP groups to bkt groups](../guides/sso-setup.md#mapping-idp-groups-to-bkt-groups).
+
+**Request Body:**
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| sso_groups | string[] | Yes | Names are trimmed, must be non-empty and ≤256 characters; duplicates are dropped case-insensitively; at most 100 |
+
+**Response (200 OK):** Group object with the normalized `sso_groups`. The change is audit-logged as `group.sso_groups_update`.
+
+**Error Codes:**
+- `400` - Missing `sso_groups`, empty/too-long name, or more than 100 names
+- `403` - Not an admin
+- `404` - Group not found
+
+</details>
+
+<details>
 <summary><code>POST /api/groups/:id/members</code> - Add member <strong>[Admin]</strong></summary>
 
 **Request Body:**
@@ -1597,7 +1631,7 @@ Removes the group, its memberships, and its policy attachments. Users and polici
 |-------|------|----------|-------------|
 | user_id | UUID | Yes | User to add |
 
-**Response (200 OK):** `{"message": "Member added"}` (idempotent — adding an existing member is a no-op)
+**Response (200 OK):** `{"message": "Member added"}` (idempotent — adding an existing member is a no-op). Note: for an SSO user in a group with linked SSO groups, the membership is re-evaluated (and possibly removed) at the user's next sign-in.
 
 </details>
 

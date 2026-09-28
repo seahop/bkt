@@ -182,10 +182,16 @@ func (h *GoogleOAuthHandler) HandleGoogleCallback(c *gin.Context) {
 	// alone. If the Directory API fails, bkt admins (whose access does not
 	// depend on groups) still get in without a sync; everyone else is refused
 	// rather than keeping stale (possibly revoked) policies.
+	//
+	// The same group list drives SSO group → bkt group mapping. Without
+	// Workspace lookup there is no group source at all, so group mapping is
+	// skipped for Google (memberships are left as they are).
+	var groupsAdded, groupsRemoved []string
 	if h.workspaceService != nil {
 		ctx := c.Request.Context()
 
-		groups, err := h.workspaceService.GetUserGroups(ctx, userInfo.Email)
+		groups, groupEmails, err := h.workspaceService.GetUserGroupIdentifiers(ctx, userInfo.Email)
+		groupsKnown := err == nil
 		var managed map[string]bool
 		if err == nil {
 			managed, err = h.workspaceService.GetManagedPolicyNames(ctx)
@@ -209,9 +215,23 @@ func (h *GoogleOAuthHandler) HandleGoogleCallback(c *gin.Context) {
 			}
 			database.DB.Preload("Policies").First(user, user.ID)
 		}
+
+		// Linked SSO groups may name a Workspace group by its name
+		// ("engineering") or its address ("engineering@example.com"). A
+		// failed lookup (admins only reach here then) fails closed.
+		idpGroups := append(append([]string{}, groups...), groupEmails...)
+		groupsAdded, groupsRemoved, err = SyncSSOGroupMemberships(database.DB, user, idpGroups, groupsKnown,
+			"Google Workspace Directory API group membership")
+		if err != nil {
+			_ = services.NewAuditService().LogFailure(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username,
+				"group sync failed: "+err.Error(), map[string]interface{}{"provider": "google"})
+			h.redirectWithError(c, "group_sync_failed", "Could not apply your group memberships; please try again or contact an administrator.")
+			return
+		}
 	}
 
-	_ = services.NewAuditService().LogSuccess(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username, map[string]interface{}{"provider": "google"})
+	_ = services.NewAuditService().LogSuccess(c, user.ID, user.Username, "auth.login", "user", user.ID.String(), user.Username,
+		addSSOGroupAudit(map[string]interface{}{"provider": "google"}, groupsAdded, groupsRemoved))
 
 	// Generate our access+refresh pair (access carries the refresh JTI so
 	// logout can revoke the sibling refresh token).

@@ -66,11 +66,11 @@ func TestLifecycleExpiryPerKeyAuthorization(t *testing.T) {
 		t.Error("a configurer without any permission must expire nothing")
 	}
 	locked := models.User{Username: "bob", IsAdmin: true, IsLocked: true}
-	if lifecycleExpiryAllowed(services.NewAccessEvaluatorFromData(&locked, "logs", true, nil), "a.log") {
+	if lifecycleExpiryAllowed(services.NewAccessEvaluatorFromData(&locked, "logs", &models.Bucket{}, nil), "a.log") {
 		t.Error("a locked configurer must expire nothing")
 	}
 	admin := models.User{Username: "root", IsAdmin: true}
-	if !lifecycleExpiryAllowed(services.NewAccessEvaluatorFromData(&admin, "logs", true, nil), "any/key") {
+	if !lifecycleExpiryAllowed(services.NewAccessEvaluatorFromData(&admin, "logs", &models.Bucket{}, nil), "any/key") {
 		t.Error("an active admin configurer may expire any key")
 	}
 }

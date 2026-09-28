@@ -573,8 +573,18 @@ export const groupApi = {
     return data
   },
 
-  createGroup: async (name: string, description?: string): Promise<Group> => {
-    const { data } = await api.post<Group>('/groups', { name, description })
+  createGroup: async (name: string, description?: string, ssoGroups?: string[]): Promise<Group> => {
+    const { data } = await api.post<Group>('/groups', {
+      name,
+      description,
+      ...(ssoGroups && ssoGroups.length > 0 ? { sso_groups: ssoGroups } : {}),
+    })
+    return data
+  },
+
+  // Replaces the identity-provider groups linked to a group ([] unlinks all).
+  setSSOGroups: async (groupId: string, ssoGroups: string[]): Promise<Group> => {
+    const { data } = await api.put<Group>(`/groups/${groupId}/sso-groups`, { sso_groups: ssoGroups })
     return data
   },
 

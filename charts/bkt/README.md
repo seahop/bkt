@@ -134,6 +134,7 @@ The Swagger UI (`/api/docs/`) is off in production; set
 | `backend.env.CORS_ALLOW_CREDENTIALS` | `true` | Allow credentialed cross-origin requests |
 | `backend.env.GOOGLE_WORKSPACE_*` / `GOOGLE_POLICY_*` | off | Google Workspace group → policy sync; mount the service-account key via `backend.extraVolumes` / `extraVolumeMounts` |
 | `backend.env.VAULT_JWT_PATH` / `VAULT_JWT_ROLE` | `auth/jwt` / `object-storage-users` | Legacy Vault JWT login: auth mount whose JWKS is trusted, role name |
+| `backend.env.VAULT_JWT_GROUPS_CLAIM` | `""` (`groups`) | Legacy Vault JWT login: claim with the user's group names, for SSO group → bkt group mapping |
 | `backend.extraVolumes` / `backend.extraVolumeMounts` | `[]` | Extra pod volumes / backend container mounts |
 | `backend.env.OIDC_EXPECTED_ISSUER` / `VAULT_OIDC_EXPECTED_ISSUER` | `""` | Issuer the IdP/Vault advertises when it differs from the URL bkt reaches it at |
 | `backend.env.VAULT_POLICIES_AUTHORITATIVE` | `""` (false) | Vault `policies` claim always replaces bkt policies |

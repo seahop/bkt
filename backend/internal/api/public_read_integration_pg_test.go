@@ -244,19 +244,22 @@ func TestIntegrationPublicReadBucketPolicyDeny(t *testing.T) {
 	}
 }
 
-func TestIntegrationPublicReadSignedRequestsUnchanged(t *testing.T) {
+func TestIntegrationPublicReadSignedRequests(t *testing.T) {
 	f := newPubFixture(t, 0)
 	user := mkUser(t, itName("pusr"), "password-123", false, false)
 	key := itAccessKey(t, user, "pub-"+uuid.NewString()[:6], nil)
 	secret := "secret-" + key.Name
 	base := "/" + f.pub.Name
 
-	// A signed caller is judged by policies alone; a user without any grant is
-	// still denied on a public bucket (listing and reads alike).
+	// Public-read applies to every principal (as in AWS): a signed user
+	// without any grant may read objects, but listing, writes and deletes
+	// still need policies (see public_read_signed_integration_pg_test.go).
+	if w := f.signed(t, key, secret, http.MethodGet, base+"/hello.txt"); w.Code != http.StatusOK || w.Body.String() != f.content {
+		t.Errorf("signed GET without policy on a public bucket: %d %q, want 200", w.Code, w.Body.String())
+	}
 	for _, c := range []struct{ method, target string }{
 		{http.MethodGet, base},
 		{http.MethodGet, base + "/"},
-		{http.MethodGet, base + "/hello.txt"},
 		{http.MethodPut, base + "/new.txt"},
 		{http.MethodDelete, base + "/hello.txt"},
 	} {

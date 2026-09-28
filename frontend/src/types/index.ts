@@ -108,6 +108,10 @@ export interface Group {
   description?: string
   users?: User[]
   policies?: Policy[]
+  // Identity-provider group names linked to this group. SSO users in any of
+  // them are made members at sign-in (and removed when they leave); a group
+  // with links is "SSO-managed". Members' sso_provider tells SSO users apart.
+  sso_groups?: string[]
   created_at: string
 }
 

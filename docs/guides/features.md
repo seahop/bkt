@@ -176,8 +176,14 @@ Details:
   `"Principal": "*"` still applies to anonymous readers — e.g. deny
   `arn:aws:s3:::my-bucket/private/*` to keep one prefix private. Allow
   statements do not matter for anonymous readers; the public flag is the grant.
-- **Signed requests are unchanged**: users with access keys are still
-  authorized by their policies, as on any bucket.
+- **Signed-in users, too** (as in AWS): public-read applies to every
+  principal, so any logged-in user or access key can download, `HEAD`,
+  presign, or copy *from* objects of a public bucket without a policy — unless
+  a policy explicitly denies it (their user or group policy, or a bucket
+  policy `Deny` naming them, `"*"`, or no Principal). The `"*"` Deny above
+  therefore hides the prefix from everyone. Listing, versions, tagging,
+  writes, deletes and moves still need policy grants, and a public bucket is
+  not listed in the console for users with no grant on it.
 - **Safe serving**: HTML, SVG, XML and JavaScript objects are served as
   downloads (`Content-Disposition: attachment`, `nosniff`), so a public
   bucket cannot be used to host pages that run script on the S3 origin.

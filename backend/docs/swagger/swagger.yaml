@@ -236,6 +236,16 @@ definitions:
         items:
           $ref: '#/definitions/models.Policy'
         type: array
+      sso_groups:
+        description: |-
+          SSOGroups are the identity-provider group names linked to this group
+          (from GroupSSOLink; not a column). SSO users whose IdP groups match any
+          of them (case-insensitively) are made members at sign-in, and removed
+          when they no longer match. A group with at least one link is
+          "SSO-managed"; groups without links are purely manual.
+        items:
+          type: string
+        type: array
       updated_at:
         type: string
       users:
@@ -1764,6 +1774,22 @@ paths:
       security:
       - BearerAuth: []
       summary: Detach a policy from a group
+      tags:
+      - groups
+  /api/groups/{id}/sso-groups:
+    put:
+      consumes:
+      - application/json
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Group'
+      security:
+      - BearerAuth: []
+      summary: Replace a group's linked SSO (IdP) groups
       tags:
       - groups
   /api/policies:

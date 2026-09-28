@@ -127,6 +127,7 @@ func runMigrations(db *gorm.DB) error {
 		&models.MultipartUpload{},
 		&models.ObjectVersion{},
 		&models.Group{},
+		&models.GroupSSOLink{},
 	)
 
 	if err != nil {
@@ -139,6 +140,14 @@ func runMigrations(db *gorm.DB) error {
 	// drops constraints, so remove it explicitly.
 	if err := db.Exec(`ALTER TABLE audit_logs DROP CONSTRAINT IF EXISTS fk_audit_logs_user`).Error; err != nil {
 		logger.Warn("Failed to drop audit_logs user FK", map[string]interface{}{"error": err.Error()})
+	}
+
+	// One link per (group, IdP group name) regardless of case: matching is
+	// case-insensitive, so "Eng" and "eng" on the same group would be the
+	// same link. GORM tags cannot express an expression index.
+	if err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_group_sso_links_group_name
+		ON group_sso_links (group_id, LOWER(sso_group))`).Error; err != nil {
+		return fmt.Errorf("failed to create group_sso_links unique index: %w", err)
 	}
 
 	logger.Info("Database migrations completed", nil)

@@ -16,7 +16,7 @@ func evalFor(t *testing.T, bucket string, docs ...string) *services.AccessEvalua
 	for _, d := range docs {
 		u.Policies = append(u.Policies, models.Policy{Document: d})
 	}
-	return services.NewAccessEvaluatorFromData(&u, bucket, true, nil)
+	return services.NewAccessEvaluatorFromData(&u, bucket, &models.Bucket{}, nil)
 }
 
 // The configure-time check uses the literal key "*", which a narrower Deny

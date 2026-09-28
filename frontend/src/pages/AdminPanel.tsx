@@ -4,6 +4,8 @@ import api, { userApi, groupApi } from '../services/api';
 import { listPolicies, attachPolicyToUser, detachPolicyFromUser, Policy } from '../services/policy';
 import type { User, Group, AccessKeyStatus } from '../types';
 import AccessKeyBadges from '../components/AccessKeyBadges';
+import SSOGroupsInput from '../components/SSOGroupsInput';
+import { sameSSOGroups } from '../utils/ssoGroups';
 import { keyIsActive } from '../utils/accessKeys';
 import { getErrorMessage } from '../utils/errors';
 import { useAsyncLoad } from '../utils/useAsyncLoad';
@@ -20,6 +22,15 @@ interface AccessKey {
 }
 
 const pluralPolicies = (n: number) => `${n} ${n === 1 ? 'policy' : 'policies'}`
+
+const SSO_GROUPS_HELP =
+  'SSO users who belong to any of these identity-provider groups are added to this group automatically at sign-in, ' +
+  'and removed when they leave. Manual membership of SSO users in a linked group is replaced at their next sign-in; ' +
+  'local users are unaffected.'
+
+const SSO_MEMBER_TOOLTIP =
+  'Managed by SSO: this membership follows the user\'s identity-provider groups and is re-evaluated at each ' +
+  'sign-in. Adding or removing it here is replaced at their next sign-in.'
 
 // Explains where a user's policy count comes from. SSO users' policies are
 // usually managed by the identity provider (policies claim / group mapping),
@@ -329,6 +340,7 @@ export default function AdminPanel() {
                   <th>Group</th>
                   <th>Members</th>
                   <th>Policies</th>
+                  <th>SSO groups</th>
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -353,6 +365,17 @@ export default function AdminPanel() {
                         </div>
                       ) : (
                         <span className="text-xs text-dark-textMuted">None</span>
+                      )}
+                    </td>
+                    <td>
+                      {group.sso_groups && group.sso_groups.length > 0 ? (
+                        <div className="flex flex-wrap gap-1.5" title="Linked identity-provider groups">
+                          {group.sso_groups.map((name) => (
+                            <span key={name} className="badge-purple">{name}</span>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="text-xs text-dark-textMuted">—</span>
                       )}
                     </td>
                     <td className="whitespace-nowrap">
@@ -766,6 +789,7 @@ function AccessKeysModal({ user, onClose }: { user: User; onClose: () => void })
 function CreateGroupModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () => void }) {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  const [ssoGroups, setSSOGroups] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -775,7 +799,7 @@ function CreateGroupModal({ onClose, onSuccess }: { onClose: () => void; onSucce
     setLoading(true);
 
     try {
-      await groupApi.createGroup(name.trim(), description.trim() || undefined);
+      await groupApi.createGroup(name.trim(), description.trim() || undefined, ssoGroups);
       onSuccess();
     } catch (err) {
       setError(getErrorMessage(err, 'Failed to create group'));
@@ -825,6 +849,16 @@ function CreateGroupModal({ onClose, onSuccess }: { onClose: () => void; onSucce
             />
           </div>
 
+          <div>
+            <label className="label" htmlFor="create-group-sso-groups">
+              Linked SSO groups <span className="text-dark-textMuted font-normal">(optional)</span>
+            </label>
+            <SSOGroupsInput id="create-group-sso-groups" value={ssoGroups} onChange={setSSOGroups} disabled={loading} />
+            <p className="text-xs text-dark-textMuted mt-1.5">
+              {SSO_GROUPS_HELP} Press Enter or comma to add a name; matching is case-insensitive.
+            </p>
+          </div>
+
           <div className="flex justify-end gap-2 mt-6">
             <button type="button" onClick={onClose} className="btn-ghost">
               Cancel
@@ -857,6 +891,10 @@ function GroupDetailModal({
   const [error, setError] = useState('');
   const [addUserId, setAddUserId] = useState('');
   const [attachPolicyId, setAttachPolicyId] = useState('');
+  const linkedSSOGroups = group.sso_groups || [];
+  const [ssoDraft, setSSODraft] = useState<string[]>(linkedSSOGroups);
+  const ssoLinked = linkedSSOGroups.length > 0;
+  const ssoDirty = !sameSSOGroups(ssoDraft, linkedSSOGroups);
 
   const members = group.users || [];
   const attachedPolicies = group.policies || [];
@@ -898,6 +936,13 @@ function GroupDetailModal({
     await run(() => groupApi.detachPolicy(group.id, policyId), 'Failed to detach policy');
   };
 
+  const handleSaveSSOGroups = async () => {
+    await run(async () => {
+      const updated = await groupApi.setSSOGroups(group.id, ssoDraft);
+      setSSODraft(updated.sso_groups || []);
+    }, 'Failed to update linked SSO groups');
+  };
+
   return (
     <div className="modal-overlay">
       <div className="modal-panel max-w-2xl!">
@@ -929,7 +974,14 @@ function GroupDetailModal({
                     className="flex items-center justify-between gap-4 px-4 py-3 bg-dark-inset border border-dark-border rounded-lg"
                   >
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-dark-text truncate">{member.username}</p>
+                      <p className="text-sm font-medium text-dark-text truncate flex items-center gap-1.5">
+                        <span className="truncate">{member.username}</span>
+                        {ssoLinked && member.sso_provider && (
+                          <span className="badge-purple shrink-0 cursor-help" title={SSO_MEMBER_TOOLTIP}>
+                            SSO
+                          </span>
+                        )}
+                      </p>
                       <p className="text-xs text-dark-textMuted truncate">{member.email}</p>
                     </div>
                     <button
@@ -969,6 +1021,35 @@ function GroupDetailModal({
                 Add
               </button>
             </div>
+            {ssoLinked && (
+              <p className="text-xs text-dark-textMuted mt-2">
+                This group is linked to SSO groups: SSO users&apos; membership is set at each sign-in (members marked
+                SSO). Only local users&apos; membership is managed purely here.
+              </p>
+            )}
+          </div>
+
+          {/* Linked SSO groups */}
+          <div className="pt-6 border-t border-dark-border">
+            <h3 className="text-base font-semibold text-dark-text mb-1">Linked SSO groups</h3>
+            <p className="text-xs text-dark-textMuted mb-3">{SSO_GROUPS_HELP}</p>
+            <div className="flex items-start gap-2">
+              <div className="flex-1 min-w-0">
+                <SSOGroupsInput value={ssoDraft} onChange={setSSODraft} disabled={busy} />
+              </div>
+              <button
+                onClick={handleSaveSSOGroups}
+                disabled={busy || !ssoDirty}
+                className="btn-secondary btn-sm shrink-0 mt-1"
+              >
+                Save
+              </button>
+            </div>
+            {ssoDirty && (
+              <p className="text-xs text-yellow-400 mt-2">
+                Unsaved changes. Memberships update at each SSO user&apos;s next sign-in.
+              </p>
+            )}
           </div>
 
           {/* Policies */}

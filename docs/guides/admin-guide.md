@@ -123,7 +123,8 @@ those group-derived permissions on the next evaluation, without touching their
 direct attachments.
 
 All group endpoints are admin-only. Groups are also manageable in the web UI
-under the admin panel's **Groups** section (membership + policy attach).
+under the admin panel's **Groups** section (membership, policy attach, linked
+SSO groups).
 
 ```bash
 # List groups
@@ -171,6 +172,42 @@ curl -k -X DELETE https://localhost:9443/api/groups/{group_id}/policies/{policy_
 
 **Tip:** Prefer group-attached policies for team access and reserve direct
 user attachments for exceptions — it keeps access reviews simple.
+
+### Linking SSO (IdP) Groups
+
+A group can be linked to one or more **identity-provider group names**. SSO
+users who belong to any of them are added to the bkt group automatically at
+each sign-in, and removed when they leave — so group membership is managed in
+the IdP and "engineering gets these buckets" is decided once in bkt. Matching
+is case-insensitive and exact. Groups without links stay purely manual, and
+local (password) users are never changed by sign-in. If the provider sends no
+group information at all, the user is removed from every linked group (fail
+closed). See [Mapping IdP groups to bkt groups](sso-setup.md#mapping-idp-groups-to-bkt-groups)
+for provider setup (Keycloak, Okta, Entra ID, Vault).
+
+```bash
+# Create a group linked to IdP groups
+curl -k -X POST https://localhost:9443/api/groups \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "engineering", "sso_groups": ["engineering", "platform-team"]}'
+
+# Replace a group's links ([] unlinks it)
+curl -k -X PUT https://localhost:9443/api/groups/{group_id}/sso-groups \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"sso_groups": ["engineering"]}'
+```
+
+Group objects include `sso_groups` (the linked names). Link names are trimmed,
+must be non-empty and at most 256 characters, are de-duplicated
+case-insensitively, and a group can have at most 100. In the web UI, set them
+in **New Group** or the **Manage Group** dialog; SSO users in a linked group
+are marked **SSO** there — adding or removing such a membership by hand is
+replaced at the user's next sign-in. Link changes take effect at each user's
+next sign-in and are audit-logged as `group.sso_groups_update`; sign-in
+changes appear in the `auth.login` entry as `sso_groups_added` /
+`sso_groups_removed`.
 
 ## Policy Management
 

@@ -208,6 +208,9 @@ backend:
     VAULT_SSO_ENABLED: "false"
     VAULT_JWT_AUDIENCE: ""
     VAULT_JWT_ISSUER: ""
+    # Claim carrying the user's group names, for SSO group -> bkt group
+    # mapping. Empty = "groups".
+    VAULT_JWT_GROUPS_CLAIM: ""
     # Vault JWT auth mount; JWKS is fetched from
     # <VAULT_ADDR>/v1/<VAULT_JWT_PATH>/.well-known/jwks.json.
     VAULT_JWT_PATH: "auth/jwt"

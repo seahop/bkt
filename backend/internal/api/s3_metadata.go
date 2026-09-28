@@ -157,7 +157,9 @@ func (h *S3APIHandler) loadObjectForTagging(c *gin.Context, action string) (*mod
 		return nil, false
 	}
 
-	if allowed, _ := h.policyService.CheckObjectAccess(userUUID, bucketName, objectKey, action); !allowed {
+	// Reading tags is authorized as s3:GetObject, but public-read does not
+	// cover it (AWS: s3:GetObjectTagging), so only policies decide.
+	if allowed, _ := h.policyService.CheckObjectAccessWithoutPublicRead(userUUID, bucketName, objectKey, action); !allowed {
 		h.s3Error(c, "AccessDenied", "Access Denied", objectKey, http.StatusForbidden)
 		return nil, false
 	}

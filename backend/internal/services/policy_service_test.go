@@ -61,3 +61,36 @@ func TestEvaluateStoredPolicyWithConditionFailSafe(t *testing.T) {
 		t.Errorf("conditional Deny: got %v, %v; want Deny", r, err)
 	}
 }
+
+// Anonymous (public-read) requests: only an explicit Deny for Principal "*"
+// or without a Principal applies; Allows are irrelevant and a policy that
+// cannot be parsed fails closed.
+func TestAnonymousDenied(t *testing.T) {
+	doc := `{"Version":"2012-10-17","Statement":[
+		{"Effect":"Deny","Principal":"*","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::pub/secret/*"]},
+		{"Effect":"Deny","Action":["s3:Get*"],"Resource":["arn:aws:s3:::pub/private.txt"]},
+		{"Effect":"Deny","Principal":["alice"],"Action":["s3:GetObject"],"Resource":["arn:aws:s3:::pub/alice/*"]},
+		{"Effect":"Allow","Principal":"*","Action":["s3:*"],"Resource":["*"]}]}`
+	cases := []struct {
+		key  string
+		want bool
+	}{
+		{"secret/a", true},
+		{"private.txt", true},
+		{"alice/a", false},
+		{"hello.txt", false},
+	}
+	for _, c := range cases {
+		if got := anonymousDenied(doc, "pub", c.key, ActionGetObject); got != c.want {
+			t.Errorf("anonymousDenied(%q) = %v, want %v", c.key, got, c.want)
+		}
+	}
+	if !anonymousDenied(`not json`, "pub", "hello.txt", ActionGetObject) {
+		t.Error("an unparseable bucket policy must fail closed")
+	}
+	// Legacy stored document with a Condition on a Deny: applied conservatively.
+	legacy := `{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":"*","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::pub/*"],"Condition":{"IpAddress":{"aws:SourceIp":"10.0.0.0/8"}}}]}`
+	if !anonymousDenied(legacy, "pub", "hello.txt", ActionGetObject) {
+		t.Error("a conditional Deny must apply conservatively")
+	}
+}

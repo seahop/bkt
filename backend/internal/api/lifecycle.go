@@ -97,8 +97,10 @@ func requestUserID(c *gin.Context) uuid.UUID {
 // bucket-configuration policy action (ownership alone grants nothing).
 func (h *S3APIHandler) bucketForConfigAction(c *gin.Context, action string) (*models.Bucket, bool) {
 	bucketName := c.Param("bucket")
-	userID, _ := c.Get("user_id")
-	userUUID := userID.(uuid.UUID)
+	userUUID, authed := h.s3Caller(c)
+	if !authed {
+		return nil, false
+	}
 
 	var bucket models.Bucket
 	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {

@@ -19,6 +19,26 @@ interface AccessKey {
   created_at: string;
 }
 
+const pluralPolicies = (n: number) => `${n} ${n === 1 ? 'policy' : 'policies'}`
+
+// Explains where a user's policy count comes from. SSO users' policies are
+// usually managed by the identity provider (policies claim / group mapping),
+// which syncs them onto the user at each sign-in.
+function policyCountTooltip(user: User): string {
+  const lines = ['Policies attached directly to this user.']
+  if ((user.group_policy_count ?? 0) > 0) {
+    lines.push(`Plus ${user.group_policy_count} inherited through group membership.`)
+  }
+  if (user.sso_provider) {
+    lines.push(
+      'For SSO users this includes policies synced from the identity provider at each sign-in ' +
+        '(only claim names that match an existing bkt policy). Changes in the IdP apply at the next login.'
+    )
+  }
+  lines.push('Bucket policies are not counted here.')
+  return lines.join(' ')
+}
+
 export default function AdminPanel() {
   const [users, setUsers] = useState<User[]>([]);
   const [policies, setPolicies] = useState<Policy[]>([]);
@@ -225,8 +245,15 @@ export default function AdminPanel() {
                     <button
                       onClick={() => handleManagePolicies(user)}
                       className="text-sm font-medium text-blue-400 hover:text-blue-300 transition-colors"
+                      title={policyCountTooltip(user)}
                     >
-                      {user.policies?.length || 0} policies
+                      {pluralPolicies(user.policy_count ?? user.policies?.length ?? 0)}
+                      {(user.group_policy_count ?? 0) > 0 && (
+                        <span className="ml-1 text-dark-textSecondary font-normal">
+                          + {user.group_policy_count} via groups
+                        </span>
+                      )}
+                      {user.sso_provider && <span className="ml-1 text-dark-textMuted font-normal">ⓘ</span>}
                     </button>
                   </td>
                   <td className="whitespace-nowrap">
@@ -423,7 +450,11 @@ function PolicyAssignmentModal({
   policies: Policy[];
   onClose: () => void;
 }) {
-  const [userPolicies, setUserPolicies] = useState<string[]>(user.policies?.map(p => p.id) || []);
+  // The users list returns attached policy IDs (policy_ids); full policy
+  // objects aren't loaded for the list, so user.policies is usually absent.
+  const [userPolicies, setUserPolicies] = useState<string[]>(
+    user.policy_ids ?? user.policies?.map(p => p.id) ?? []
+  );
   const [loading, setLoading] = useState(false);
 
   const handleTogglePolicy = async (policyId: string) => {
@@ -459,6 +490,14 @@ function PolicyAssignmentModal({
             <X className="w-4 h-4" />
           </button>
         </div>
+
+        {user.sso_provider && (
+          <div className="alert-info mb-4 text-sm">
+            This user signs in with SSO. If your identity provider supplies policies (a policies
+            claim or group mapping), bkt re-syncs them at each sign-in, so changes made here may be
+            replaced at the user's next login. Policies it synced appear here as attached.
+          </div>
+        )}
 
         {policies.length === 0 ? (
           <div className="empty-state py-10!">

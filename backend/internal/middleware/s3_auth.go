@@ -7,10 +7,12 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"hash"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"sort"
@@ -54,9 +56,114 @@ var streamingPayloadHashes = map[string]bool{
 	"STREAMING-UNSIGNED-PAYLOAD-TRAILER":         true,
 }
 
+// CtxS3Anonymous is set (to true) on an UNSIGNED request that S3AuthMiddleware
+// admitted as a public-read object GET/HEAD. Such a request carries no
+// user_id/user/is_admin; handlers other than GetObject/HeadObject must reject
+// it (they fail closed on a missing user_id).
+const CtxS3Anonymous = "s3_anonymous"
+
+// S3AuthOptions configures S3AuthMiddleware.
+type S3AuthOptions struct {
+	// PublicReadLimiter, when non-nil, rate-limits unsigned object reads per
+	// client IP (PUBLIC_READ_RATE_LIMIT). It is applied to every unsigned
+	// request that qualifies as a public-read candidate, before the bucket
+	// lookup, so anonymous probing cannot hammer the database either.
+	PublicReadLimiter *RateLimiter
+}
+
+// publicReadRoute is the S3 router's object route; only it can serve an
+// anonymous read.
+const publicReadRoute = "/:bucket/*key"
+
+// publicReadQueryParams are the only query parameters an anonymous read may
+// carry: the response-* header overrides. Anything else (versionId, acl,
+// tagging, uploadId, attributes, partNumber, presign parameters, ...) selects
+// a sub-resource or another operation and requires a signature.
+var publicReadQueryParams = map[string]bool{
+	"response-content-type":        true,
+	"response-content-disposition": true,
+	"response-cache-control":       true,
+	"response-expires":             true,
+	"response-content-language":    true,
+	"response-content-encoding":    true,
+}
+
+// publicReadCandidate reports whether an unsigned request has the shape of a
+// public-read object download: GET or HEAD on /:bucket/*key with a non-empty
+// key (the "/bucket/" form is a bucket-level request, see api.BucketOr) and
+// only response-* query parameters. It runs after routing (the middleware is
+// mounted on the route group), so the route template and params are exactly
+// what the handlers see.
+func publicReadCandidate(c *gin.Context) bool {
+	if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
+		return false
+	}
+	if c.FullPath() != publicReadRoute || c.Param("bucket") == "" {
+		return false
+	}
+	if strings.TrimPrefix(c.Param("key"), "/") == "" {
+		return false
+	}
+	return PublicReadQueryAllowed(c.Request.URL.RawQuery)
+}
+
+// PublicReadQueryAllowed checks the raw query against publicReadQueryParams.
+// A query that does not parse cleanly is rejected (handlers use the lenient
+// parse, which silently drops malformed pairs).
+func PublicReadQueryAllowed(rawQuery string) bool {
+	if rawQuery == "" {
+		return true
+	}
+	q, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return false
+	}
+	for k := range q {
+		if !publicReadQueryParams[k] {
+			return false
+		}
+	}
+	return true
+}
+
+// bucketIsPublic reports whether the named bucket exists and has public-read
+// enabled (read fresh from the database: no cache to go stale on toggle).
+func bucketIsPublic(name string) bool {
+	var b models.Bucket
+	if err := database.DB.Select("id", "is_public").Where("name = ?", name).First(&b).Error; err != nil {
+		return false
+	}
+	return b.IsPublic
+}
+
+// s3XMLError is the S3 XML error document.
+type s3XMLError struct {
+	XMLName xml.Name `xml:"Error"`
+	Code    string   `xml:"Code"`
+	Message string   `xml:"Message"`
+}
+
+// abortSlowDown answers 503 SlowDown, the S3 throttling response (SDKs retry
+// it with backoff). Retry-After is the time one token takes to refill.
+func abortSlowDown(c *gin.Context, rl *RateLimiter) {
+	if rl.rate > 0 {
+		secs := int64(math.Ceil(rl.window.Seconds() / float64(rl.rate)))
+		if secs < 1 {
+			secs = 1
+		}
+		c.Header("Retry-After", strconv.FormatInt(secs, 10))
+	}
+	c.XML(http.StatusServiceUnavailable, s3XMLError{Code: "SlowDown", Message: "Please reduce your request rate."})
+	c.Abort()
+}
+
 // S3AuthMiddleware validates AWS Signature Version 4 authentication.
-// Supports both header-based auth (standard API) and query-string auth (presigned URLs).
-func S3AuthMiddleware() gin.HandlerFunc {
+// Supports both header-based auth (standard API) and query-string auth
+// (presigned URLs). An unsigned request is admitted only as a public-read
+// object GET/HEAD on a bucket with is_public set (see publicReadCandidate);
+// it then carries CtxS3Anonymous and no user. Every other unsigned request is
+// rejected exactly as before.
+func S3AuthMiddleware(opts S3AuthOptions) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
 
@@ -67,6 +174,17 @@ func S3AuthMiddleware() gin.HandlerFunc {
 		}
 
 		if authHeader == "" {
+			if publicReadCandidate(c) {
+				if opts.PublicReadLimiter != nil && !opts.PublicReadLimiter.Allow(c.ClientIP()) {
+					abortSlowDown(c, opts.PublicReadLimiter)
+					return
+				}
+				if bucketIsPublic(c.Param("bucket")) {
+					c.Set(CtxS3Anonymous, true)
+					c.Next()
+					return
+				}
+			}
 			c.Header("WWW-Authenticate", sigV4Algorithm)
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"Code":    "AccessDenied",

@@ -591,8 +591,15 @@ func (h *BucketHandler) GetBucket(c *gin.Context) {
 		return
 	}
 
+	// Public-read buckets advertise the base of their unsigned object URLs
+	// (<S3 endpoint>/<bucket>); the console appends the encoded key.
+	publicURLBase := ""
+	if bucket.IsPublic {
+		publicURLBase = h.s3PublicEndpoint(c) + "/" + bucket.Name
+	}
+
 	if isAdmin, _ := c.Get("is_admin"); isAdmin == true {
-		c.JSON(http.StatusOK, bucket)
+		c.JSON(http.StatusOK, adminBucketView{Bucket: bucket, PublicURLBase: publicURLBase})
 		return
 	}
 	// Non-admins get the reduced view; the webhook URL (a bearer secret for
@@ -600,7 +607,16 @@ func (h *BucketHandler) GetBucket(c *gin.Context) {
 	// may change them.
 	showNotification, _ := h.policyService.CheckBucketAccess(userUUID, bucketName, services.ActionPutBucketNotification)
 	showReplication, _ := h.policyService.CheckBucketAccess(userUUID, bucketName, services.ActionPutReplicationConfiguration)
-	c.JSON(http.StatusOK, newBucketView(&bucket, showNotification, showReplication))
+	v := newBucketView(&bucket, showNotification, showReplication)
+	v.PublicURLBase = publicURLBase
+	c.JSON(http.StatusOK, v)
+}
+
+// adminBucketView is the full bucket record returned to admins by GetBucket,
+// plus public_url_base for public-read buckets.
+type adminBucketView struct {
+	models.Bucket
+	PublicURLBase string `json:"public_url_base,omitempty"`
 }
 
 // DeleteBucket deletes a bucket and all its contents

@@ -6,6 +6,11 @@ export interface User {
   is_locked?: boolean
   sso_provider?: string
   policies?: Policy[]
+  // Admin user list only: directly attached policies (manual assignments and
+  // SSO claim sync alike) and distinct policies inherited through groups.
+  policy_count?: number
+  group_policy_count?: number
+  policy_ids?: string[]
   created_at: string
   updated_at: string
 }
@@ -46,6 +51,8 @@ export interface Bucket {
   webhook_url?: string
   webhook_events?: string
   replicate_to?: string
+  // Base of unsigned object URLs (<S3 endpoint>/<bucket>); set on public-read buckets by GET /api/buckets/:name
+  public_url_base?: string
   created_at: string
   updated_at: string
   owner?: User

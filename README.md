@@ -96,6 +96,7 @@ Full usage details for the data-management features live in the **[Feature guide
 - **Dual-pane file browser** - Split view for easier file organization
 - **Drag-and-drop** - Move files between folders and panes
 - **Presigned share links** - Time-limited download URLs from the Share action ([guide](docs/guides/features.md#presigned-share-links))
+- **Public-read buckets** - Admin-enabled unsigned object downloads by URL; listing and writes stay authenticated ([guide](docs/guides/features.md#public-buckets))
 - **Version history** - Browse, restore, or permanently delete object versions
 - **Bucket settings** - Versioning, lifecycle, quota, retention, webhooks, and replication per bucket
 - **Search and filters** - Find files by name, extension, size, date, or folder depth
@@ -341,7 +342,7 @@ Use `-k` to accept self-signed certificates in development.
 ## Documentation
 
 - [Getting Started](docs/guides/getting-started.md)
-- [Feature Guide](docs/guides/features.md) - versioning, lifecycle, quotas, retention, share links, webhooks, groups, temporary credentials, replication, encryption
+- [Feature Guide](docs/guides/features.md) - versioning, lifecycle, quotas, retention, share links, public buckets, webhooks, groups, temporary credentials, replication, encryption
 - [Full API Reference](docs/api/API.md)
 - [S3fs Mounting Guide](docs/guides/MOUNTING.md)
 - [Kubernetes (Helm) Deployment](charts/bkt/README.md)

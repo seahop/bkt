@@ -4,9 +4,11 @@ import (
 	"bkt/internal/database"
 	"bkt/internal/models"
 	"bkt/internal/security"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // S3 Actions - Standard AWS S3 action constants
@@ -184,6 +186,38 @@ func (ps *PolicyService) objectAccessDecision(user *models.User, bucketName stri
 	}
 
 	return decide(userResult, bucketResult)
+}
+
+// AnonymousObjectAccessDenied reports whether the bucket policy explicitly
+// denies an anonymous (unsigned, public-read) request for action on the
+// object. For anonymous requests the bucket's is_public flag is the only
+// grant: Allow statements and user/group policies are irrelevant, but a Deny
+// statement with no Principal or Principal "*" still applies. It fails
+// closed: a bucket policy that cannot be loaded or parsed denies.
+func (ps *PolicyService) AnonymousObjectAccessDenied(bucket *models.Bucket, objectKey, action string) (denied bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			denied = true
+		}
+	}()
+	var bp models.BucketPolicy
+	if err := database.DB.Where("bucket_id = ?", bucket.ID).First(&bp).Error; err != nil {
+		return !errors.Is(err, gorm.ErrRecordNotFound)
+	}
+	return anonymousDenied(bp.PolicyDocument, bucket.Name, objectKey, action)
+}
+
+// anonymousDenied is the in-memory core of AnonymousObjectAccessDenied.
+func anonymousDenied(policyJSON, bucketName, objectKey, action string) bool {
+	doc, err := security.ParseStoredPolicyDocument(policyJSON)
+	if err != nil {
+		return true
+	}
+	return security.EvaluatePolicy(doc, &security.PolicyEvaluationContext{
+		Anonymous: true,
+		Action:    action,
+		Resource:  fmt.Sprintf("arn:aws:s3:::%s/%s", bucketName, objectKey),
+	}) == security.PolicyDeny
 }
 
 // evaluateUserPolicies evaluates all attached user policies and returns a

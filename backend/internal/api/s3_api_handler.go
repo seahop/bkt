@@ -3,6 +3,7 @@ package api
 import (
 	"bkt/internal/config"
 	"bkt/internal/database"
+	"bkt/internal/middleware"
 	"bkt/internal/models"
 	"bkt/internal/services"
 	"bkt/internal/storage"
@@ -143,9 +144,17 @@ type DeleteError struct {
 
 // ListBuckets handles GET / (list all buckets)
 func (h *S3APIHandler) ListBuckets(c *gin.Context) {
-	userID, _ := c.Get("user_id")
-	userUUID := userID.(uuid.UUID)
-	isAdmin, _ := c.Get("is_admin")
+	userUUID, authed := h.s3Caller(c)
+	if !authed {
+		return
+	}
+	isAdmin := c.GetBool("is_admin")
+	userVal, _ := c.Get("user")
+	userModel, isUser := userVal.(*models.User)
+	if !isUser || userModel == nil {
+		h.s3Error(c, "AccessDenied", "Access Denied", "", http.StatusForbidden)
+		return
+	}
 
 	var allBuckets []models.Bucket
 	if err := database.DB.Preload("Owner").Find(&allBuckets).Error; err != nil {
@@ -155,7 +164,7 @@ func (h *S3APIHandler) ListBuckets(c *gin.Context) {
 
 	// Use batch permission check to avoid N+1 queries (fixes CRITICAL performance issue)
 	var accessibleBuckets []models.Bucket
-	if isAdmin.(bool) {
+	if isAdmin {
 		// Admin bypass - return all buckets
 		accessibleBuckets = allBuckets
 	} else {
@@ -169,8 +178,6 @@ func (h *S3APIHandler) ListBuckets(c *gin.Context) {
 	}
 
 	// Build XML response
-	user, _ := c.Get("user")
-	userModel := user.(*models.User)
 
 	bucketInfos := make([]BucketInfo, len(accessibleBuckets))
 	for i, bucket := range accessibleBuckets {
@@ -221,8 +228,10 @@ func (h *S3APIHandler) bucketRegion() string {
 // ListObjects handles GET /{bucket} — supports ListObjectsV1 and ListObjectsV2 (list-type=2)
 func (h *S3APIHandler) ListObjects(c *gin.Context) {
 	bucketName := c.Param("bucket")
-	userID, _ := c.Get("user_id")
-	userUUID := userID.(uuid.UUID)
+	userUUID, authed := h.s3Caller(c)
+	if !authed {
+		return
+	}
 
 	var bucket models.Bucket
 	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
@@ -422,8 +431,16 @@ func (h *S3APIHandler) GetObject(c *gin.Context) {
 		return
 	}
 
-	userID, _ := c.Get("user_id")
-	userUUID := userID.(uuid.UUID)
+	// Anonymous public reads (see middleware.S3AuthMiddleware) have no user;
+	// everyone else must be an authenticated caller.
+	anonymous := c.GetBool(middleware.CtxS3Anonymous)
+	var userUUID uuid.UUID
+	if !anonymous {
+		var authed bool
+		if userUUID, authed = h.s3Caller(c); !authed {
+			return
+		}
+	}
 
 	// Get bucket
 	var bucket models.Bucket
@@ -433,7 +450,12 @@ func (h *S3APIHandler) GetObject(c *gin.Context) {
 	}
 
 	// Check permissions
-	allowed, _ := h.policyService.CheckObjectAccess(userUUID, bucketName, objectKey, services.ActionGetObject)
+	var allowed bool
+	if anonymous {
+		allowed = h.anonymousReadAllowed(c, &bucket, objectKey)
+	} else {
+		allowed, _ = h.policyService.CheckObjectAccess(userUUID, bucketName, objectKey, services.ActionGetObject)
+	}
 	if !allowed {
 		h.s3Error(c, "AccessDenied", "Access Denied", objectKey, http.StatusForbidden)
 		return
@@ -498,7 +520,8 @@ func (h *S3APIHandler) GetObject(c *gin.Context) {
 		}
 		defer rangeReader.Close() //nolint:errcheck // best-effort close of read stream
 		c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+length-1, object.Size))
-		c.DataFromReader(http.StatusPartialContent, length, object.ContentType, rangeReader, nil)
+		contentType := applyResponseOverrides(c, object.ContentType)
+		c.DataFromReader(http.StatusPartialContent, length, contentType, rangeReader, nil)
 		return
 	}
 
@@ -514,7 +537,56 @@ func (h *S3APIHandler) GetObject(c *gin.Context) {
 	// than Content-Length declares (multipart-assembled files on disk may carry
 	// trailing bytes; without the limit the client receives a corrupt, oversized body).
 	c.Header("Content-Length", strconv.FormatInt(object.Size, 10))
-	c.DataFromReader(http.StatusOK, object.Size, object.ContentType, io.LimitReader(file, object.Size), nil)
+	contentType := applyResponseOverrides(c, object.ContentType)
+	c.DataFromReader(http.StatusOK, object.Size, contentType, io.LimitReader(file, object.Size), nil)
+}
+
+// anonymousReadAllowed decides an anonymous (unsigned) read of the CURRENT
+// version of an object. The bucket's is_public flag is the grant — user and
+// bucket-policy Allows are irrelevant — but an explicit bucket-policy Deny
+// for Principal "*" (or no Principal) still applies. The middleware already
+// admitted only object GET/HEADs with response-* parameters; this re-checks
+// against the freshly loaded bucket (defense in depth).
+func (h *S3APIHandler) anonymousReadAllowed(c *gin.Context, bucket *models.Bucket, objectKey string) bool {
+	if !bucket.IsPublic || objectKey == "" || !middleware.PublicReadQueryAllowed(c.Request.URL.RawQuery) {
+		return false
+	}
+	return !h.policyService.AnonymousObjectAccessDenied(bucket, objectKey, services.ActionGetObject)
+}
+
+// responseHeaderOverrides maps the GetObject response-* query parameters to
+// the response header each one overrides (S3 semantics).
+var responseHeaderOverrides = []struct{ param, header string }{
+	{"response-content-type", "Content-Type"},
+	{"response-content-disposition", "Content-Disposition"},
+	{"response-cache-control", "Cache-Control"},
+	{"response-expires", "Expires"},
+	{"response-content-language", "Content-Language"},
+	{"response-content-encoding", "Content-Encoding"},
+}
+
+// applyResponseOverrides sets the headers requested via response-* query
+// parameters on a successful GetObject and returns the Content-Type to send.
+// Control characters are dropped so a value cannot split the header.
+// S3ObjectResponseHeaders still inspects the final headers, so an override
+// cannot make active content render inline on an anonymous request.
+func applyResponseOverrides(c *gin.Context, contentType string) string {
+	for _, o := range responseHeaderOverrides {
+		v := strings.Map(func(r rune) rune {
+			if r < 0x20 || r == 0x7f {
+				return -1
+			}
+			return r
+		}, c.Query(o.param))
+		if v == "" {
+			continue
+		}
+		if o.header == "Content-Type" {
+			contentType = v
+		}
+		c.Header(o.header, v)
+	}
+	return contentType
 }
 
 // parseRange parses a single-range HTTP Range header of the form
@@ -597,8 +669,10 @@ func (h *S3APIHandler) PutObject(c *gin.Context) {
 
 	bucketName := c.Param("bucket")
 	objectKey := strings.TrimPrefix(c.Param("key"), "/")
-	userID, _ := c.Get("user_id")
-	userUUID := userID.(uuid.UUID)
+	userUUID, authed := h.s3Caller(c)
+	if !authed {
+		return
+	}
 
 	// S3 key rules (length, UTF-8, NUL) and the reserved version keyspace.
 	if err := validation.ValidateObjectKey(objectKey); err != nil {
@@ -788,8 +862,10 @@ func (h *S3APIHandler) DeleteObject(c *gin.Context) {
 
 	bucketName := c.Param("bucket")
 	objectKey := strings.TrimPrefix(c.Param("key"), "/")
-	userID, _ := c.Get("user_id")
-	userUUID := userID.(uuid.UUID)
+	userUUID, authed := h.s3Caller(c)
+	if !authed {
+		return
+	}
 
 	// Internal version keyspace: behaves like a key that does not exist.
 	if validation.IsReservedObjectKey(objectKey) {
@@ -893,8 +969,17 @@ func (h *S3APIHandler) DeleteObject(c *gin.Context) {
 func (h *S3APIHandler) HeadObject(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	objectKey := strings.TrimPrefix(c.Param("key"), "/")
-	userID, _ := c.Get("user_id")
-	userUUID := userID.(uuid.UUID)
+	anonymous := c.GetBool(middleware.CtxS3Anonymous)
+	var userUUID uuid.UUID
+	if !anonymous {
+		if id, ok := c.Get("user_id"); ok {
+			userUUID, _ = id.(uuid.UUID)
+		}
+		if userUUID == uuid.Nil {
+			c.Status(http.StatusForbidden)
+			return
+		}
+	}
 
 	if validation.IsReservedObjectKey(objectKey) {
 		c.Status(http.StatusNotFound)
@@ -909,7 +994,12 @@ func (h *S3APIHandler) HeadObject(c *gin.Context) {
 	}
 
 	// Check permissions
-	allowed, _ := h.policyService.CheckObjectAccess(userUUID, bucketName, objectKey, services.ActionGetObject)
+	var allowed bool
+	if anonymous {
+		allowed = h.anonymousReadAllowed(c, &bucket, objectKey)
+	} else {
+		allowed, _ = h.policyService.CheckObjectAccess(userUUID, bucketName, objectKey, services.ActionGetObject)
+	}
 	if !allowed {
 		c.Status(http.StatusForbidden)
 		return
@@ -935,8 +1025,9 @@ func (h *S3APIHandler) HeadObject(c *gin.Context) {
 	}
 
 	// If exact match not found and key ends with /, it might be a folder
-	// Check if any objects exist with this prefix
-	if err != nil && strings.HasSuffix(objectKey, "/") {
+	// Check if any objects exist with this prefix. Not for anonymous reads:
+	// they address objects only and must not probe for prefixes.
+	if err != nil && !anonymous && strings.HasSuffix(objectKey, "/") {
 		var count int64
 		database.DB.Model(&models.Object{}).Where("bucket_id = ? AND key LIKE ?", bucket.ID, validation.EscapeLikeWildcards(objectKey)+"%").Count(&count)
 		if count > 0 {
@@ -970,8 +1061,10 @@ func (h *S3APIHandler) HeadObject(c *gin.Context) {
 // HeadBucket handles HEAD /{bucket} (check if bucket exists)
 func (h *S3APIHandler) HeadBucket(c *gin.Context) {
 	bucketName := c.Param("bucket")
-	userID, _ := c.Get("user_id")
-	userUUID := userID.(uuid.UUID)
+	userUUID, authed := h.s3Caller(c)
+	if !authed {
+		return
+	}
 
 	// Get bucket
 	var bucket models.Bucket
@@ -997,8 +1090,10 @@ func (h *S3APIHandler) HeadBucket(c *gin.Context) {
 func (h *S3APIHandler) CopyObject(c *gin.Context, copySource string) {
 	destBucket := c.Param("bucket")
 	destKey := strings.TrimPrefix(c.Param("key"), "/")
-	userID, _ := c.Get("user_id")
-	userUUID := userID.(uuid.UUID)
+	userUUID, authed := h.s3Caller(c)
+	if !authed {
+		return
+	}
 
 	// x-amz-copy-source may be URL-encoded; format is /srcBucket/srcKey
 	decoded, err := url.PathUnescape(copySource)
@@ -1240,8 +1335,10 @@ func (h *S3APIHandler) HandleBucketPost(c *gin.Context) {
 // DeleteObjects handles POST /{bucket}?delete (bulk delete)
 func (h *S3APIHandler) DeleteObjects(c *gin.Context) {
 	bucketName := c.Param("bucket")
-	userID, _ := c.Get("user_id")
-	userUUID := userID.(uuid.UUID)
+	userUUID, authed := h.s3Caller(c)
+	if !authed {
+		return
+	}
 
 	var bucket models.Bucket
 	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
@@ -1376,6 +1473,21 @@ func (h *S3APIHandler) deleteVersionForBatch(backend storage.StorageBackend, buc
 	return d, nil
 }
 
+// s3Caller returns the SigV4-authenticated user of an S3 request. When there
+// is none — an anonymous public-read request (middleware.CtxS3Anonymous) that
+// reached a handler other than the object GET/HEAD path — it answers 403
+// AccessDenied and returns false, so every handler fails closed rather than
+// panicking or acting without a principal.
+func (h *S3APIHandler) s3Caller(c *gin.Context) (uuid.UUID, bool) {
+	if v, ok := c.Get("user_id"); ok {
+		if id, ok := v.(uuid.UUID); ok && id != uuid.Nil {
+			return id, true
+		}
+	}
+	h.s3Error(c, "AccessDenied", "Access Denied", "", http.StatusForbidden)
+	return uuid.Nil, false
+}
+
 // s3Error sends an S3-compatible XML error response
 func (h *S3APIHandler) s3Error(c *gin.Context, code, message, resource string, status int) {
 	errorResponse := Error{
@@ -1423,6 +1535,10 @@ func (h *S3APIHandler) CreateBucket(c *gin.Context) {
 		return
 	}
 
+	// The answer below reveals whether the bucket exists: callers only.
+	if _, authed := h.s3Caller(c); !authed {
+		return
+	}
 	bucketName := c.Param("bucket")
 	var bucket models.Bucket
 	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err == nil {

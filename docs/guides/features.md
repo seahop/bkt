@@ -10,6 +10,7 @@ your bkt access key with `s3.addressing_style = path` (see
 - [Storage quotas](#storage-quotas)
 - [Retention (WORM)](#retention-worm)
 - [Presigned share links](#presigned-share-links)
+- [Public buckets](#public-buckets)
 - [User metadata and tags](#user-metadata-and-tags)
 - [Event notifications (webhooks)](#event-notifications-webhooks)
 - [Groups](#groups)
@@ -143,6 +144,51 @@ active key, and a link can never outlive the key that signed it. Client-side
 presigning (`aws s3 presign`) also works and is verified by the same SigV4
 checker. If the S3 API is reached through a proxy or its own hostname, set
 `S3_PUBLIC_ENDPOINT` so generated links carry the right host.
+
+## Public buckets
+
+A **public-read** bucket lets anyone download its objects with a plain URL —
+no account, no signature, no expiry:
+
+```bash
+curl https://s3.example.com/my-bucket/images/logo.png
+```
+
+Only object downloads are public. Listing the bucket, uploads, deletes,
+multipart uploads, older versions (`?versionId`) and object sub-resources
+(`?acl`, `?tagging`, ...) still require credentials, so visitors can fetch an
+object only if they know its key. Unsigned requests for anything else are
+rejected exactly as on a private bucket.
+
+**Console**: tick **Public read access** when creating a bucket, or use the
+**Public read access** switch in *Bucket settings* (admins only — no policy
+can delegate it; turning it on asks for confirmation). Public buckets carry a
+**Public** badge. In the Share dialog, objects of a public bucket show their
+direct public link (with a copy button) next to the presigned-link option.
+**API**: `is_public` on `POST /api/buckets` or
+`PUT /api/buckets/{name}/settings` (`{"is_public": true}`), audit-logged as
+`bucket.public_access`. `GET /api/buckets/{name}` returns `public_url_base`
+for public buckets.
+
+Details:
+
+- **Carving out exceptions**: a bucket-policy `Deny` for `s3:GetObject` with
+  `"Principal": "*"` still applies to anonymous readers — e.g. deny
+  `arn:aws:s3:::my-bucket/private/*` to keep one prefix private. Allow
+  statements do not matter for anonymous readers; the public flag is the grant.
+- **Signed requests are unchanged**: users with access keys are still
+  authorized by their policies, as on any bucket.
+- **Safe serving**: HTML, SVG, XML and JavaScript objects are served as
+  downloads (`Content-Disposition: attachment`, `nosniff`), so a public
+  bucket cannot be used to host pages that run script on the S3 origin.
+- **Rate limit**: unsigned downloads are limited per client IP by
+  `PUBLIC_READ_RATE_LIMIT` (default 600/min, `0` disables); excess requests get
+  `503 SlowDown`. Behind a proxy, set `TRUSTED_PROXIES`.
+- **Links** point at `S3_PUBLIC_ENDPOINT` (or the console host with the S3 port);
+  each key segment is URL-encoded. Keys containing `.` or `..` path segments
+  cannot be expressed as a URL path — share those with a presigned link.
+- Anonymous downloads are visible in the access log and request metrics, but
+  are not written to the audit log.
 
 ## User metadata and tags
 

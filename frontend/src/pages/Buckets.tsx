@@ -5,6 +5,7 @@ import { bucketApi, s3ConfigApi } from '../services/api'
 import { useAuthStore } from '../store/authStore'
 import type { Bucket, S3Configuration } from '../types'
 import { getErrorMessage } from '../utils/errors'
+import { PUBLIC_BADGE_TITLE } from '../utils/publicUrl'
 import { useAsyncLoad } from '../utils/useAsyncLoad'
 
 export default function Buckets() {
@@ -174,7 +175,9 @@ export default function Buckets() {
 
               <div className="flex flex-wrap gap-1.5 mt-4">
                 {bucket.is_public ? (
-                  <span className="badge-green">Public</span>
+                  <span className="badge-green" title={PUBLIC_BADGE_TITLE}>
+                    Public
+                  </span>
                 ) : (
                   <span className="badge-gray">Private</span>
                 )}
@@ -281,19 +284,26 @@ export default function Buckets() {
                 </div>
               )}
 
-              <label
-                htmlFor="isPublic"
-                className="flex items-center gap-2.5 cursor-pointer select-none"
-              >
-                <input
-                  type="checkbox"
-                  id="isPublic"
-                  checked={isPublic}
-                  onChange={(e) => setIsPublic(e.target.checked)}
-                  className="w-4 h-4 accent-blue-600"
-                />
-                <span className="text-sm text-dark-text">Make bucket public</span>
-              </label>
+              <div>
+                <label
+                  htmlFor="isPublic"
+                  className="flex items-center gap-2.5 cursor-pointer select-none"
+                >
+                  <input
+                    type="checkbox"
+                    id="isPublic"
+                    checked={isPublic}
+                    onChange={(e) => setIsPublic(e.target.checked)}
+                    aria-describedby="isPublicHelp"
+                    className="w-4 h-4 accent-blue-600"
+                  />
+                  <span className="text-sm text-dark-text">Public read access</span>
+                </label>
+                <p id="isPublicHelp" className="help-text ml-6.5">
+                  Anyone with a link can download objects without signing in. Listing, uploads and
+                  deletes still require credentials.
+                </p>
+              </div>
 
               <div className="flex justify-end gap-2 mt-6 pt-2">
                 <button

@@ -77,8 +77,12 @@ const (
 
 // PolicyEvaluationContext contains context for policy evaluation
 type PolicyEvaluationContext struct {
-	UserID     string
-	Username   string // requesting user, for Principal matching
+	UserID   string
+	Username string // requesting user, for Principal matching
+	// Anonymous marks an unsigned request (public-read bucket access). Such a
+	// request has no username: only statements without a Principal or with
+	// Principal "*" apply to it.
+	Anonymous  bool
 	Action     string
 	Resource   string
 	IsAdmin    bool
@@ -402,7 +406,7 @@ func EvaluatePolicy(policy *PolicyDocument, ctx *PolicyEvaluationContext) Policy
 		}
 		// Principal scopes a statement to specific users (used by bucket policies);
 		// absent Principal applies to everyone.
-		if !matchesPrincipal(statement.Principal, ctx.Username) {
+		if !matchesPrincipal(statement.Principal, ctx) {
 			continue
 		}
 		if !matchesAction(statement.Action, ctx.Action) {
@@ -427,7 +431,7 @@ func EvaluatePolicy(policy *PolicyDocument, ctx *PolicyEvaluationContext) Policy
 // NotPrincipal/NotAction/NotResource are treated as matching everything
 // (when the positive form is absent). This can only deny more, never less.
 func matchesDenyConservatively(st *PolicyStatement, ctx *PolicyEvaluationContext) bool {
-	if st.NotPrincipal == nil && !matchesPrincipal(st.Principal, ctx.Username) {
+	if st.NotPrincipal == nil && !matchesPrincipal(st.Principal, ctx) {
 		return false
 	}
 	if len(st.Action) > 0 && !matchesAction(st.Action, ctx.Action) {
@@ -439,19 +443,24 @@ func matchesDenyConservatively(st *PolicyStatement, ctx *PolicyEvaluationContext
 	return true
 }
 
-// matchesPrincipal reports whether a statement's Principal applies to the given
-// user. A nil Principal applies to everyone. "*" matches everyone; otherwise the
-// username must be listed. An unrecognized form fails closed (no match).
-func matchesPrincipal(principal interface{}, username string) bool {
+// matchesPrincipal reports whether a statement's Principal applies to the
+// requester. A nil Principal applies to everyone. "*" matches everyone;
+// otherwise the username must be listed. An anonymous requester has no
+// username, so only nil and "*" match it. An unrecognized form fails closed
+// (no match).
+func matchesPrincipal(principal interface{}, ctx *PolicyEvaluationContext) bool {
 	if principal == nil {
 		return true
 	}
+	matches := func(s string) bool {
+		return s == "*" || (!ctx.Anonymous && s == ctx.Username)
+	}
 	switch p := principal.(type) {
 	case string:
-		return p == "*" || p == username
+		return matches(p)
 	case []interface{}:
 		for _, v := range p {
-			if s, ok := v.(string); ok && (s == "*" || s == username) {
+			if s, ok := v.(string); ok && matches(s) {
 				return true
 			}
 		}

@@ -541,6 +541,7 @@ export const bucketApi = {
       webhook_secret?: string
       webhook_events?: string
       replicate_to?: string
+      is_public?: boolean // admin only
     }
   ): Promise<{ message: string }> => {
     const { data } = await api.put<{ message: string }>(`/buckets/${bucketName}/settings`, settings)

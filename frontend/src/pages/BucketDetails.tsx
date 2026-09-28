@@ -5,6 +5,7 @@ import { bucketApi } from '../services/api'
 import type { DeletedObject, ObjectVersion } from '../services/api'
 import type { Object as StorageObject, Bucket } from '../types'
 import { getErrorMessage, getErrorStatus } from '../utils/errors'
+import { publicObjectUrl } from '../utils/publicUrl'
 import { useAsyncLoad } from '../utils/useAsyncLoad'
 import { useAuthStore } from '../store/authStore'
 import {
@@ -143,6 +144,7 @@ export default function BucketDetails() {
   const [shareError, setShareError] = useState('')
   const [shareNeedsKey, setShareNeedsKey] = useState(false)
   const [shareCopied, setShareCopied] = useState(false)
+  const [publicLinkCopied, setPublicLinkCopied] = useState(false)
 
   // Version history modal state
   const [versionsTarget, setVersionsTarget] = useState<string | null>(null)
@@ -170,6 +172,9 @@ export default function BucketDetails() {
   const [webhookRemoved, setWebhookRemoved] = useState(false)
   const [replicateTo, setReplicateTo] = useState('')
   const [generalSaving, setGeneralSaving] = useState(false)
+  // Public read access (admin only): saving flag and the enable confirmation.
+  const [publicSaving, setPublicSaving] = useState(false)
+  const [confirmPublic, setConfirmPublic] = useState(false)
 
   // "Show deleted" view (versioned buckets): keys under the current prefix
   // whose latest version is a delete marker.
@@ -914,6 +919,7 @@ export default function BucketDetails() {
     setShareError('')
     setShareNeedsKey(false)
     setShareCopied(false)
+    setPublicLinkCopied(false)
     setContextMenu(prev => ({ ...prev, show: false }))
   }
 
@@ -924,6 +930,7 @@ export default function BucketDetails() {
     setShareError('')
     setShareNeedsKey(false)
     setShareCopied(false)
+    setPublicLinkCopied(false)
   }
 
   const handleGenerateLink = async (e: React.FormEvent) => {
@@ -947,6 +954,22 @@ export default function BucketDetails() {
     } finally {
       setShareLoading(false)
     }
+  }
+
+  // Public-read buckets: the object's direct, non-expiring URL (null when the
+  // key has "."/".." segments, which clients rewrite, or no base is known).
+  const publicShareBase = bucketInfo?.is_public ? bucketInfo.public_url_base : undefined
+  const publicShareUrl =
+    publicShareBase && shareTarget !== null ? publicObjectUrl(publicShareBase, shareTarget) : null
+
+  const handleCopyPublicUrl = () => {
+    if (!publicShareUrl) return
+    navigator.clipboard.writeText(publicShareUrl)
+    setPublicLinkCopied(true)
+    setTimeout(() => {
+      if (!isMountedRef.current) return
+      setPublicLinkCopied(false)
+    }, 2000)
   }
 
   const handleCopyShareUrl = () => {
@@ -1188,10 +1211,34 @@ export default function BucketDetails() {
     }
   }
 
+  const handleSetPublicRead = async (next: boolean) => {
+    if (!bucketName) return
+
+    setSettingsError('')
+    setSettingsSuccess('')
+    setPublicSaving(true)
+    try {
+      await bucketApi.setBucketSettings(bucketName, { is_public: next })
+      setBucketInfo(await bucketApi.getBucket(bucketName))
+      setConfirmPublic(false)
+      setSettingsSuccess(next ? 'Public read access enabled' : 'Public read access disabled')
+    } catch (error) {
+      console.error('Failed to update public read access:', error)
+      if (getErrorStatus(error) === 403) {
+        setSettingsError('Only an admin can change public read access')
+      } else {
+        setSettingsError(getErrorMessage(error, 'Failed to update public read access'))
+      }
+    } finally {
+      setPublicSaving(false)
+    }
+  }
+
   const openBucketSettings = async () => {
     if (!bucketName) return
 
     setShowBucketSettings(true)
+    setConfirmPublic(false)
     setSettingsError('')
     setSettingsSuccess('')
     setSettingsLoading(true)
@@ -2785,12 +2832,42 @@ export default function BucketDetails() {
                 </div>
               )}
 
+              {publicShareBase && (
+                publicShareUrl ? (
+                  <div>
+                    <label className="label">Public link (no expiry)</label>
+                    <div className="flex items-start gap-2">
+                      <p className="flex-1 min-w-0 bg-dark-inset border border-dark-border rounded-lg p-3 font-mono text-xs break-all text-dark-text">
+                        {publicShareUrl}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={handleCopyPublicUrl}
+                        className={`btn-icon shrink-0 ${publicLinkCopied ? 'text-green-400!' : ''}`}
+                        title={publicLinkCopied ? 'Copied' : 'Copy public link'}
+                      >
+                        {publicLinkCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                      </button>
+                    </div>
+                    <p className="help-text">
+                      This bucket has public read access: anyone can download the object with this link,
+                      without signing in, until public access is turned off. Or create a presigned link below.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="alert-info">
+                    This key contains "." or ".." path segments, which browsers rewrite, so it has no direct
+                    public link. Use a presigned link instead.
+                  </div>
+                )
+              )}
+
               {shareError && <div className="alert-error">{shareError}</div>}
 
               {shareResult ? (
                 <>
                   <div>
-                    <label className="label">Shareable link</label>
+                    <label className="label">{publicShareBase ? 'Presigned link' : 'Shareable link'}</label>
                     <div className="flex items-start gap-2">
                       <p className="flex-1 min-w-0 bg-dark-inset border border-dark-border rounded-lg p-3 font-mono text-xs break-all text-dark-text">
                         {shareResult.url}
@@ -2835,7 +2912,7 @@ export default function BucketDetails() {
               ) : (
                 <form onSubmit={handleGenerateLink} className="space-y-4">
                   <div>
-                    <label className="label">Link expires in</label>
+                    <label className="label">{publicShareBase ? 'Presigned link expires in' : 'Link expires in'}</label>
                     <select
                       value={shareExpiry}
                       onChange={(e) => setShareExpiry(Number(e.target.value))}
@@ -3032,8 +3109,80 @@ export default function BucketDetails() {
               </div>
             ) : (
               <div className="space-y-6">
-                {/* Versioning */}
+                {/* Public read access (admin only) */}
                 <div>
+                  <div className="flex items-center justify-between gap-4 mb-2">
+                    <h3 id="publicReadHeading" className="text-base font-semibold text-dark-text">
+                      Public read access
+                    </h3>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={!!bucketInfo?.is_public}
+                      aria-labelledby="publicReadHeading"
+                      disabled={!isAdmin || publicSaving || confirmPublic}
+                      onClick={() => {
+                        if (bucketInfo?.is_public) {
+                          void handleSetPublicRead(false)
+                        } else {
+                          setSettingsError('')
+                          setSettingsSuccess('')
+                          setConfirmPublic(true)
+                        }
+                      }}
+                      title={isAdmin ? undefined : 'Only an admin can change public read access'}
+                      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                        bucketInfo?.is_public ? 'bg-green-600' : 'bg-dark-borderStrong'
+                      }`}
+                    >
+                      <span
+                        className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+                          bucketInfo?.is_public ? 'translate-x-6' : 'translate-x-1'
+                        }`}
+                      />
+                    </button>
+                  </div>
+                  <p className="help-text">
+                    {bucketInfo?.is_public
+                      ? 'On: anyone with a link can download objects without signing in. Listing, uploads and deletes still require credentials.'
+                      : 'Off: every request needs credentials or a presigned link.'}
+                  </p>
+                  {!isAdmin && (
+                    <p className="help-text">Only an admin can change public read access.</p>
+                  )}
+                  {confirmPublic && (
+                    <div className="alert-warning mt-3 flex-col items-stretch! gap-3">
+                      <span>
+                        Every object in <strong>{bucketName}</strong> — existing and future — becomes
+                        downloadable by anyone on the internet who knows or guesses its key, with no
+                        expiry and no sign-in. Links cannot be revoked individually; only turning this
+                        off again stops them. Deny statements in the bucket policy still apply.
+                      </span>
+                      <div className="flex justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setConfirmPublic(false)}
+                          disabled={publicSaving}
+                          className="btn-ghost btn-sm"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleSetPublicRead(true)}
+                          disabled={publicSaving}
+                          className="btn-primary btn-sm"
+                        >
+                          {publicSaving && <span className="spinner w-4! h-4!" />}
+                          Enable public read
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Versioning */}
+                <div className="pt-6 border-t border-dark-border">
                   <h3 className="text-base font-semibold text-dark-text mb-2">Versioning</h3>
                   <div className="flex items-center gap-3 mb-3">
                     <span className="text-sm text-dark-textSecondary">Current state:</span>

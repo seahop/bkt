@@ -11,7 +11,7 @@ Base URL: `https://localhost:9443/api/buckets`
 ```json
 {
   "name": "my-bucket",           // Required, 3-63 chars, alphanumeric + hyphens
-  "is_public": false,            // Optional, default: false
+  "is_public": false,            // Optional, default: false — public read access (see "Public-read buckets")
   "region": "us-east-1",         // Optional, default: us-east-1
   "storage_backend": "local",
   "storage_backend": "local"     // Optional, "local" or "s3", default: local
@@ -104,6 +104,11 @@ Get details of a specific bucket.
 **Authorization:**
 - Users can only access their own buckets
 - Admins can access any bucket
+
+For a public-read bucket the response also carries `public_url_base`
+(`<S3 endpoint>/<bucket>`, from `S3_PUBLIC_ENDPOINT` or derived like presigned
+URLs): append the object key, with each `/`-separated segment
+percent-encoded, to get the object's unsigned download URL.
 
 **Success Response (200 OK):**
 ```json
@@ -212,7 +217,8 @@ List objects in a bucket.
 
 **Authentication:** Required
 
-**Authorization:** Bucket owner, admin, or public bucket
+**Authorization:** Admin, or `s3:ListBucket` on the bucket. Listing is never
+public — not even on a [public-read bucket](#public-read-buckets).
 
 **Query Parameters:**
 - `prefix` (string) - Filter objects by prefix
@@ -274,7 +280,9 @@ Download an object from a bucket.
 
 **Authentication:** Required
 
-**Authorization:** Bucket owner, admin, or public bucket
+**Authorization:** Admin, or `s3:GetObject` on the object. This console
+endpoint always requires a token; unauthenticated downloads from a
+[public-read bucket](#public-read-buckets) go through the S3 listener.
 
 **Query Parameters:**
 - `download=true` - Force download (sets Content-Disposition: attachment)
@@ -321,7 +329,9 @@ Get object metadata without downloading the file (HEAD request).
 
 **Authentication:** Required
 
-**Authorization:** Bucket owner, admin, or public bucket
+**Authorization:** Admin, or `s3:GetObject` on the object (a token is always
+required here; see [public-read buckets](#public-read-buckets) for
+unauthenticated access on the S3 listener).
 
 **Success Response (200 OK):**
 - Headers only (no body):
@@ -412,6 +422,76 @@ The URL's host comes from `S3_PUBLIC_ENDPOINT` when set, otherwise it is derived
 - `403 Forbidden` - No read permission on the object
 - `404 Not Found` - Bucket or object not found
 - `409 Conflict` - No active (or no sufficiently long-lived) access key
+
+---
+
+## Public-read buckets
+
+A bucket with `is_public: true` serves **object downloads without
+credentials** on the S3 listener (port 9000 / `S3_PUBLIC_ENDPOINT`):
+
+```bash
+curl https://s3.example.com/my-bucket/images/logo.png
+```
+
+What is public, precisely:
+
+- **Only unsigned `GET` and `HEAD` of an object** (`/<bucket>/<key>`, key not
+  empty), **current version only**. The only query parameters allowed are the
+  `response-*` header overrides (`response-content-type`,
+  `response-content-disposition`, `response-cache-control`,
+  `response-expires`, `response-content-language`,
+  `response-content-encoding`). `Range` requests work (206).
+- **Everything else still requires a signature** and answers an unsigned
+  request exactly as before (`401 AccessDenied`, "Missing authorization
+  header"): listing (`GET /<bucket>`, `GET /<bucket>/`, `?list-type=2`,
+  `?versions`, `?uploads`), `ListBuckets`, `HeadBucket`, every write, delete
+  and multipart call, and object sub-resources or other versions
+  (`?versionId`, `?acl`, `?tagging`, `?uploadId`, `?attributes`,
+  `?partNumber`, ...). A private or non-existent bucket answers the same way,
+  so bucket existence is not revealed.
+- **Bucket-policy Deny still applies.** The public flag is the grant — Allow
+  statements in bucket, user or group policies play no part for anonymous
+  readers — but a bucket-policy `Deny` statement for `s3:GetObject` whose
+  `Principal` is `"*"` (or absent) and whose `Resource` matches the object
+  blocks the read with `403 AccessDenied`. A Deny naming specific users does
+  not apply to anonymous readers. A stored bucket policy that cannot be parsed
+  blocks all anonymous reads (fail closed). Example — keep `secret/` private
+  on an otherwise public bucket:
+
+  ```json
+  {
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Deny", "Principal": "*", "Action": ["s3:GetObject"],
+      "Resource": ["arn:aws:s3:::my-bucket/secret/*"]
+    }]
+  }
+  ```
+- **Internal keys stay hidden:** bkt's `.bkt-versions/` keyspace answers
+  `404`, as for signed requests. A missing key is `404 NoSuchKey`.
+- **Response hardening is unchanged:** `X-Content-Type-Options: nosniff` on
+  every object response, and active content (HTML, SVG, XML, JavaScript) is
+  served as `Content-Disposition: attachment`. An anonymous request cannot opt
+  out with `response-content-disposition=inline`, nor turn a passive object
+  into HTML with `response-content-type`.
+- **Rate limit:** unsigned object reads have their own per-client-IP budget,
+  `PUBLIC_READ_RATE_LIMIT` (requests/minute, default 600, `0` disables);
+  excess requests get `503 SlowDown` with `Retry-After`. It is counted before
+  the bucket lookup, so it also covers unsigned reads against private
+  buckets. Behind a reverse proxy set `TRUSTED_PROXIES` so the real client IP
+  is used. The listener-wide `S3_RATE_LIMIT` applies on top when set.
+- **Logging:** anonymous reads appear in the access log and in the
+  `bkt_http_requests_total` metrics (route-template labels) but are not
+  written to the audit log.
+- **Signed requests are unchanged.** A signed request on a public bucket is
+  authorized by policies alone, as on any other bucket.
+
+`is_public` is set at creation (admin only, like bucket creation) and can be
+changed later by an admin through [bucket settings](#public-read-access-is_public).
+The console's Share dialog shows the direct public link for objects in
+public-read buckets (keys with `.` or `..` path segments cannot be expressed
+as a URL path — use a presigned link for those).
 
 ---
 
@@ -517,11 +597,15 @@ Removes one version (or delete marker) for good. Removing the current version or
 
 ## Bucket Settings
 
-One endpoint updates quota, retention, webhooks, and replication. Only fields present in the request body are changed.
+One endpoint updates quota, retention, webhooks, replication, and public read access. Only fields present in the request body are changed.
 
 **Endpoint:** `PUT /buckets/:name/settings`
 
-**Authorization:** Bucket owner or admin
+**Authorization:** Admin, or the matching bucket-configuration action per field
+(`s3:PutBucketQuota`, `s3:PutBucketObjectLockConfiguration`,
+`s3:PutBucketNotification`, `s3:PutReplicationConfiguration`). `is_public` is
+**admin only** — no policy action delegates it. A request that includes a
+field the caller may not change is rejected as a whole (403).
 
 **Request Body (all fields optional):**
 ```json
@@ -531,11 +615,19 @@ One endpoint updates quota, retention, webhooks, and replication. Only fields pr
   "webhook_url": "https://example.com/hooks/bkt",
   "webhook_secret": "s3cret",
   "webhook_events": "created,removed",
-  "replicate_to": "my-bucket-mirror"
+  "replicate_to": "my-bucket-mirror",
+  "is_public": false
 }
 ```
 
 **Success Response (200 OK):** `{"message": "Settings updated"}`
+
+### Public read access (`is_public`)
+
+- Admin only. Turns [public-read](#public-read-buckets) on or off; takes effect
+  on the next request (nothing is cached).
+- Every change is audit-logged as `bucket.public_access` with the `old` and
+  `new` values.
 
 ### Quota (`quota_bytes`)
 
@@ -582,7 +674,7 @@ One endpoint updates quota, retention, webhooks, and replication. Only fields pr
 
 **Error Responses:**
 - `400 Bad Request` - Negative values, non-http(s) webhook URL, retention without versioning, self-replication, replication cycle, or empty body
-- `403 Forbidden` - Not the bucket owner or an admin
+- `403 Forbidden` - Missing the required permission for a field (`is_public`: not an admin)
 - `404 Not Found` - Replication target bucket not found
 - `409 Conflict` - Target already mirrored by another bucket
 
@@ -671,17 +763,12 @@ Objects store the following metadata:
 
 ### Public vs Private Buckets
 
-**Public Buckets:**
-- ✅ Good for static assets
-- ✅ Good for shared files
-- ❌ Bad for sensitive data
-- ❌ Bad for user data
-
-**Private Buckets:**
-- ✅ Good for user data
-- ✅ Good for sensitive files
-- ✅ Good for backups
-- ✅ Fine-grained access control via policies
+Buckets are private by default. Make a bucket
+[public-read](#public-read-buckets) only for content meant for anyone —
+static assets, downloads, published files — never for user data, backups or
+anything sensitive: every object in it, current and future, can be fetched
+by anyone who knows its key. For one-off sharing from a private bucket use a
+[presigned URL](#presigned-download-urls) instead.
 
 ### Performance
 

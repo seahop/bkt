@@ -74,6 +74,9 @@ type AuthConfig struct {
 	AuthRateLimit      int // requests per minute per IP on auth endpoints (default 5)
 	RefreshRateLimit   int // requests per minute per IP on /api/auth/refresh (default 30)
 	S3RateLimit        int // requests per minute per IP on the S3 listener (0 = disabled)
+	// PublicReadRateLimit is the per-IP budget (requests/minute) for unsigned
+	// public-read object GET/HEADs on the S3 listener (0 = disabled).
+	PublicReadRateLimit int
 }
 
 type StorageConfig struct {
@@ -212,17 +215,18 @@ func Load() *Config {
 		},
 		Auth: AuthConfig{
 			// No default: an unset JWT_SECRET is rejected by Validate.
-			JWTSecret:          getEnv("JWT_SECRET", ""),
-			AccessTokenExpiry:  getEnv("ACCESS_TOKEN_EXPIRY", "15m"),
-			RefreshTokenExpiry: getEnv("REFRESH_TOKEN_EXPIRY", "168h"), // 7 days
-			BcryptCost:         12,
-			AdminUsername:      getEnv("ADMIN_USERNAME", "admin"),
-			AdminPassword:      getEnv("ADMIN_PASSWORD", ""),
-			AdminEmail:         getEnv("ADMIN_EMAIL", "admin@localhost"),
-			AllowRegistration:  getEnv("ALLOW_REGISTRATION", "false") == "true",
-			AuthRateLimit:      getEnvInt("AUTH_RATE_LIMIT", 5),
-			RefreshRateLimit:   getEnvInt("AUTH_REFRESH_RATE_LIMIT", 30),
-			S3RateLimit:        getEnvInt("S3_RATE_LIMIT", 0),
+			JWTSecret:           getEnv("JWT_SECRET", ""),
+			AccessTokenExpiry:   getEnv("ACCESS_TOKEN_EXPIRY", "15m"),
+			RefreshTokenExpiry:  getEnv("REFRESH_TOKEN_EXPIRY", "168h"), // 7 days
+			BcryptCost:          12,
+			AdminUsername:       getEnv("ADMIN_USERNAME", "admin"),
+			AdminPassword:       getEnv("ADMIN_PASSWORD", ""),
+			AdminEmail:          getEnv("ADMIN_EMAIL", "admin@localhost"),
+			AllowRegistration:   getEnv("ALLOW_REGISTRATION", "false") == "true",
+			AuthRateLimit:       getEnvInt("AUTH_RATE_LIMIT", 5),
+			RefreshRateLimit:    getEnvInt("AUTH_REFRESH_RATE_LIMIT", 30),
+			S3RateLimit:         getEnvInt("S3_RATE_LIMIT", 0),
+			PublicReadRateLimit: getEnvInt("PUBLIC_READ_RATE_LIMIT", 600),
 		},
 		Storage: StorageConfig{
 			Backend:                     getEnv("STORAGE_BACKEND", "local"), // "local" or "s3"

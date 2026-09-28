@@ -152,8 +152,10 @@ type tagXML struct {
 func (h *S3APIHandler) loadObjectForTagging(c *gin.Context, action string) (*models.Object, bool) {
 	bucketName := c.Param("bucket")
 	objectKey := strings.TrimPrefix(c.Param("key"), "/")
-	userID, _ := c.Get("user_id")
-	userUUID := userID.(uuid.UUID)
+	userUUID, authed := h.s3Caller(c)
+	if !authed {
+		return nil, false
+	}
 
 	if allowed, _ := h.policyService.CheckObjectAccess(userUUID, bucketName, objectKey, action); !allowed {
 		h.s3Error(c, "AccessDenied", "Access Denied", objectKey, http.StatusForbidden)

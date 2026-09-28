@@ -24,6 +24,9 @@ type bucketSettingsRequest struct {
 	WebhookSecret *string `json:"webhook_secret,omitempty"`
 	WebhookEvents *string `json:"webhook_events,omitempty"` // csv of "created","removed"
 	ReplicateTo   *string `json:"replicate_to,omitempty"`
+	// IsPublic toggles public-read access (unsigned object GET/HEAD on the
+	// S3 listener). Admin only, whatever policies the caller holds.
+	IsPublic *bool `json:"is_public,omitempty"`
 }
 
 // SetBucketSettings handles PUT /api/buckets/:name/settings.
@@ -35,9 +38,10 @@ type bucketSettingsRequest struct {
 //	retention_days                  s3:PutBucketObjectLockConfiguration
 //	webhook_url/secret/events       s3:PutBucketNotification
 //	replicate_to                    s3:PutReplicationConfiguration (+ object access, see authorizeReplication)
+//	is_public                       admin only (no policy action grants it)
 //
 // @Summary Update bucket settings
-// @Description Updates quota, WORM retention, webhook notification, and replication settings. Only fields present in the body are changed. Requires admin or the matching policy action per field (s3:PutBucketQuota, s3:PutBucketObjectLockConfiguration, s3:PutBucketNotification, s3:PutReplicationConfiguration). retention_days can be raised at any time but only lowered once no data is still under retention.
+// @Description Updates quota, WORM retention, webhook notification, replication, and public-read settings. Only fields present in the body are changed. Requires admin or the matching policy action per field (s3:PutBucketQuota, s3:PutBucketObjectLockConfiguration, s3:PutBucketNotification, s3:PutReplicationConfiguration); is_public (public-read access) is admin only. retention_days can be raised at any time but only lowered once no data is still under retention.
 // @Tags buckets
 // @Accept json
 // @Produce json
@@ -63,6 +67,15 @@ func (h *BucketHandler) SetBucketSettings(c *gin.Context) {
 	}
 
 	// Authorize every requested field before changing anything.
+	// Public-read access exposes every object to the internet: admin only,
+	// never delegated through bucket-configuration policy actions.
+	if req.IsPublic != nil && !c.GetBool("is_admin") {
+		c.JSON(http.StatusForbidden, models.ErrorResponse{
+			Error:   "Permission denied",
+			Message: "Changing public read access requires admin",
+		})
+		return
+	}
 	required := []string{}
 	if req.QuotaBytes != nil {
 		required = append(required, services.ActionPutBucketQuota)
@@ -195,10 +208,15 @@ func (h *BucketHandler) SetBucketSettings(c *gin.Context) {
 		updates["replicate_to"] = target
 	}
 
+	if req.IsPublic != nil {
+		updates["is_public"] = *req.IsPublic
+	}
+
 	if len(updates) == 0 {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "No settings provided"})
 		return
 	}
+	wasPublic := bucket.IsPublic // Updates may write the new values back into bucket
 	if err := database.DB.Model(&bucket).Updates(updates).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to update settings"})
 		return
@@ -215,10 +233,19 @@ func (h *BucketHandler) SetBucketSettings(c *gin.Context) {
 			continue
 		case "replication_configured_by", "replication_configured_at", "replicate_to_id":
 			continue // internal provenance; the audit row already names the actor
+		case "is_public":
+			continue // audited separately as bucket.public_access
 		}
 		meta[k] = updates[k]
 	}
-	_ = h.auditService.LogSuccess(c, userUUID, "", "bucket.settings", "bucket", bucket.ID.String(), bucket.Name, meta)
+	username := c.GetString("username")
+	if req.IsPublic != nil {
+		_ = h.auditService.LogSuccess(c, userUUID, username, "bucket.public_access", "bucket", bucket.ID.String(), bucket.Name,
+			map[string]interface{}{"old": wasPublic, "new": *req.IsPublic})
+	}
+	if len(meta) > 0 {
+		_ = h.auditService.LogSuccess(c, userUUID, username, "bucket.settings", "bucket", bucket.ID.String(), bucket.Name, meta)
+	}
 	c.JSON(http.StatusOK, models.SuccessResponse{Message: "Settings updated"})
 }
 

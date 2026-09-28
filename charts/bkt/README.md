@@ -140,12 +140,13 @@ The Swagger UI (`/api/docs/`) is off in production; set
 | `backend.tls.enabled` / `backend.tls.terminatedUpstream` | `true` / `false` | Backend TLS; set `false`/`true` to terminate TLS at the ingress |
 | `backend.env.TRUSTED_PROXIES` | auto with ingress | CIDRs whose `X-Forwarded-For` is trusted (see above) |
 | `backend.env.AUTH_RATE_LIMIT` / `AUTH_REFRESH_RATE_LIMIT` | `20` / `30` | Per-IP per-minute login / token-refresh budgets |
+| `backend.env.PUBLIC_READ_RATE_LIMIT` | `600` | Per-IP per-minute budget for unsigned downloads from public-read buckets (`0` disables; excess → 503 SlowDown) |
 | `backend.env.SWAGGER_ENABLED` | `""` (off in production) | Serve Swagger UI at `/api/docs/` |
 | `externalDatabase.sslMode` | `require` | `DB_SSL_MODE` for an external database |
 | `postgresql.auth.password` | — | **Required** with the in-chart DB. |
 | `backend.env.STORAGE_BACKEND` | `local` | `local` (PVC) or `s3` (external S3, stateless pods) |
 | `backend.env.S3_SSE` | `false` | Request SSE-S3 (AES256) on writes through the S3 backend |
-| `backend.env.S3_PUBLIC_ENDPOINT` | `""` | Browser-facing S3 URL for presigned links |
+| `backend.env.S3_PUBLIC_ENDPOINT` | `""` | Browser-facing S3 URL for presigned and public-read links |
 | `backend.env.AUDIT_RETENTION_DAYS` | `90` | Audit log retention |
 | `backend.env.METRICS_TOKEN` | `""` | Bearer-gate `/metrics` |
 | `backend.persistence.size` | `50Gi` | Object storage PVC |

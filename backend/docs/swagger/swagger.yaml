@@ -413,6 +413,8 @@ definitions:
         type: string
       email:
         type: string
+      group_policy_count:
+        type: integer
       id:
         type: string
       is_admin:
@@ -423,6 +425,17 @@ definitions:
       policies:
         items:
           $ref: '#/definitions/models.Policy'
+        type: array
+      policy_count:
+        description: |-
+          Computed for the admin user list (not stored): policies attached directly
+          (manual assignments and SSO claim sync alike) and distinct policies
+          inherited through group membership.
+        type: integer
+      policy_ids:
+        description: directly attached policy IDs
+        items:
+          type: string
         type: array
       sso_email:
         description: Email from SSO (may differ from Email)
@@ -1600,11 +1613,12 @@ paths:
     put:
       consumes:
       - application/json
-      description: Updates quota, WORM retention, webhook notification, and replication
-        settings. Only fields present in the body are changed. Requires admin or the
-        matching policy action per field (s3:PutBucketQuota, s3:PutBucketObjectLockConfiguration,
-        s3:PutBucketNotification, s3:PutReplicationConfiguration). retention_days
-        can be raised at any time but only lowered once no data is still under retention.
+      description: Updates quota, WORM retention, webhook notification, replication,
+        and public-read settings. Only fields present in the body are changed. Requires
+        admin or the matching policy action per field (s3:PutBucketQuota, s3:PutBucketObjectLockConfiguration,
+        s3:PutBucketNotification, s3:PutReplicationConfiguration); is_public (public-read
+        access) is admin only. retention_days can be raised at any time but only lowered
+        once no data is still under retention.
       parameters:
       - description: Bucket name
         in: path

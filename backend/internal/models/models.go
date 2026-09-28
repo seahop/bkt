@@ -26,6 +26,13 @@ type User struct {
 	SSOID       string `gorm:"index" json:"sso_id,omitempty"`       // Unique ID from SSO provider
 	SSOEmail    string `gorm:"" json:"sso_email,omitempty"`         // Email from SSO (may differ from Email)
 
+	// Computed for the admin user list (not stored): policies attached directly
+	// (manual assignments and SSO claim sync alike) and distinct policies
+	// inherited through group membership.
+	PolicyCount      *int        `gorm:"-" json:"policy_count,omitempty"`
+	GroupPolicyCount *int        `gorm:"-" json:"group_policy_count,omitempty"`
+	PolicyIDs        []uuid.UUID `gorm:"-" json:"policy_ids,omitempty"` // directly attached policy IDs
+
 	// Relationships
 	Buckets    []Bucket    `gorm:"foreignKey:OwnerID" json:"buckets,omitempty"`
 	AccessKeys []AccessKey `gorm:"foreignKey:UserID" json:"access_keys,omitempty"`

@@ -133,31 +133,47 @@ func SetupS3Router(cfg *config.Config) *gin.Engine {
 		router.Use(middleware.RateLimitMiddleware(cfg.Auth.S3RateLimit, time.Minute))
 	}
 
-	s3Handler := NewS3APIHandler(cfg)
-	s3 := router.Group("")
-	s3.Use(middleware.S3AuthMiddleware())
-	{
-		// Service-level operations
-		s3.GET("/", s3Handler.ListBuckets)
-
-		// Bucket-level operations
-		s3.HEAD("/:bucket", s3Handler.HeadBucket)
-		s3.GET("/:bucket", s3Handler.ListObjects)
-		s3.POST("/:bucket", s3Handler.HandleBucketPost) // e.g. ?delete for bulk delete
-		s3.PUT("/:bucket", s3Handler.CreateBucket)      // 409 BucketAlreadyOwnedByYou for an existing bucket
-
-		// Object-level operations
-		s3.HEAD("/:bucket/*key", BucketOr(s3Handler.HeadBucket, s3Handler.HeadObject))
-		// GET also handles ListParts (?uploadId). S3ObjectResponseHeaders adds
-		// nosniff and serves active content (HTML/SVG/XML/JS) as an attachment
-		// so a presigned link can't render uploader-controlled markup.
-		s3.GET("/:bucket/*key", middleware.S3ObjectResponseHeaders(), BucketOr(s3Handler.ListObjects, s3Handler.GetObject))
-		s3.PUT("/:bucket/*key", BucketOr(s3Handler.CreateBucket, s3Handler.PutObject))                   // also handles UploadPart (?partNumber&uploadId)
-		s3.POST("/:bucket/*key", BucketOr(s3Handler.HandleBucketPost, s3Handler.HandleObjectPost))       // CreateMultipartUpload (?uploads) or CompleteMultipartUpload (?uploadId)
-		s3.DELETE("/:bucket/*key", BucketOr(s3Handler.DeleteBucketNotSupported, s3Handler.DeleteObject)) // also handles AbortMultipartUpload (?uploadId)
+	// Unsigned public-read object GET/HEADs (buckets with is_public) get their
+	// own per-IP budget, on by default: PUBLIC_READ_RATE_LIMIT
+	// (requests/minute, default 600; 0 disables). Excess → 503 SlowDown.
+	var authOpts middleware.S3AuthOptions
+	if cfg.Auth.PublicReadRateLimit > 0 {
+		authOpts.PublicReadLimiter = middleware.NewRateLimiter(cfg.Auth.PublicReadRateLimit, time.Minute)
 	}
 
+	s3Handler := NewS3APIHandler(cfg)
+	s3 := router.Group("")
+	// S3AuthMiddleware runs after routing (group middleware), so it sees the
+	// matched route template and params when deciding whether an unsigned
+	// request is an anonymous public read (GET/HEAD /:bucket/*key only).
+	s3.Use(middleware.S3AuthMiddleware(authOpts))
+	registerS3Routes(s3, s3Handler)
+
 	return router
+}
+
+// registerS3Routes wires the S3 API routes onto r (behind S3AuthMiddleware in
+// SetupS3Router). Only GET/HEAD /:bucket/*key can be reached anonymously (see
+// middleware.S3AuthMiddleware); every other handler requires a caller.
+func registerS3Routes(r gin.IRoutes, s3Handler *S3APIHandler) {
+	// Service-level operations
+	r.GET("/", s3Handler.ListBuckets)
+
+	// Bucket-level operations
+	r.HEAD("/:bucket", s3Handler.HeadBucket)
+	r.GET("/:bucket", s3Handler.ListObjects)
+	r.POST("/:bucket", s3Handler.HandleBucketPost) // e.g. ?delete for bulk delete
+	r.PUT("/:bucket", s3Handler.CreateBucket)      // 409 BucketAlreadyOwnedByYou for an existing bucket
+
+	// Object-level operations
+	r.HEAD("/:bucket/*key", BucketOr(s3Handler.HeadBucket, s3Handler.HeadObject))
+	// GET also handles ListParts (?uploadId). S3ObjectResponseHeaders adds
+	// nosniff and serves active content (HTML/SVG/XML/JS) as an attachment
+	// so a presigned link can't render uploader-controlled markup.
+	r.GET("/:bucket/*key", middleware.S3ObjectResponseHeaders(), BucketOr(s3Handler.ListObjects, s3Handler.GetObject))
+	r.PUT("/:bucket/*key", BucketOr(s3Handler.CreateBucket, s3Handler.PutObject))                   // also handles UploadPart (?partNumber&uploadId)
+	r.POST("/:bucket/*key", BucketOr(s3Handler.HandleBucketPost, s3Handler.HandleObjectPost))       // CreateMultipartUpload (?uploads) or CompleteMultipartUpload (?uploadId)
+	r.DELETE("/:bucket/*key", BucketOr(s3Handler.DeleteBucketNotSupported, s3Handler.DeleteObject)) // also handles AbortMultipartUpload (?uploadId)
 }
 
 // newEngine is gin.Default() with the access logger swapped for one that

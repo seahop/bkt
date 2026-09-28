@@ -25,10 +25,10 @@ type ObjectVersion struct {
 	VersionID string    `gorm:"uniqueIndex;not null" json:"version_id"`
 	// IsDeleteMarker: this version records a delete, not content. Marker rows
 	// have no bytes in version storage.
-	IsDeleteMarker bool   `gorm:"default:false" json:"is_delete_marker"`
-	Size           int64  `json:"size"`
-	ContentType    string `json:"content_type"`
-	ETag           string `json:"etag"`
+	IsDeleteMarker bool    `gorm:"default:false" json:"is_delete_marker"`
+	Size           int64   `json:"size"`
+	ContentType    string  `json:"content_type"`
+	ETag           string  `json:"etag"`
 	Metadata       *string `gorm:"type:jsonb" json:"metadata,omitempty"`
 	Tags           *string `gorm:"type:jsonb" json:"tags,omitempty"`
 	// VersionedAt is when this version STOPPED being current (archive time for

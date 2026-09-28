@@ -6,8 +6,13 @@ import { listPolicies } from '../services/policy'
 import type { Bucket, AccessKey } from '../types'
 import { keyIsActive } from '../utils/accessKeys'
 import { useAsyncLoad } from '../utils/useAsyncLoad'
+import { PUBLIC_BADGE_TITLE } from '../utils/publicUrl'
+import { useAuthStore } from '../store/authStore'
 
 export default function Dashboard() {
+  // Bucket creation and policy management are admin-only on the server; don't
+  // offer them to users who'd only get a 403 or a redirect.
+  const isAdmin = useAuthStore((st) => st.user?.is_admin ?? false)
   const [buckets, setBuckets] = useState<Bucket[]>([])
   const [accessKeys, setAccessKeys] = useState<AccessKey[]>([])
   const [policyCount, setPolicyCount] = useState(0)
@@ -62,24 +67,33 @@ export default function Dashboard() {
       link: '/profile',
     },
     {
-      label: 'Policies',
+      label: isAdmin ? 'Policies' : 'Your Policies',
       value: policyCount,
       icon: Shield,
       color: 'text-orange-500',
       bgColor: 'bg-orange-500/10',
-      link: '/policies',
+      link: isAdmin ? '/policies' : undefined,
     },
   ]
 
   const quickActions = [
-    {
-      to: '/buckets',
-      icon: FolderOpen,
-      color: 'text-blue-500',
-      bgColor: 'bg-blue-500/10',
-      label: 'Create Bucket',
-      description: 'Create a new storage bucket',
-    },
+    isAdmin
+      ? {
+          to: '/buckets',
+          icon: FolderOpen,
+          color: 'text-blue-500',
+          bgColor: 'bg-blue-500/10',
+          label: 'Create Bucket',
+          description: 'Create a new storage bucket',
+        }
+      : {
+          to: '/buckets',
+          icon: FolderOpen,
+          color: 'text-blue-500',
+          bgColor: 'bg-blue-500/10',
+          label: 'Browse Buckets',
+          description: 'Open the buckets you have access to',
+        },
     {
       to: '/profile',
       icon: Key,
@@ -88,14 +102,18 @@ export default function Dashboard() {
       label: 'Generate Access Key',
       description: 'Create API credentials',
     },
-    {
-      to: '/policies',
-      icon: Shield,
-      color: 'text-orange-500',
-      bgColor: 'bg-orange-500/10',
-      label: 'Manage Policies',
-      description: 'Configure access control',
-    },
+    ...(isAdmin
+      ? [
+          {
+            to: '/policies',
+            icon: Shield,
+            color: 'text-orange-500',
+            bgColor: 'bg-orange-500/10',
+            label: 'Manage Policies',
+            description: 'Configure access control',
+          },
+        ]
+      : []),
   ]
 
   return (
@@ -150,10 +168,18 @@ export default function Dashboard() {
           {buckets.length === 0 ? (
             <div className="flex flex-col items-center text-center py-8">
               <FolderOpen className="w-10 h-10 text-dark-textMuted mb-3" />
-              <p className="text-sm text-dark-textSecondary mb-4">No buckets yet</p>
-              <Link to="/buckets" className="btn-primary">
-                Create your first bucket
-              </Link>
+              {isAdmin ? (
+                <>
+                  <p className="text-sm text-dark-textSecondary mb-4">No buckets yet</p>
+                  <Link to="/buckets" className="btn-primary">
+                    Create your first bucket
+                  </Link>
+                </>
+              ) : (
+                <p className="text-sm text-dark-textSecondary">
+                  No buckets shared with you yet. Ask an administrator for access.
+                </p>
+              )}
             </div>
           ) : (
             <div className="space-y-1">
@@ -170,7 +196,11 @@ export default function Dashboard() {
                     <p className="text-sm font-medium text-dark-text truncate">{bucket.name}</p>
                     <p className="text-xs text-dark-textMuted">{bucket.region}</p>
                   </div>
-                  {bucket.is_public && <span className="badge-green">Public</span>}
+                  {bucket.is_public && (
+                    <span className="badge-green" title={PUBLIC_BADGE_TITLE}>
+                      Public
+                    </span>
+                  )}
                 </Link>
               ))}
             </div>

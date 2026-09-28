@@ -42,7 +42,7 @@ Complete API reference for bkt.
 | POST | `/api/buckets/:name/objects/restore` | Restore an object version |
 | PUT | `/api/buckets/:name/versioning` | Enable/suspend versioning (owner/admin) |
 | PUT | `/api/buckets/:name/lifecycle` | Set lifecycle expiry (owner/admin) |
-| PUT | `/api/buckets/:name/settings` | Update bucket settings (owner/admin) |
+| PUT | `/api/buckets/:name/settings` | Update bucket settings (admin or per-field policy action; `is_public` admin only) |
 | GET | `/api/buckets/:name/objects/*key` | Download object |
 | HEAD | `/api/buckets/:name/objects/*key` | Head object |
 | DELETE | `/api/buckets/:name/objects/*key` | Delete object |
@@ -751,7 +751,7 @@ Mints a short-lived S3 access key pair for the caller. Temporary keys are **excl
 |-------|------|----------|-------------|
 | name | string | Yes | S3-compliant bucket name |
 | region | string | Yes | AWS region (e.g., "us-east-1") |
-| is_public | boolean | No | Public access (default: false) |
+| is_public | boolean | No | Public read access (default: false): unsigned GET/HEAD of objects on the S3 listener; listing and writes still require credentials. See [Public-read buckets](#public-read-buckets) |
 | storage_backend | string | No | "local" or "s3" (default: "local") |
 | s3_config_id | UUID | No | S3 configuration ID (if using S3 backend). Must exist (400 otherwise). If omitted, the current default S3 configuration is pinned to the bucket; with no default, the bucket uses the `.env` S3 settings. The bucket's routing never changes afterwards. |
 
@@ -780,7 +780,7 @@ Mints a short-lived S3 access key pair for the caller. Temporary keys are **excl
 |-----------|------|-------------|
 | name | string | Bucket name |
 
-**Response (200 OK):** Bucket object
+**Response (200 OK):** Bucket object. For a public-read bucket it also includes `public_url_base` (`<S3 endpoint>/<bucket>`); append the key, each `/`-separated segment percent-encoded, to get the object's unsigned URL.
 
 **Error Codes:**
 - `403` - Permission denied
@@ -1299,11 +1299,11 @@ Rules are applied hourly (and once shortly after startup).
 </details>
 
 <details>
-<summary><code>PUT /api/buckets/:name/settings</code> - Update bucket settings <strong>[Owner/Admin]</strong></summary>
+<summary><code>PUT /api/buckets/:name/settings</code> - Update bucket settings</summary>
 
 Partial update — only fields present in the body are changed.
 
-**Authentication:** Required (bucket owner or admin)
+**Authentication:** Required. Each field needs admin or its bucket-configuration action (`quota_bytes`: `s3:PutBucketQuota`, `retention_days`: `s3:PutBucketObjectLockConfiguration`, `webhook_*`: `s3:PutBucketNotification`, `replicate_to`: `s3:PutReplicationConfiguration`); `is_public` is **admin only**.
 
 **Request Body:**
 | Field | Type | Required | Description |
@@ -1314,6 +1314,7 @@ Partial update — only fields present in the body are changed.
 | webhook_secret | string | No | HMAC-SHA256 secret for the `X-Bkt-Signature` header |
 | webhook_events | string | No | CSV filter: `"created"`, `"removed"`, or both ("" = both) |
 | replicate_to | string | No | Target bucket name for one-way replication ("" disables) |
+| is_public | boolean | No | Public read access on/off ([Public-read buckets](#public-read-buckets)). **Admin only**; audit-logged as `bucket.public_access` (`old`/`new`) |
 
 **Response (200 OK):**
 ```json
@@ -1324,7 +1325,7 @@ Partial update — only fields present in the body are changed.
 
 **Error Codes:**
 - `400` - Negative values, non-http(s) webhook URL, retention without versioning, self-replication, or replication cycle
-- `403` - Not the bucket owner or an admin
+- `403` - Missing the permission for a requested field (`is_public`: caller is not an admin)
 - `404` - Replication target bucket not found
 - `409` - Replication target already mirrored by another bucket
 
@@ -1635,7 +1636,7 @@ Removes the group, its memberships, and its policy attachments. Users and polici
 
 **Authentication:** Required (Admin)
 
-Returns audit log entries, newest first. Covers logins (including SSO logins with provider metadata), group operations, `sts.issue`, `bucket.settings` / `bucket.versioning` / `bucket.lifecycle`, and more. Retention is controlled by `AUDIT_RETENTION_DAYS` (default 90; <=0 disables pruning).
+Returns audit log entries, newest first. Covers logins (including SSO logins with provider metadata), group operations, `sts.issue`, `bucket.settings` / `bucket.public_access` / `bucket.versioning` / `bucket.lifecycle`, and more. Anonymous public-read downloads are not audited (they appear in the access log and metrics). Retention is controlled by `AUDIT_RETENTION_DAYS` (default 90; <=0 disables pruning).
 
 **Query Parameters:**
 | Parameter | Type | Default | Description |
@@ -1806,6 +1807,14 @@ Uses **AWS Signature V4** with access keys generated from the bkt API.
 Canonicalization follows AWS exactly (path segments and query keys/values URI-encoded per RFC 3986, space as `%20`), so keys with spaces, `+`, `%` or non-ASCII characters verify as signed by any AWS SDK. When `X-Amz-Content-Sha256` is a hex digest, the body is hashed as it is received and the request fails with `XAmzContentSHA256Mismatch` if it does not match; `UNSIGNED-PAYLOAD` and the `STREAMING-*` values are accepted (streaming chunks are verified by the chunk decoder). Any other value is rejected. Temporary (bkt-STS) keys stop working as soon as the issuing user's sessions are revoked.
 
 Optional per-IP rate limiting on this listener is available via `S3_RATE_LIMIT` (requests/minute; 0 = disabled).
+
+### Public-read buckets
+
+On a bucket with `is_public: true`, **unsigned** `GET` and `HEAD` of an object (`/<bucket>/<key>`, current version, no query parameters other than `response-content-type`, `response-content-disposition`, `response-cache-control`, `response-expires`, `response-content-language`, `response-content-encoding`) are served without credentials; `Range` works. Everything else — listing (`GET /<bucket>`, `GET /<bucket>/`), `ListBuckets`, `HeadBucket`, writes, deletes, multipart, `?versionId` and every other sub-resource — still requires a signature and answers an unsigned request with the usual `401 AccessDenied` ("Missing authorization header"), also for private and non-existent buckets. A bucket-policy `Deny` for `s3:GetObject` with `Principal: "*"` (or none) still blocks anonymous reads (`403 AccessDenied`); Allow statements are irrelevant to anonymous readers. `.bkt-versions/` keys answer 404. Active content is still served as an attachment with `nosniff`, and an anonymous `response-content-disposition=inline` cannot override that. Unsigned reads are limited per client IP by `PUBLIC_READ_RATE_LIMIT` (requests/minute, default 600, `0` disables; excess → `503 SlowDown`). Signed requests on public buckets are authorized by policies exactly as before.
+
+```bash
+curl https://s3.example.com/my-public-bucket/images/logo.png
+```
 
 ### Supported Operations
 

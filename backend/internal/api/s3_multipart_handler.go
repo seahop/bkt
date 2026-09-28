@@ -108,8 +108,10 @@ func (h *S3APIHandler) HandleObjectPost(c *gin.Context) {
 func (h *S3APIHandler) CreateMultipartUpload(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	objectKey := strings.TrimPrefix(c.Param("key"), "/")
-	userID, _ := c.Get("user_id")
-	userUUID := userID.(uuid.UUID)
+	userUUID, authed := h.s3Caller(c)
+	if !authed {
+		return
+	}
 
 	// Same key validation as PutObject: without it a bad key would only be
 	// caught at Complete time, after the client uploaded every part.
@@ -294,6 +296,11 @@ func (h *S3APIHandler) CompleteMultipartUpload(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	objectKey := strings.TrimPrefix(c.Param("key"), "/")
 	uploadID := c.Query("uploadId")
+	// Callers only, before reading the body (authorizeMultipartUpload below
+	// does the full check).
+	if _, authed := h.s3Caller(c); !authed {
+		return
+	}
 
 	body, err := readBoundedBody(c.Request.Body, 4<<20)
 	if err != nil {

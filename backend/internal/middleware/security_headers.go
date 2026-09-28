@@ -94,8 +94,9 @@ func isLocalHost(hostport string) bool {
 // GetObject. The stored Content-Type is uploader-controlled, so a browser
 // following a presigned link to an HTML/SVG/XML/JS object would otherwise
 // render it as an active document on the S3 origin. For such types it forces
-// `Content-Disposition: attachment` (unless the — signed — request asked for
-// a specific disposition via response-content-disposition) and always sends
+// `Content-Disposition: attachment` (unless a signed request asked for a
+// specific disposition via response-content-disposition; anonymous public
+// reads cannot opt out) and always sends
 // `X-Content-Type-Options: nosniff` so browsers never upgrade a passive type.
 func S3ObjectResponseHeaders() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -116,7 +117,11 @@ func S3ObjectResponseHeaders() gin.HandlerFunc {
 				return
 			}
 		}
-		if q.Get("response-content-disposition") != "" {
+		// A signed request may ask for a specific disposition (e.g. inline).
+		// An anonymous public read may not opt out of the hardening: its
+		// override is kept only when it is itself an attachment (or the
+		// content is passive), see dispositionWriter.apply.
+		if q.Get("response-content-disposition") != "" && !c.GetBool(CtxS3Anonymous) {
 			c.Next()
 			return
 		}

@@ -395,7 +395,7 @@ depth in the [Feature guide](features.md)):
 - **Share Links**: Generate time-limited presigned download URLs
 - **Webhooks**: Get notified on object created/removed events
 - **Replication**: Mirror a bucket into another bkt bucket
-- **Public Buckets**: Share files publicly
+- **Public Buckets**: Let anyone download objects by URL without signing in (listing and writes stay private) — see [Public buckets](features.md#public-buckets)
 - **Storage Backends**: Use local or AWS S3 storage per bucket
 - **Folder Organization**: Create virtual folders to organize files
 - **S3 Compatibility**: Mount buckets with `s3fs` or use the AWS CLI / SDKs against the S3 endpoint on port `9000` — see [S3fs Mounting](MOUNTING.md)

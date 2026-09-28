@@ -118,6 +118,9 @@ services:
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
       # Per-IP requests/minute on the S3 listener; empty or 0 = disabled.
       S3_RATE_LIMIT: ${S3_RATE_LIMIT:-}
+      # Per-IP requests/minute for unsigned reads of public-read buckets
+      # (backend default 600; 0 = disabled). Excess gets 503 SlowDown.
+      PUBLIC_READ_RATE_LIMIT: ${PUBLIC_READ_RATE_LIMIT:-}
       # Days to keep audit log rows (backend default 90; <= 0 disables pruning).
       AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-}
       # When set, GET /metrics requires "Authorization: Bearer <token>".

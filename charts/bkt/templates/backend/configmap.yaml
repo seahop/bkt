@@ -41,6 +41,7 @@ data:
   CORS_ALLOW_CREDENTIALS: {{ include "bkt.env" (list . "CORS_ALLOW_CREDENTIALS" "true") | quote }}
   TRUSTED_PROXIES: {{ include "bkt.trustedProxies" . | quote }}
   S3_RATE_LIMIT: {{ .Values.backend.env.S3_RATE_LIMIT | default "0" | quote }}
+  PUBLIC_READ_RATE_LIMIT: {{ include "bkt.env" (list . "PUBLIC_READ_RATE_LIMIT" "600") | quote }}
   AUDIT_RETENTION_DAYS: {{ .Values.backend.env.AUDIT_RETENTION_DAYS | default "90" | quote }}
   WEBHOOK_ALLOWED_HOSTS: {{ .Values.backend.env.WEBHOOK_ALLOWED_HOSTS | default "" | quote }}
   ENCRYPTION_REENCRYPT_ON_STARTUP: {{ .Values.backend.env.ENCRYPTION_REENCRYPT_ON_STARTUP | default "" | toString | quote }}

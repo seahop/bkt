@@ -1739,7 +1739,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "Updates quota, WORM retention, webhook notification, and replication settings. Only fields present in the body are changed. Requires admin or the matching policy action per field (s3:PutBucketQuota, s3:PutBucketObjectLockConfiguration, s3:PutBucketNotification, s3:PutReplicationConfiguration). retention_days can be raised at any time but only lowered once no data is still under retention.",
+                "description": "Updates quota, WORM retention, webhook notification, replication, and public-read settings. Only fields present in the body are changed. Requires admin or the matching policy action per field (s3:PutBucketQuota, s3:PutBucketObjectLockConfiguration, s3:PutBucketNotification, s3:PutReplicationConfiguration); is_public (public-read access) is admin only. retention_days can be raised at any time but only lowered once no data is still under retention.",
                 "consumes": [
                     "application/json"
                 ],
@@ -3794,6 +3794,9 @@ const docTemplate = `{
                 "email": {
                     "type": "string"
                 },
+                "group_policy_count": {
+                    "type": "integer"
+                },
                 "id": {
                     "type": "string"
                 },
@@ -3808,6 +3811,17 @@ const docTemplate = `{
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/models.Policy"
+                    }
+                },
+                "policy_count": {
+                    "description": "Computed for the admin user list (not stored): policies attached directly\n(manual assignments and SSO claim sync alike) and distinct policies\ninherited through group membership.",
+                    "type": "integer"
+                },
+                "policy_ids": {
+                    "description": "directly attached policy IDs",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
                     }
                 },
                 "sso_email": {

@@ -1,10 +1,10 @@
 package database
 
 import (
-	"errors"
-	"log"
 	"bkt/internal/config"
 	"bkt/internal/models"
+	"errors"
+	"log"
 
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"

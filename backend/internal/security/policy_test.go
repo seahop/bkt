@@ -89,9 +89,54 @@ func TestMatchesPrincipal(t *testing.T) {
 		{map[string]interface{}{"AWS": "x"}, "alice", false}, // unrecognized → fail closed
 	}
 	for _, c := range cases {
-		if got := matchesPrincipal(c.principal, c.user); got != c.want {
+		if got := matchesPrincipal(c.principal, &PolicyEvaluationContext{Username: c.user}); got != c.want {
 			t.Errorf("matchesPrincipal(%v,%q)=%v want %v", c.principal, c.user, got, c.want)
 		}
+	}
+}
+
+// An anonymous (unsigned public-read) requester has no username: only an
+// absent Principal or "*" applies to it — never a named or empty principal.
+func TestMatchesPrincipalAnonymous(t *testing.T) {
+	anon := &PolicyEvaluationContext{Anonymous: true}
+	cases := []struct {
+		principal interface{}
+		want      bool
+	}{
+		{nil, true},
+		{"*", true},
+		{"", false},
+		{"alice", false},
+		{[]interface{}{"alice", "*"}, true},
+		{[]interface{}{"", "alice"}, false},
+		{map[string]interface{}{"AWS": "*"}, false},
+	}
+	for _, c := range cases {
+		if got := matchesPrincipal(c.principal, anon); got != c.want {
+			t.Errorf("anonymous matchesPrincipal(%v)=%v want %v", c.principal, got, c.want)
+		}
+	}
+}
+
+func TestEvaluatePolicyAnonymousDeny(t *testing.T) {
+	doc, err := ParseStoredPolicyDocument(`{"Version":"2012-10-17","Statement":[
+		{"Effect":"Allow","Principal":"*","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::b/*"]},
+		{"Effect":"Deny","Principal":"*","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::b/secret/*"]},
+		{"Effect":"Deny","Principal":["alice"],"Action":["s3:GetObject"],"Resource":["arn:aws:s3:::b/alice-hidden/*"]}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eval := func(res string) PolicyResult {
+		return EvaluatePolicy(doc, &PolicyEvaluationContext{Anonymous: true, Action: "s3:GetObject", Resource: res})
+	}
+	if got := eval("arn:aws:s3:::b/secret/x"); got != PolicyDeny {
+		t.Errorf("Principal * Deny must apply to anonymous, got %v", got)
+	}
+	if got := eval("arn:aws:s3:::b/alice-hidden/x"); got == PolicyDeny {
+		t.Error("a Deny scoped to a named user must not apply to anonymous")
+	}
+	if got := eval("arn:aws:s3:::b/public.txt"); got != PolicyAllow {
+		t.Errorf("unrelated key: got %v, want Allow (callers ignore Allow for anonymous)", got)
 	}
 }
 

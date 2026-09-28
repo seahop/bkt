@@ -130,6 +130,9 @@ backend:
     TRUSTED_PROXIES: ""
     # Per-IP requests/minute on the S3 API listener. "0" (default) disables.
     S3_RATE_LIMIT: "0"
+    # Per-IP requests/minute for unsigned downloads from public-read buckets
+    # on the S3 listener (excess → 503 SlowDown). "0" disables; default "600".
+    PUBLIC_READ_RATE_LIMIT: "600"
     # Days to keep audit log rows (default 90); "-1" (or any <= 0) disables pruning.
     AUDIT_RETENTION_DAYS: "90"
     # When set, GET /metrics requires "Authorization: Bearer <token>".

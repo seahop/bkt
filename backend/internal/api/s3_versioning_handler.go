@@ -62,8 +62,10 @@ type deleteMarkerXML struct {
 // s3:PutBucketVersioning on the bucket).
 func (h *S3APIHandler) PutBucketVersioning(c *gin.Context) {
 	bucketName := c.Param("bucket")
-	userID, _ := c.Get("user_id")
-	userUUID := userID.(uuid.UUID)
+	userUUID, authed := h.s3Caller(c)
+	if !authed {
+		return
+	}
 
 	var bucket models.Bucket
 	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
@@ -118,8 +120,10 @@ func (h *S3APIHandler) PutBucketVersioning(c *gin.Context) {
 // NextKeyMarker, NextVersionIdMarker). IsLatest marks each key's newest entry.
 func (h *S3APIHandler) ListObjectVersions(c *gin.Context) {
 	bucketName := c.Param("bucket")
-	userID, _ := c.Get("user_id")
-	userUUID := userID.(uuid.UUID)
+	userUUID, authed := h.s3Caller(c)
+	if !authed {
+		return
+	}
 
 	var bucket models.Bucket
 	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {

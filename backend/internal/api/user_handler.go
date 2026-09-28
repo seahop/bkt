@@ -374,14 +374,29 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 // @Router /api/users [get]
 func (h *UserHandler) ListUsers(c *gin.Context) {
 	users := make([]models.User, 0)
-	// Don't preload Policies to avoid memory issues when there are many users
-	// Use dedicated policy endpoints if policy details are needed
+	// Don't preload full Policies (memory with many users); the list only
+	// needs counts, which two grouped queries provide. Without them the
+	// console showed "0 policies" for every user.
 	if err := database.DB.Find(&users).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Failed to fetch users",
 			Message: "An internal error occurred. Please try again.",
 		})
 		return
+	}
+	direct, viaGroups, err := userPolicyInfo()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to fetch users",
+			Message: "An internal error occurred. Please try again.",
+		})
+		return
+	}
+	for i := range users {
+		ids := direct[users[i].ID]
+		d, g := len(ids), viaGroups[users[i].ID]
+		users[i].PolicyIDs = ids
+		users[i].PolicyCount, users[i].GroupPolicyCount = &d, &g
 	}
 
 	c.JSON(http.StatusOK, users)
@@ -931,4 +946,35 @@ func (h *UserHandler) DeleteUserAccessKey(c *gin.Context) {
 	c.JSON(http.StatusOK, models.SuccessResponse{
 		Message: "Access key deleted successfully",
 	})
+}
+
+// userPolicyInfo returns, per user, the IDs of directly attached policies and
+// the number of distinct policies inherited through groups (the two are shown
+// separately, so a policy both attached and inherited counts in both).
+func userPolicyInfo() (map[uuid.UUID][]uuid.UUID, map[uuid.UUID]int, error) {
+	direct := map[uuid.UUID][]uuid.UUID{}
+	viaGroups := map[uuid.UUID]int{}
+	var links []struct {
+		UserID   uuid.UUID
+		PolicyID uuid.UUID
+	}
+	if err := database.DB.Raw(`SELECT user_id, policy_id FROM user_policies ORDER BY user_id`).Scan(&links).Error; err != nil {
+		return nil, nil, err
+	}
+	for _, l := range links {
+		direct[l.UserID] = append(direct[l.UserID], l.PolicyID)
+	}
+	var rows []struct {
+		UserID uuid.UUID
+		N      int
+	}
+	if err := database.DB.Raw(`SELECT ug.user_id, COUNT(DISTINCT gp.policy_id) AS n
+		FROM user_groups ug JOIN group_policies gp ON gp.group_id = ug.group_id
+		GROUP BY ug.user_id`).Scan(&rows).Error; err != nil {
+		return nil, nil, err
+	}
+	for _, r := range rows {
+		viaGroups[r.UserID] = r.N
+	}
+	return direct, viaGroups, nil
 }

@@ -319,6 +319,8 @@ type bucketView struct {
 	CreatedAt      time.Time        `json:"created_at"`
 	UpdatedAt      time.Time        `json:"updated_at"`
 	Owner          *bucketOwnerView `json:"owner,omitempty"`
+	// PublicURLBase is set by GetBucket for public-read buckets.
+	PublicURLBase string `json:"public_url_base,omitempty"`
 }
 
 func newBucketView(b *models.Bucket, showNotification, showReplication bool) bucketView {

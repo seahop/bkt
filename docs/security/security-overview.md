@@ -178,6 +178,41 @@ func EvaluatePolicy(policy *PolicyDocument, ctx *PolicyEvaluationContext) bool {
 - Multiple policies evaluated as union
 - Policy validation prevents injection
 
+### Anonymous access (public-read buckets)
+
+The S3 listener requires SigV4 (header or presigned) on every request, with
+one exception: on a bucket whose `is_public` flag is set, **unsigned `GET` and
+`HEAD` of an object's current version** are served without credentials. That
+is the entire anonymous surface:
+
+- **Decided in one place** — `S3AuthMiddleware`, which runs after routing and
+  admits an unsigned request only when the matched route is the object route
+  (`/:bucket/*key`) with a non-empty key, the method is GET/HEAD, the query
+  contains nothing but `response-*` header overrides, and the bucket (read
+  fresh from the database) is public. The request then carries an
+  "anonymous" marker and **no user**. Anything else — listing, `ListBuckets`,
+  `HeadBucket`, writes, deletes, multipart, `?versionId` and all other
+  sub-resources, private or unknown buckets — gets the same `401` as before,
+  so bucket existence is not revealed.
+- **Fail-closed handlers** — only `GetObject`/`HeadObject` understand the
+  anonymous marker, and they re-check the bucket flag and query. Every other
+  S3 handler requires an authenticated user and answers `403 AccessDenied`
+  when there is none (never panics or proceeds without a principal).
+- **Policies** — the public flag is the grant; Allow statements play no part.
+  A bucket-policy `Deny` for `Principal: "*"` (or without a Principal) still
+  blocks anonymous reads; a stored bucket policy that cannot be parsed blocks
+  them all. Signed requests are evaluated exactly as for private buckets.
+- **Content** — the reserved `.bkt-versions/` keyspace stays `404`; active
+  content (HTML/SVG/XML/JS) is always an attachment with `nosniff`, and an
+  anonymous `response-content-disposition` cannot switch that off.
+- **Abuse** — unsigned object reads have a per-IP budget
+  (`PUBLIC_READ_RATE_LIMIT`, default 600/min, counted before any database
+  lookup; excess → `503 SlowDown`). They are visible in the access log and in
+  route-labelled metrics, but not written to the audit log (volume).
+- **Who can open it** — only admins can set `is_public` (at creation, or via
+  bucket settings, which audit-logs every change as `bucket.public_access`); no
+  policy action delegates it.
+
 ### Policy Validation
 
 **Input Validation:**
@@ -456,8 +491,9 @@ func CompareStringsConstantTime(a, b string) bool {
 - ✅ Statement count limits (20 per policy)
 - ✅ Access key limits (5 per user)
 - ✅ File size limits (5GB default)
-- ✅ Rate limiting — auth endpoints (`AUTH_RATE_LIMIT`, per-IP/min) and
-  optionally the S3 listener (`S3_RATE_LIMIT`); behind a proxy, set
+- ✅ Rate limiting — auth endpoints (`AUTH_RATE_LIMIT`, per-IP/min),
+  anonymous public-read downloads (`PUBLIC_READ_RATE_LIMIT`, default 600/min)
+  and optionally the whole S3 listener (`S3_RATE_LIMIT`); behind a proxy, set
   `TRUSTED_PROXIES` so real client IPs are used
 - ✅ Connection pooling
 - ✅ Timeouts
@@ -511,8 +547,9 @@ if fileHeader.Size > h.config.Storage.MaxFileSize {
     `localhost`/IP hosts because HSTS applies to every port of a host).
 - ✅ **S3 listener GetObject** always sends `X-Content-Type-Options: nosniff`;
   active types (HTML, SVG, any XML, JavaScript) are served with
-  `Content-Disposition: attachment` unless the (signed) request explicitly
-  set `response-content-disposition`.
+  `Content-Disposition: attachment` unless a signed request explicitly
+  set `response-content-disposition` (anonymous public-read requests cannot
+  opt out).
 
 **CORS Configuration:**
 ```go
@@ -654,7 +691,9 @@ range; paginated).
   provider metadata)
 - Access key creation/revocation and bkt-STS credential issuance
 - Policy changes and group membership/policy operations
-- Bucket operations, including settings, versioning, and lifecycle changes
+- Bucket operations, including settings, public-read toggles
+  (`bucket.public_access`), versioning, and lifecycle changes
+- Not logged: anonymous public-read downloads (see the access log / metrics)
 
 **Retention:** rows older than `AUDIT_RETENTION_DAYS` (default 90) are pruned
 automatically; `<= 0` disables pruning. Deleting a user keeps their audit

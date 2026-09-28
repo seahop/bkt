@@ -53,6 +53,7 @@ docker logs bkt | grep -A2 "admin credentials"
 |---|---|---|
 | `TRUSTED_PROXIES` | _(empty)_ | Comma-separated CIDRs/IPs of reverse proxies whose `X-Forwarded-For` is trusted for rate limiting. Empty = trust none (the socket address is used). Behind a proxy, set it to the proxy's address — otherwise all clients share the proxy's rate-limit bucket |
 | `S3_RATE_LIMIT` | `0` | Per-IP requests per minute on the S3 API listener; `0` disables (the console/auth limiter is separate) |
+| `PUBLIC_READ_RATE_LIMIT` | `600` | Per-IP requests per minute for **unsigned** object GET/HEADs on the S3 listener (downloads from [public-read buckets](../guides/features.md#public-buckets)); excess requests get `503 SlowDown` with `Retry-After`. Counted before the bucket lookup, so unsigned probes of private buckets use the same budget. Signed traffic is not affected (use `S3_RATE_LIMIT` for that). `0` disables |
 | `AUDIT_RETENTION_DAYS` | `90` | Days to keep audit log rows; older rows are pruned periodically. `<= 0` disables pruning |
 | `METRICS_TOKEN` | _(empty)_ | When set, `GET /metrics` requires `Authorization: Bearer <token>`. Leave unset only if the metrics endpoint is network-isolated (it exposes bucket/object/user counts). In production an unset token logs a warning at startup (the endpoint keeps working so existing Prometheus setups don't break) |
 | `SWAGGER_ENABLED` | `true` in development, `false` in production | Serve the Swagger UI at `/api/docs/` |

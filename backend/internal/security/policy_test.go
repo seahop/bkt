@@ -86,7 +86,17 @@ func TestMatchesPrincipal(t *testing.T) {
 		{"alice", "bob", false},
 		{[]interface{}{"alice", "bob"}, "bob", true},
 		{[]interface{}{"alice"}, "bob", false},
-		{map[string]interface{}{"AWS": "x"}, "alice", false}, // unrecognized → fail closed
+		{map[string]interface{}{"AWS": "x"}, "alice", false},
+		{map[string]interface{}{"AWS": "alice"}, "alice", true},
+		{map[string]interface{}{"AWS": "*"}, "alice", true},
+		{map[string]interface{}{"AWS": []interface{}{"bob", "arn:aws:iam::123456789012:user/alice"}}, "alice", true},
+		{map[string]interface{}{"AWS": []interface{}{"arn:aws:iam::123456789012:user/team/alice"}}, "alice", true},
+		{map[string]interface{}{"AWS": "arn:aws:iam::123456789012:root"}, "alice", false},
+		{map[string]interface{}{"AWS": "arn:aws:iam::123456789012:user/*"}, "alice", false},
+		{map[string]interface{}{"Service": "alice"}, "alice", false},
+		{map[string]interface{}{"AWS": map[string]interface{}{"AWS": "alice"}}, "alice", false}, // unrecognized → fail closed
+		{42.0, "alice", false},
+		{"", "", false},
 	}
 	for _, c := range cases {
 		if got := matchesPrincipal(c.principal, &PolicyEvaluationContext{Username: c.user}); got != c.want {
@@ -109,7 +119,10 @@ func TestMatchesPrincipalAnonymous(t *testing.T) {
 		{"alice", false},
 		{[]interface{}{"alice", "*"}, true},
 		{[]interface{}{"", "alice"}, false},
-		{map[string]interface{}{"AWS": "*"}, false},
+		{map[string]interface{}{"AWS": "*"}, true},
+		{map[string]interface{}{"AWS": []interface{}{"*"}}, true},
+		{map[string]interface{}{"AWS": "alice"}, false},
+		{map[string]interface{}{"AWS": "arn:aws:iam::1:user/alice"}, false},
 	}
 	for _, c := range cases {
 		if got := matchesPrincipal(c.principal, anon); got != c.want {
@@ -197,10 +210,48 @@ func TestValidatePrincipal(t *testing.T) {
 			t.Errorf("expected valid, got error: %v (%s)", err, g)
 		}
 	}
-	// AWS object form is rejected (bkt principals are usernames)
-	bad := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"x"},"Action":["s3:GetObject"],"Resource":["*"]}]}`
-	if _, err := ValidatePolicyDocument(bad); err == nil {
-		t.Errorf("expected error for object-form principal")
+	// AWS object form: "*", usernames and IAM user ARNs.
+	for _, p := range []string{
+		`{"AWS":"*"}`, `{"AWS":["*"]}`, `{"AWS":"alice"}`,
+		`{"AWS":["alice","arn:aws:iam::123456789012:user/bob","arn:aws:iam::123456789012:user/path/carol"]}`,
+		`"arn:aws:iam::123456789012:user/alice"`,
+	} {
+		doc := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":` + p + `,"Action":["s3:GetObject"],"Resource":["*"]}]}`
+		if _, err := ValidatePolicyDocument(doc); err != nil {
+			t.Errorf("Principal %s: expected valid, got %v", p, err)
+		}
+	}
+	// Other principal types / non-user ARNs are rejected with the supported forms.
+	for _, p := range []string{
+		`{"Service":"s3.amazonaws.com"}`, `{"CanonicalUser":"abc"}`, `{"AWS":"*","Federated":"x"}`, `{}`,
+		`{"AWS":"arn:aws:iam::123456789012:root"}`, `{"AWS":"arn:aws:iam::123456789012:role/r"}`,
+		`{"AWS":"arn:aws:iam::123456789012:user/*"}`, `{"AWS":{"AWS":"x"}}`, `{"AWS":[1]}`, `42`,
+	} {
+		doc := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":` + p + `,"Action":["s3:GetObject"],"Resource":["*"]}]}`
+		_, err := ValidatePolicyDocument(doc)
+		if err == nil || !strings.Contains(err.Error(), "supported forms") {
+			t.Errorf("Principal %s: expected an error listing the supported forms, got %v", p, err)
+		}
+	}
+}
+
+// AWS allows Action/Resource as a single string; bkt treats it as a
+// one-element array.
+func TestValidatePolicyDocumentStringActionResource(t *testing.T) {
+	doc, err := ValidatePolicyDocument(`{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":{"AWS":"*"},"Action":"s3:GetObject","Resource":"arn:aws:s3:::b/secret/*"}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Statement[0].Action) != 1 || doc.Statement[0].Resource[0] != "arn:aws:s3:::b/secret/*" {
+		t.Fatalf("parsed %+v", doc.Statement[0])
+	}
+	ctx := &PolicyEvaluationContext{Username: "alice", Action: "s3:GetObject", Resource: "arn:aws:s3:::b/secret/x"}
+	if got := EvaluatePolicy(doc, ctx); got != PolicyDeny {
+		t.Errorf("string-form Deny: %v", got)
+	}
+	if _, err := ValidatePolicyDocument(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":1,"Resource":"*"}]}`); err == nil ||
+		!strings.Contains(err.Error(), "string or an array") {
+		t.Errorf("numeric Action: %v", err)
 	}
 }
 

@@ -895,8 +895,10 @@ paths:
     get:
       consumes:
       - application/json
-      description: Returns the details of a specific bucket by name. Requires GetBucketLocation
-        permission.
+      description: Returns the details of a specific bucket by name. Requires admin
+        or any of s3:ListBucket, s3:GetBucketLocation, s3:GetBucketPolicy on the bucket.
+        Non-admins get a reduced view (no s3_config_id or owner record; webhook URL/events
+        and replication target only with the permission to change them).
       parameters:
       - description: Bucket name
         in: path
@@ -1543,11 +1545,45 @@ paths:
       tags:
       - buckets
   /api/buckets/{name}/policy:
+    delete:
+      description: 'Admin-only. Removes the bucket policy (idempotent: succeeds when
+        the bucket has none). Audit-logged as bucket.policy.delete.'
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.SuccessResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Delete bucket policy
+      tags:
+      - buckets
     get:
       consumes:
       - application/json
       description: Returns the S3-style access policy document for the specified bucket.
-        Requires GetBucketPolicy permission.
+        Requires admin or s3:GetBucketPolicy on the bucket. 404 when the bucket has
+        no policy.
       parameters:
       - description: Bucket name
         in: path
@@ -1582,7 +1618,8 @@ paths:
       consumes:
       - application/json
       description: Admin-only. Sets an S3-style access policy document on the specified
-        bucket. Requires PutBucketPolicy permission.
+        bucket (strictly validated; the same JSON is returned by GET). Audit-logged
+        as bucket.policy.set.
       parameters:
       - description: Bucket name
         in: path

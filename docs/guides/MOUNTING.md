@@ -13,6 +13,19 @@ This guide explains how to mount your BKT buckets as local filesystems using s3f
 > `nomultipart` or other degraded-mode workarounds are needed. One deliberate
 > exception: **bucket creation via the S3 API is disabled** — create buckets in
 > the web console first, then mount them.
+>
+> **Other S3 clients / bucket sub-resources:** bucket-level configuration
+> calls that tools like the AWS CLI, rclone or `mc` issue are answered
+> explicitly: `?policy` (get/put/delete), `?policyStatus`, `?acl` (read-only),
+> `?location`, `?versioning`, `?lifecycle` and `?encryption` work; `?tagging`,
+> `?cors`, `?website`, `?replication`, `?object-lock`, `?publicAccessBlock` and
+> `?ownershipControls` answer AWS's "not configured" 404; anything else is
+> `501 NotImplemented` — never a bucket listing. Object requests work the same
+> way (`?tagging`, `?acl` read-only, multipart, `?versionId`, `?partNumber=1`;
+> anything else such as `?attributes` or `?retention` is 501, never object
+> content or a write). Full tables:
+> [bucket](../api/API.md#bucket-sub-resources) and
+> [object](../api/API.md#object-sub-resources) sub-resources.
 
 ## Prerequisites
 

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { FolderOpen, Upload, Download, Trash2, File as FileIcon, ArrowLeft, RefreshCw, Folder, FolderPlus, Home, Loader2, Pencil, Columns2, Info, Copy, ExternalLink, Search, X, Calendar, Filter, ChevronRight, CheckCircle2, XCircle, Link2, Check, History, Settings2, Lock, ArchiveRestore, Undo2 } from 'lucide-react'
+import BucketPolicyPanel from '../components/BucketPolicyPanel'
 import { bucketApi } from '../services/api'
 import type { DeletedObject, ObjectVersion } from '../services/api'
-import type { Object as StorageObject, Bucket } from '../types'
+import type { Object as StorageObject, Bucket, BucketPermissions } from '../types'
 import { getErrorMessage, getErrorStatus } from '../utils/errors'
 import { publicObjectUrl } from '../utils/publicUrl'
 import { useAsyncLoad } from '../utils/useAsyncLoad'
@@ -1255,6 +1256,20 @@ export default function BucketDetails() {
       setSettingsLoading(false)
     }
   }
+
+  // Which settings the caller may change (from GET /api/buckets/:name). When
+  // the backend does not report permissions, fall back to "editable" and let
+  // the server decide.
+  const canChange = (key: keyof BucketPermissions): boolean =>
+    isAdmin || (bucketInfo?.permissions ? bucketInfo.permissions[key] : true)
+  const settingsReadOnly =
+    !!bucketInfo?.permissions &&
+    !isAdmin &&
+    !(['put_versioning', 'put_lifecycle', 'put_quota', 'put_retention', 'put_notification', 'put_replication'] as const).some(
+      (k) => bucketInfo.permissions?.[k]
+    )
+  const canSaveGeneral =
+    canChange('put_quota') || canChange('put_retention') || canChange('put_notification') || canChange('put_replication')
 
   const closeBucketSettings = () => {
     setShowBucketSettings(false)
@@ -3109,6 +3124,12 @@ export default function BucketDetails() {
               </div>
             ) : (
               <div className="space-y-6">
+                {settingsReadOnly && (
+                  <div className="alert-info">
+                    You have read-only access to this bucket's settings. Changing them requires an admin or the
+                    matching bucket permission (e.g. s3:PutBucketVersioning, s3:PutLifecycleConfiguration).
+                  </div>
+                )}
                 {/* Public read access (admin only) */}
                 <div>
                   <div className="flex items-center justify-between gap-4 mb-2">
@@ -3181,6 +3202,13 @@ export default function BucketDetails() {
                   )}
                 </div>
 
+                {/* Bucket policy (view: admin or s3:GetBucketPolicy; edit: admin) */}
+                {bucketName && (
+                  <div className="pt-6 border-t border-dark-border">
+                    <BucketPolicyPanel bucketName={bucketName} isAdmin={isAdmin} canRead={canChange('get_policy')} />
+                  </div>
+                )}
+
                 {/* Versioning */}
                 <div className="pt-6 border-t border-dark-border">
                   <h3 className="text-base font-semibold text-dark-text mb-2">Versioning</h3>
@@ -3194,18 +3222,20 @@ export default function BucketDetails() {
                       <span className="badge-gray">Disabled</span>
                     )}
                   </div>
-                  <div className="flex gap-2">
-                    {bucketInfo?.versioning !== 'enabled' && (
-                      <button onClick={() => handleSetVersioning('enabled')} className="btn-primary btn-sm">
-                        Enable versioning
-                      </button>
-                    )}
-                    {bucketInfo?.versioning === 'enabled' && (
-                      <button onClick={() => handleSetVersioning('suspended')} className="btn-secondary btn-sm">
-                        Suspend
-                      </button>
-                    )}
-                  </div>
+                  {canChange('put_versioning') && (
+                    <div className="flex gap-2">
+                      {bucketInfo?.versioning !== 'enabled' && (
+                        <button onClick={() => handleSetVersioning('enabled')} className="btn-primary btn-sm">
+                          Enable versioning
+                        </button>
+                      )}
+                      {bucketInfo?.versioning === 'enabled' && (
+                        <button onClick={() => handleSetVersioning('suspended')} className="btn-secondary btn-sm">
+                          Suspend
+                        </button>
+                      )}
+                    </div>
+                  )}
                   <p className="help-text">
                     While enabled, overwritten and deleted objects keep previous versions you can restore.
                   </p>
@@ -3214,7 +3244,8 @@ export default function BucketDetails() {
                 {/* Lifecycle */}
                 <div className="pt-6 border-t border-dark-border">
                   <h3 className="text-base font-semibold text-dark-text mb-2">Lifecycle</h3>
-                  <form onSubmit={handleSaveLifecycle} className="space-y-4">
+                  <form onSubmit={handleSaveLifecycle}>
+                    <fieldset disabled={!canChange('put_lifecycle')} className="space-y-4">
                     <div>
                       <label className="label">Expire objects after (days)</label>
                       <input
@@ -3249,12 +3280,15 @@ export default function BucketDetails() {
                       />
                     </div>
                     <p className="help-text">Set both day values to 0 (or leave empty) to clear the lifecycle rules.</p>
-                    <div className="flex justify-end gap-2">
-                      <button type="submit" disabled={lifecycleSaving} className="btn-primary">
-                        {lifecycleSaving && <span className="spinner w-4! h-4!" />}
-                        {lifecycleSaving ? 'Saving...' : 'Save'}
-                      </button>
-                    </div>
+                    {canChange('put_lifecycle') && (
+                      <div className="flex justify-end gap-2">
+                        <button type="submit" disabled={lifecycleSaving} className="btn-primary">
+                          {lifecycleSaving && <span className="spinner w-4! h-4!" />}
+                          {lifecycleSaving ? 'Saving...' : 'Save'}
+                        </button>
+                      </div>
+                    )}
+                    </fieldset>
                   </form>
                 </div>
 
@@ -3269,6 +3303,7 @@ export default function BucketDetails() {
                       value={quotaMb}
                       onChange={(e) => setQuotaMb(e.target.value)}
                       placeholder="e.g. 1024"
+                      disabled={!canChange('put_quota')}
                       className="input"
                     />
                     <p className="help-text">
@@ -3292,7 +3327,7 @@ export default function BucketDetails() {
                       value={retentionDays}
                       onChange={(e) => setRetentionDays(e.target.value)}
                       placeholder="e.g. 30"
-                      disabled={bucketInfo?.versioning !== 'enabled'}
+                      disabled={bucketInfo?.versioning !== 'enabled' || !canChange('put_retention')}
                       className="input"
                     />
                     {bucketInfo?.versioning !== 'enabled' ? (
@@ -3306,7 +3341,11 @@ export default function BucketDetails() {
                 {/* Notifications & replication */}
                 <div className="pt-6 border-t border-dark-border">
                   <h3 className="text-base font-semibold text-dark-text mb-2">Notifications &amp; replication</h3>
+                  {!canChange('put_notification') && !canChange('put_replication') && (
+                    <p className="help-text mb-3">Webhook and replication settings are shown only to users who may change them.</p>
+                  )}
                   <div className="space-y-4">
+                    <fieldset disabled={!canChange('put_notification')} className="space-y-4">
                     <div>
                       <label className="label">Webhook URL</label>
                       <input
@@ -3354,6 +3393,7 @@ export default function BucketDetails() {
                         </label>
                       </div>
                     </div>
+                    </fieldset>
                     <div>
                       <label className="label">Replicate to bucket</label>
                       <input
@@ -3361,6 +3401,7 @@ export default function BucketDetails() {
                         value={replicateTo}
                         onChange={(e) => setReplicateTo(e.target.value)}
                         placeholder="e.g. backups"
+                        disabled={!canChange('put_replication')}
                         className="input font-mono"
                       />
                       <p className="help-text">
@@ -3368,6 +3409,7 @@ export default function BucketDetails() {
                       </p>
                     </div>
                   </div>
+                  {canSaveGeneral && (
                   <div className="flex justify-end mt-5">
                     <button
                       onClick={handleSaveGeneralSettings}
@@ -3378,6 +3420,7 @@ export default function BucketDetails() {
                       {generalSaving ? 'Saving...' : 'Save settings'}
                     </button>
                   </div>
+                  )}
                 </div>
               </div>
             )}

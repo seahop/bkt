@@ -116,7 +116,8 @@
       text-sm text-dark-text placeholder-dark-textMuted
       transition-colors duration-150
       hover:border-dark-borderStrong
-      focus:outline-hidden focus:ring-2 focus:ring-blue-500/60 focus:border-blue-500/50;
+      focus:outline-hidden focus:ring-2 focus:ring-blue-500/60 focus:border-blue-500/50
+      disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:border-dark-border;
 }
 
 @utility label {

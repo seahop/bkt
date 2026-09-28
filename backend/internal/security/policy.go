@@ -20,9 +20,9 @@ type PolicyDocument struct {
 type PolicyStatement struct {
 	Sid       string                 `json:"Sid,omitempty"`       // Statement ID
 	Effect    string                 `json:"Effect"`              // "Allow" or "Deny"
-	Principal interface{}            `json:"Principal,omitempty"` // Optional: "*" or [usernames]. Absent = applies to all. Used by bucket policies to scope a statement to specific users.
-	Action    []string               `json:"Action"`              // Actions this statement applies to
-	Resource  []string               `json:"Resource"`            // Resources this statement applies to
+	Principal interface{}            `json:"Principal,omitempty"` // Optional: "*", a username, [usernames], or the AWS form {"AWS": ...} (see principalEntries). Absent = applies to all. Used by bucket policies to scope a statement to specific users.
+	Action    StringList             `json:"Action"`              // Actions this statement applies to ("s3:X" or ["s3:X", ...])
+	Resource  StringList             `json:"Resource"`            // Resources this statement applies to (a string or an array)
 	Condition map[string]interface{} `json:"Condition,omitempty"` // NOT evaluated — rejected on create/update (see validateStatement)
 
 	// Unsupported IAM elements. They are declared (rather than left unknown) so
@@ -34,6 +34,29 @@ type PolicyStatement struct {
 	NotPrincipal interface{} `json:"NotPrincipal,omitempty"`
 	NotAction    interface{} `json:"NotAction,omitempty"`
 	NotResource  interface{} `json:"NotResource,omitempty"`
+}
+
+// StringList is a policy element that AWS allows as either a single string or
+// an array of strings ("Action": "s3:GetObject" ≡ "Action": ["s3:GetObject"]).
+// It always marshals as an array. The stored document keeps the form it was
+// written in (only the parsed copy is normalized), so
+// accepting the string form changes nothing about evaluation.
+type StringList []string
+
+// UnmarshalJSON accepts a JSON string or an array of strings.
+func (l *StringList) UnmarshalJSON(data []byte) error {
+	var one string
+	if err := json.Unmarshal(data, &one); err == nil {
+		*l = StringList{one}
+		return nil
+	}
+	var many []string
+	if err := json.Unmarshal(data, &many); err != nil {
+		return errors.New("Action and Resource must each be a string or an array of strings") //nolint:staticcheck // ST1005: starts with the policy element name
+
+	}
+	*l = many
+	return nil
 }
 
 // unsupportedElements lists the statement elements bkt cannot evaluate
@@ -339,33 +362,92 @@ func validateSid(sid string) error {
 	return nil
 }
 
-// validatePrincipal validates a Principal field: it must be a string ("*" or a
-// username) or an array of such strings. The AWS object form ({"AWS": …}) is
-// intentionally rejected — bkt principals are usernames.
-func validatePrincipal(principal interface{}) error {
+// principalHelp is appended to Principal validation errors.
+const principalHelp = `supported forms are "*", a bkt username, an array of usernames, or {"AWS": ...} with "*", usernames, or IAM user ARNs (arn:aws:iam::<account>:user/<username>)`
+
+// principalEntries returns the principal strings of a statement's Principal
+// in any accepted form: "*" or a username, an array of them, or the AWS
+// object form {"AWS": <string or array>}. In the object form only the "AWS"
+// key names bkt users; other keys (Service, Federated, CanonicalUser) can
+// never match a bkt user, and strict validation rejects them. ok is false
+// for an unrecognized shape.
+func principalEntries(principal interface{}) (entries []string, ok bool) {
 	switch p := principal.(type) {
 	case string:
-		if len(p) > 200 {
+		return []string{p}, true
+	case []interface{}:
+		out := make([]string, 0, len(p))
+		for _, v := range p {
+			s, isStr := v.(string)
+			if !isStr {
+				return nil, false
+			}
+			out = append(out, s)
+		}
+		return out, true
+	case map[string]interface{}:
+		aws, has := p["AWS"]
+		if !has {
+			return []string{}, true
+		}
+		if _, nested := aws.(map[string]interface{}); nested {
+			return nil, false
+		}
+		return principalEntries(aws)
+	default:
+		return nil, false
+	}
+}
+
+// principalUsername maps one principal entry to the bkt username it names:
+// "*" stays "*", an IAM user ARN "arn:aws:iam::<account>:user/[path/]name"
+// becomes "name", and anything else is taken as a username. ok is false for
+// an ARN that does not name a user (root, role, assumed-role, ...).
+func principalUsername(entry string) (string, bool) {
+	if !strings.HasPrefix(entry, "arn:") {
+		return entry, true
+	}
+	parts := strings.SplitN(entry, ":", 6)
+	if len(parts) != 6 || parts[2] != "iam" || !strings.HasPrefix(parts[5], "user/") {
+		return "", false
+	}
+	name := parts[5][strings.LastIndex(parts[5], "/")+1:]
+	if name == "" || strings.Contains(name, "*") {
+		return "", false
+	}
+	return name, true
+}
+
+// validatePrincipal validates a Principal field (see principalEntries for the
+// accepted forms). Object-form keys other than "AWS", and ARNs that do not
+// name an IAM user, are rejected with a message listing the supported forms.
+func validatePrincipal(principal interface{}) error {
+	if m, isMap := principal.(map[string]interface{}); isMap {
+		for k := range m {
+			if k != "AWS" {
+				return fmt.Errorf("principal type %q is not supported: %s", k, principalHelp)
+			}
+		}
+		if _, has := m["AWS"]; !has {
+			return fmt.Errorf("principal object must contain an \"AWS\" key: %s", principalHelp)
+		}
+	}
+	entries, ok := principalEntries(principal)
+	if !ok {
+		return fmt.Errorf("invalid principal: %s", principalHelp)
+	}
+	if len(entries) > 50 {
+		return fmt.Errorf("statement cannot contain more than 50 principals")
+	}
+	for _, e := range entries {
+		if len(e) > 200 {
 			return fmt.Errorf("principal too long (max 200 characters)")
 		}
-		return nil
-	case []interface{}:
-		if len(p) > 50 {
-			return fmt.Errorf("statement cannot contain more than 50 principals")
+		if _, ok := principalUsername(e); !ok {
+			return fmt.Errorf("principal %q is not supported: %s", e, principalHelp)
 		}
-		for _, v := range p {
-			s, ok := v.(string)
-			if !ok {
-				return fmt.Errorf("principal entries must be strings")
-			}
-			if len(s) > 200 {
-				return fmt.Errorf("principal too long (max 200 characters)")
-			}
-		}
-		return nil
-	default:
-		return fmt.Errorf("principal must be a string or an array of strings")
 	}
+	return nil
 }
 
 // isAlphanumeric checks if a string contains only alphanumeric characters
@@ -444,30 +526,29 @@ func matchesDenyConservatively(st *PolicyStatement, ctx *PolicyEvaluationContext
 }
 
 // matchesPrincipal reports whether a statement's Principal applies to the
-// requester. A nil Principal applies to everyone. "*" matches everyone;
-// otherwise the username must be listed. An anonymous requester has no
+// requester. A nil Principal applies to everyone. "*" (also {"AWS": "*"})
+// matches everyone; otherwise the username must be listed, directly or as an
+// IAM user ARN (see principalUsername). An anonymous requester has no
 // username, so only nil and "*" match it. An unrecognized form fails closed
 // (no match).
 func matchesPrincipal(principal interface{}, ctx *PolicyEvaluationContext) bool {
 	if principal == nil {
 		return true
 	}
-	matches := func(s string) bool {
-		return s == "*" || (!ctx.Anonymous && s == ctx.Username)
+	entries, ok := principalEntries(principal)
+	if !ok {
+		return false
 	}
-	switch p := principal.(type) {
-	case string:
-		return matches(p)
-	case []interface{}:
-		for _, v := range p {
-			if s, ok := v.(string); ok && matches(s) {
-				return true
-			}
+	for _, e := range entries {
+		name, ok := principalUsername(e)
+		if !ok {
+			continue
 		}
-		return false
-	default:
-		return false
+		if name == "*" || (!ctx.Anonymous && name != "" && name == ctx.Username) {
+			return true
+		}
 	}
+	return false
 }
 
 // matchesAction checks if an action matches any pattern in the list. Action

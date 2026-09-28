@@ -11,6 +11,7 @@ your bkt access key with `s3.addressing_style = path` (see
 - [Retention (WORM)](#retention-worm)
 - [Presigned share links](#presigned-share-links)
 - [Public buckets](#public-buckets)
+- [Bucket policies](#bucket-policies)
 - [User metadata and tags](#user-metadata-and-tags)
 - [Event notifications (webhooks)](#event-notifications-webhooks)
 - [Groups](#groups)
@@ -196,6 +197,48 @@ Details:
 - Anonymous downloads are visible in the access log and request metrics, but
   are not written to the audit log.
 
+## Bucket policies
+
+A bucket policy adds per-bucket rules on top of user and group policies —
+typically a `Deny` that carves a prefix out for everyone, or an `Allow` that
+gives a named user access to one bucket. Explicit Deny wins over any Allow.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "DenySecret", "Effect": "Deny", "Principal": "*",
+    "Action": ["s3:GetObject"], "Resource": ["arn:aws:s3:::my-bucket/secret/*"]
+  }]
+}
+```
+
+`Principal` is `"*"` (every bkt user), a bkt username or list of usernames;
+the AWS form `{"AWS": ["alice", "arn:aws:iam::123456789012:user/bob"]}` is
+accepted too (the ARN's last segment is the bkt username). `Condition` and the
+`Not*` elements are rejected. Anonymous (public) access is **not** granted by
+policies — that is the separate *Public read access* switch.
+
+**Console**: *Bucket settings → Bucket policy* shows the current policy to
+anyone allowed to read it (admin or `s3:GetBucketPolicy`). *Bucket settings*
+opens for anyone with `s3:ListBucket`, `s3:GetBucketLocation` or
+`s3:GetBucketPolicy` on the bucket; settings they may not change are shown
+read-only. Admins get an
+editor with templates ("Deny everyone access to secret/*", "Allow a user
+read-only", ...), validation on save, and *Delete policy*.
+**S3**:
+
+```bash
+aws s3api put-bucket-policy --bucket my-bucket --policy file://policy.json
+aws s3api get-bucket-policy --bucket my-bucket
+aws s3api get-bucket-policy-status --bucket my-bucket   # IsPublic = public read access
+aws s3api delete-bucket-policy --bucket my-bucket
+```
+
+Setting and deleting are admin-only (console, REST and S3 alike) and are
+audit-logged as `bucket.policy.set` / `bucket.policy.delete`. Details:
+[Policies → Bucket policies](../api/policies.md#bucket-policies).
+
 ## User metadata and tags
 
 `x-amz-meta-*` headers on upload (or multipart initiate) are persisted,
@@ -323,7 +366,10 @@ Configure in bucket Settings → Replication.
 ## Server-side encryption
 
 - **External S3 backend**: set `S3_SSE=true` and every object bkt writes to
-  the backing S3 carries SSE-S3 (AES256).
+  the backing S3 carries SSE-S3 (AES256). S3 clients see this as the bucket's
+  default encryption (`GET /<bucket>?encryption` → `AES256`) on S3-backed
+  buckets; local-backend buckets answer
+  `ServerSideEncryptionConfigurationNotFoundError`.
 - **Local backend**: bkt does not encrypt object bytes at rest — use
   disk-level encryption (LUKS/dm-crypt) on the storage volume. (Streaming
   application-level encryption that preserves HTTP Range requests is a

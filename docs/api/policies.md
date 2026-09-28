@@ -37,9 +37,9 @@ Policies use AWS IAM-compatible JSON format:
 - **Statement:** Array of policy statements (max 20)
 - **Sid:** Optional statement ID (alphanumeric, hyphens, underscores)
 - **Effect:** Either `"Allow"` or `"Deny"`
-- **Principal:** Optional. `"*"` or an array of usernames. Used in **bucket policies** to scope a statement to specific users. **If omitted, the statement applies to all authenticated users** — so an Allow with no Principal grants everyone. (Ignored on user/identity policies, which are already scoped to the user they're attached to.)
-- **Action:** Array of actions (`service:action` format)
-- **Resource:** Array of resource patterns
+- **Principal:** Optional. Used in **bucket policies** to scope a statement to specific users. Accepted forms: `"*"`, a bkt username, an array of usernames, or the AWS object form `{"AWS": ...}` whose value is `"*"`, a username, an IAM user ARN `arn:aws:iam::<account>:user/<username>` (the account id and any path are ignored — only the final `<username>` is matched against bkt usernames), or an array of those. `"*"` / `{"AWS": "*"}` means every bkt user (and, for Deny statements, anonymous public-read requests). **If omitted, the statement applies to all authenticated users** — so an Allow with no Principal grants everyone. Other principal types (`Service`, `Federated`, `CanonicalUser`) and ARNs that do not name a user (`:root`, `:role/...`, wildcards) are rejected with a message listing the supported forms. (Ignored on user/identity policies, which are already scoped to the user they're attached to.)
+- **Action:** An action (`service:action` format) or an array of them — `"Action": "s3:GetObject"` is the same as `["s3:GetObject"]`
+- **Resource:** A resource pattern or an array of them
 - **Id:** Optional document identifier (informational only)
 
 **Not supported (rejected):** `Condition`, `NotPrincipal`, `NotAction`,
@@ -67,7 +67,7 @@ denies at least as much as written).
 - Actions must be in `service:action` format
 - Resources cannot contain `..` (path traversal prevention)
 - Statement must have at least one action and resource
-- Principal (if present) must be a string or an array of strings
+- Principal (if present) must use one of the forms listed above
 - No `Condition` / `NotPrincipal` / `NotAction` / `NotResource` / unknown elements
 
 ## Endpoints
@@ -544,6 +544,11 @@ action below on the bucket resource (`arn:aws:s3:::bucket`):
 | `s3:PutBucketObjectLockConfiguration` | WORM `retention_days` |
 | `s3:PutBucketQuota` | `quota_bytes` (bkt extension) |
 
+Reading a bucket's settings (`GET /api/buckets/{name}`, the console's
+*Bucket settings*) needs any one of `s3:ListBucket`, `s3:GetBucketLocation`
+or `s3:GetBucketPolicy`; the response's `permissions` tells the console which
+of the settings above the caller may change.
+
 `s3:*` covers all of them. Setting `replicate_to` additionally requires
 `s3:GetObject` on every object of the source (`arn:aws:s3:::source/*`) and
 `s3:PutObject` + `s3:DeleteObject` on every object of the target
@@ -555,6 +560,68 @@ that user's current `s3:GetObject` (source key), `s3:PutObject` (target key)
 and `s3:DeleteObject` (target key, for mirrored deletions) per object, so an
 explicit Deny on a prefix or a single key — or a later revocation — is
 honored. A deleted or locked configurer disables the replication.
+
+### Bucket policies
+
+A bucket policy is a resource policy attached to one bucket. It is evaluated
+together with the caller's user and group policies (see the rules above: an
+explicit Deny from either side wins; otherwise an Allow from either side
+grants). Statements are scoped with `Principal` (bkt usernames or `"*"`); an
+Allow for `"*"` grants every **signed-in** bkt user, never unsigned requests —
+anonymous access exists only through the bucket's
+[public read access](buckets-and-objects.md#public-read-buckets) flag, which is
+a separate admin setting. A `"*"` Deny does apply to anonymous public reads.
+
+| Operation | Console / REST | S3 API | Who |
+|---|---|---|---|
+| Read | *Bucket settings → Bucket policy*, `GET /api/buckets/{name}/policy` | `GET /{bucket}?policy` | admin, or `s3:GetBucketPolicy` on the bucket |
+| Set / replace | *Bucket settings → Bucket policy → Edit*, `PUT /api/buckets/{name}/policy` | `PUT /{bucket}?policy` | admin only |
+| Delete | *Bucket settings → Bucket policy → Delete policy*, `DELETE /api/buckets/{name}/policy` | `DELETE /{bucket}?policy` | admin only |
+| Public status | *Bucket settings → Public read access* | `GET /{bucket}?policyStatus` | admin, or `s3:ListBucket` on the bucket |
+
+Setting or deleting a bucket policy is admin-only on every path — a user
+policy granting `s3:PutBucketPolicy` does **not** let a non-admin change it
+(that could be used to grant themselves anything on the bucket). `s3:*`
+covers `s3:GetBucketPolicy`. Changes are audit-logged as `bucket.policy.set` /
+`bucket.policy.delete` with the new and previous documents and `via`
+(`console` or `s3`).
+
+The same strict validation applies everywhere (see
+[Validation Rules](#validation-rules): no `Condition`/`Not*`, max 10 KB).
+Documents are stored in PostgreSQL `jsonb`, so reading one back returns the
+same JSON with normalized whitespace and key order.
+
+#### Bucket policies over the S3 API
+
+```bash
+cat > policy.json <<'JSON'
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "DenySecret",
+    "Effect": "Deny",
+    "Principal": {"AWS": "*"},
+    "Action": "s3:GetObject",
+    "Resource": "arn:aws:s3:::my-bucket/secret/*"
+  }]
+}
+JSON
+aws --endpoint-url https://localhost:9000 s3api put-bucket-policy --bucket my-bucket --policy file://policy.json
+aws --endpoint-url https://localhost:9000 s3api get-bucket-policy --bucket my-bucket
+aws --endpoint-url https://localhost:9000 s3api get-bucket-policy-status --bucket my-bucket
+aws --endpoint-url https://localhost:9000 s3api delete-bucket-policy --bucket my-bucket
+```
+
+- `GET ?policy` → `200` with the document as `application/json`, or `404 NoSuchBucketPolicy`.
+- `PUT ?policy` → `204`. An invalid document → `400 MalformedPolicy` with the
+  validator's message (e.g. `Condition is not supported yet`, or the list of
+  supported `Principal` forms); a body over 20 KB → `400 MaxMessageLengthExceeded`.
+  The body is covered by the SigV4 payload hash like any other.
+- `DELETE ?policy` → `204`, also when there is no policy.
+- `GET ?policyStatus` → `<PolicyStatus><IsPublic>true|false</IsPublic></PolicyStatus>`,
+  where `IsPublic` is the bucket's public read access flag. Bucket-policy
+  Allow statements never make a bucket public in bkt (they only grant bkt
+  users), so they do not affect it.
 
 ### Resource Matching
 

@@ -550,7 +550,7 @@ func (h *BucketHandler) ListBuckets(c *gin.Context) {
 
 // GetBucket returns details of a specific bucket
 // @Summary Get a bucket
-// @Description Returns the details of a specific bucket by name. Requires GetBucketLocation permission.
+// @Description Returns the details of a specific bucket by name. Requires admin or any of s3:ListBucket, s3:GetBucketLocation, s3:GetBucketPolicy on the bucket. Non-admins get a reduced view (no s3_config_id or owner record; webhook URL/events and replication target only with the permission to change them).
 // @Tags buckets
 // @Accept json
 // @Produce json
@@ -574,14 +574,23 @@ func (h *BucketHandler) GetBucket(c *gin.Context) {
 		return
 	}
 
-	// Check policy permissions
-	allowed, err := h.policyService.CheckBucketAccess(userUUID, bucketName, services.ActionGetBucketLocation)
+	// One batched evaluation covers both the access decision and the
+	// permissions reported to the console.
+	perms, err := h.policyService.CheckBucketActions(userUUID, bucketName, bucketPermissionActions)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error:   "Policy check failed",
 			Message: err.Error(),
 		})
 		return
+	}
+	// Any bucket-level read grant opens the bucket details (the console's
+	// Bucket settings): s3:ListBucket (e.g. the read-only template — such
+	// callers already see this same reduced view in GET /api/buckets),
+	// s3:GetBucketLocation, or s3:GetBucketPolicy. Admins pass every check.
+	allowed := false
+	for _, action := range bucketDetailsActions {
+		allowed = allowed || perms[action]
 	}
 	if !allowed {
 		c.JSON(http.StatusForbidden, models.ErrorResponse{
@@ -598,25 +607,77 @@ func (h *BucketHandler) GetBucket(c *gin.Context) {
 		publicURLBase = h.s3PublicEndpoint(c) + "/" + bucket.Name
 	}
 
-	if isAdmin, _ := c.Get("is_admin"); isAdmin == true {
-		c.JSON(http.StatusOK, adminBucketView{Bucket: bucket, PublicURLBase: publicURLBase})
+	isAdmin := c.GetBool("is_admin")
+	pv := newBucketPermissionsView(perms, isAdmin)
+	if isAdmin {
+		c.JSON(http.StatusOK, adminBucketView{Bucket: bucket, PublicURLBase: publicURLBase, Permissions: pv})
 		return
 	}
 	// Non-admins get the reduced view; the webhook URL (a bearer secret for
 	// many receivers) and replication target are shown only to callers who
 	// may change them.
-	showNotification, _ := h.policyService.CheckBucketAccess(userUUID, bucketName, services.ActionPutBucketNotification)
-	showReplication, _ := h.policyService.CheckBucketAccess(userUUID, bucketName, services.ActionPutReplicationConfiguration)
-	v := newBucketView(&bucket, showNotification, showReplication)
+	v := newBucketView(&bucket, perms[services.ActionPutBucketNotification], perms[services.ActionPutReplicationConfiguration])
 	v.PublicURLBase = publicURLBase
+	v.Permissions = pv
 	c.JSON(http.StatusOK, v)
+}
+
+// bucketDetailsActions are the bucket-level actions any one of which lets a
+// caller read GET /api/buckets/:name.
+var bucketDetailsActions = []string{
+	services.ActionListBucket,
+	services.ActionGetBucketLocation,
+	services.ActionGetBucketPolicy,
+}
+
+// bucketPermissionActions are evaluated (in one batch) by GetBucket.
+var bucketPermissionActions = []string{
+	services.ActionListBucket,
+	services.ActionGetBucketLocation,
+	services.ActionGetBucketPolicy,
+	services.ActionPutBucketVersioning,
+	services.ActionPutLifecycleConfiguration,
+	services.ActionPutBucketQuota,
+	services.ActionPutBucketObjectLockConfiguration,
+	services.ActionPutBucketNotification,
+	services.ActionPutReplicationConfiguration,
+}
+
+// bucketPermissionsView tells the console which bucket settings the caller
+// may change, so it can render the others read-only. It is advisory: every
+// write endpoint still authorizes on its own.
+type bucketPermissionsView struct {
+	GetPolicy       bool `json:"get_policy"`
+	PutPolicy       bool `json:"put_policy"`        // admin only
+	PutPublicAccess bool `json:"put_public_access"` // admin only
+	PutVersioning   bool `json:"put_versioning"`
+	PutLifecycle    bool `json:"put_lifecycle"`
+	PutQuota        bool `json:"put_quota"`
+	PutRetention    bool `json:"put_retention"`
+	PutNotification bool `json:"put_notification"`
+	PutReplication  bool `json:"put_replication"`
+}
+
+func newBucketPermissionsView(perms map[string]bool, isAdmin bool) *bucketPermissionsView {
+	return &bucketPermissionsView{
+		GetPolicy:       isAdmin || perms[services.ActionGetBucketPolicy],
+		PutPolicy:       isAdmin,
+		PutPublicAccess: isAdmin,
+		PutVersioning:   isAdmin || perms[services.ActionPutBucketVersioning],
+		PutLifecycle:    isAdmin || perms[services.ActionPutLifecycleConfiguration],
+		PutQuota:        isAdmin || perms[services.ActionPutBucketQuota],
+		PutRetention:    isAdmin || perms[services.ActionPutBucketObjectLockConfiguration],
+		PutNotification: isAdmin || perms[services.ActionPutBucketNotification],
+		PutReplication:  isAdmin || perms[services.ActionPutReplicationConfiguration],
+	}
 }
 
 // adminBucketView is the full bucket record returned to admins by GetBucket,
 // plus public_url_base for public-read buckets.
 type adminBucketView struct {
 	models.Bucket
-	PublicURLBase string `json:"public_url_base,omitempty"`
+	PublicURLBase string                 `json:"public_url_base,omitempty"`
+	Permissions   *bucketPermissionsView `json:"permissions,omitempty"`
 }
 
 // DeleteBucket deletes a bucket and all its contents
@@ -815,7 +876,7 @@ func (h *BucketHandler) DeleteBucket(c *gin.Context) {
 
 // SetBucketPolicy sets an access policy on a bucket
 // @Summary Set bucket policy
-// @Description Admin-only. Sets an S3-style access policy document on the specified bucket. Requires PutBucketPolicy permission.
+// @Description Admin-only. Sets an S3-style access policy document on the specified bucket (strictly validated; the same JSON is returned by GET). Audit-logged as bucket.policy.set.
 // @Tags buckets
 // @Accept json
 // @Produce json
@@ -860,7 +921,14 @@ func (h *BucketHandler) SetBucketPolicy(c *gin.Context) {
 		return
 	}
 
-	// Set bucket policy using the service
+	var bucket models.Bucket
+	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "Bucket not found"})
+		return
+	}
+
+	// Set bucket policy using the service (strict validation)
+	previous, _ := h.policyService.GetBucketPolicy(bucketName)
 	if err := h.policyService.SetBucketPolicy(bucketName, req.Policy); err != nil {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error:   "Failed to set bucket policy",
@@ -868,15 +936,63 @@ func (h *BucketHandler) SetBucketPolicy(c *gin.Context) {
 		})
 		return
 	}
+	auditBucketPolicyChange(c, userUUID, c.GetString("username"), &bucket, "console", previous, &req.Policy)
 
 	c.JSON(http.StatusOK, models.SuccessResponse{
 		Message: "Bucket policy set successfully",
 	})
 }
 
+// DeleteBucketPolicy removes a bucket's access policy
+// @Summary Delete bucket policy
+// @Description Admin-only. Removes the bucket policy (idempotent: succeeds when the bucket has none). Audit-logged as bucket.policy.delete.
+// @Tags buckets
+// @Produce json
+// @Param name path string true "Bucket name"
+// @Success 200 {object} models.SuccessResponse
+// @Failure 403 {object} models.ErrorResponse
+// @Failure 404 {object} models.ErrorResponse
+// @Failure 500 {object} models.ErrorResponse
+// @Security BearerAuth
+// @Router /api/buckets/{name}/policy [delete]
+func (h *BucketHandler) DeleteBucketPolicy(c *gin.Context) {
+	bucketName := c.Param("name")
+	userID, _ := c.Get("user_id")
+	userUUID := userID.(uuid.UUID)
+
+	// Admin only (AdminMiddleware on the route); re-checked against the
+	// database so a just-demoted admin is refused.
+	allowed, err := h.policyService.CheckBucketAccess(userUUID, bucketName, services.ActionPutBucketPolicy)
+	if err != nil || !allowed || !c.GetBool("is_admin") {
+		c.JSON(http.StatusForbidden, models.ErrorResponse{
+			Error:   "Permission denied",
+			Message: "Only an admin can delete a bucket policy",
+		})
+		return
+	}
+
+	var bucket models.Bucket
+	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "Bucket not found"})
+		return
+	}
+	previous, _ := h.policyService.GetBucketPolicy(bucketName)
+	if err := h.policyService.DeleteBucketPolicy(bucketName); err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to delete bucket policy",
+			Message: err.Error(),
+		})
+		return
+	}
+	if previous != nil {
+		auditBucketPolicyChange(c, userUUID, c.GetString("username"), &bucket, "console", previous, nil)
+	}
+	c.JSON(http.StatusOK, models.SuccessResponse{Message: "Bucket policy deleted"})
+}
+
 // GetBucketPolicy retrieves the access policy for a bucket
 // @Summary Get bucket policy
-// @Description Returns the S3-style access policy document for the specified bucket. Requires GetBucketPolicy permission.
+// @Description Returns the S3-style access policy document for the specified bucket. Requires admin or s3:GetBucketPolicy on the bucket. 404 when the bucket has no policy.
 // @Tags buckets
 // @Accept json
 // @Produce json

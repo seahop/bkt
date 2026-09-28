@@ -604,7 +604,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "Returns the details of a specific bucket by name. Requires GetBucketLocation permission.",
+                "description": "Returns the details of a specific bucket by name. Requires admin or any of s3:ListBucket, s3:GetBucketLocation, s3:GetBucketPolicy on the bucket. Non-admins get a reduced view (no s3_config_id or owner record; webhook URL/events and replication target only with the permission to change them).",
                 "consumes": [
                     "application/json"
                 ],
@@ -1622,7 +1622,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "Returns the S3-style access policy document for the specified bucket. Requires GetBucketPolicy permission.",
+                "description": "Returns the S3-style access policy document for the specified bucket. Requires admin or s3:GetBucketPolicy on the bucket. 404 when the bucket has no policy.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1675,7 +1675,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "Admin-only. Sets an S3-style access policy document on the specified bucket. Requires PutBucketPolicy permission.",
+                "description": "Admin-only. Sets an S3-style access policy document on the specified bucket (strictly validated; the same JSON is returned by GET). Audit-logged as bucket.policy.set.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1719,6 +1719,56 @@ const docTemplate = `{
                     },
                     "403": {
                         "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Admin-only. Removes the bucket policy (idempotent: succeeds when the bucket has none). Audit-logged as bucket.policy.delete.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "buckets"
+                ],
+                "summary": "Delete bucket policy",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Bucket name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.SuccessResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/models.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
                         "schema": {
                             "$ref": "#/definitions/models.ErrorResponse"
                         }

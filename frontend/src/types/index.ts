@@ -53,10 +53,25 @@ export interface Bucket {
   replicate_to?: string
   // Base of unsigned object URLs (<S3 endpoint>/<bucket>); set on public-read buckets by GET /api/buckets/:name
   public_url_base?: string
+  // What the caller may change (GET /api/buckets/:name only; advisory —
+  // every write is authorized server-side).
+  permissions?: BucketPermissions
   created_at: string
   updated_at: string
   owner?: User
   s3_config?: S3Configuration
+}
+
+export interface BucketPermissions {
+  get_policy: boolean
+  put_policy: boolean
+  put_public_access: boolean
+  put_versioning: boolean
+  put_lifecycle: boolean
+  put_quota: boolean
+  put_retention: boolean
+  put_notification: boolean
+  put_replication: boolean
 }
 
 export interface Object {

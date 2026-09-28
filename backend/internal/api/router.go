@@ -160,10 +160,14 @@ func registerS3Routes(r gin.IRoutes, s3Handler *S3APIHandler) {
 	r.GET("/", s3Handler.ListBuckets)
 
 	// Bucket-level operations
+	// Each bucket-level method dispatches its query sub-resource explicitly
+	// (see s3_bucket_subresources.go); unimplemented ones are 501, never a
+	// listing or the create-bucket probe.
 	r.HEAD("/:bucket", s3Handler.HeadBucket)
-	r.GET("/:bucket", s3Handler.ListObjects)
-	r.POST("/:bucket", s3Handler.HandleBucketPost) // e.g. ?delete for bulk delete
-	r.PUT("/:bucket", s3Handler.CreateBucket)      // 409 BucketAlreadyOwnedByYou for an existing bucket
+	r.GET("/:bucket", s3Handler.ListObjects)           // listing, ?policy, ?acl, ?location, ...
+	r.POST("/:bucket", s3Handler.HandleBucketPost)     // ?delete (bulk delete)
+	r.PUT("/:bucket", s3Handler.CreateBucket)          // ?policy/?versioning/?lifecycle; plain PUT: 409 BucketAlreadyOwnedByYou for an existing bucket
+	r.DELETE("/:bucket", s3Handler.HandleBucketDelete) // ?policy/?lifecycle; plain DELETE: console-only
 
 	// Object-level operations
 	r.HEAD("/:bucket/*key", BucketOr(s3Handler.HeadBucket, s3Handler.HeadObject))
@@ -171,9 +175,9 @@ func registerS3Routes(r gin.IRoutes, s3Handler *S3APIHandler) {
 	// nosniff and serves active content (HTML/SVG/XML/JS) as an attachment
 	// so a presigned link can't render uploader-controlled markup.
 	r.GET("/:bucket/*key", middleware.S3ObjectResponseHeaders(), BucketOr(s3Handler.ListObjects, s3Handler.GetObject))
-	r.PUT("/:bucket/*key", BucketOr(s3Handler.CreateBucket, s3Handler.PutObject))                   // also handles UploadPart (?partNumber&uploadId)
-	r.POST("/:bucket/*key", BucketOr(s3Handler.HandleBucketPost, s3Handler.HandleObjectPost))       // CreateMultipartUpload (?uploads) or CompleteMultipartUpload (?uploadId)
-	r.DELETE("/:bucket/*key", BucketOr(s3Handler.DeleteBucketNotSupported, s3Handler.DeleteObject)) // also handles AbortMultipartUpload (?uploadId)
+	r.PUT("/:bucket/*key", BucketOr(s3Handler.CreateBucket, s3Handler.PutObject))             // also handles UploadPart (?partNumber&uploadId)
+	r.POST("/:bucket/*key", BucketOr(s3Handler.HandleBucketPost, s3Handler.HandleObjectPost)) // CreateMultipartUpload (?uploads) or CompleteMultipartUpload (?uploadId)
+	r.DELETE("/:bucket/*key", BucketOr(s3Handler.HandleBucketDelete, s3Handler.DeleteObject)) // also handles AbortMultipartUpload (?uploadId)
 }
 
 // newEngine is gin.Default() with the access logger swapped for one that
@@ -298,9 +302,10 @@ func registerAPIRoutes(router *gin.Engine, cfg *config.Config) {
 				buckets.GET("", bucketHandler.ListBuckets)
 				buckets.POST("", middleware.AdminMiddleware(), bucketHandler.CreateBucket) // Admin only
 				buckets.GET("/:name", bucketHandler.GetBucket)
-				buckets.DELETE("/:name", middleware.AdminMiddleware(), bucketHandler.DeleteBucket)        // Admin only
-				buckets.PUT("/:name/policy", middleware.AdminMiddleware(), bucketHandler.SetBucketPolicy) // Admin only
-				buckets.GET("/:name/policy", bucketHandler.GetBucketPolicy)
+				buckets.DELETE("/:name", middleware.AdminMiddleware(), bucketHandler.DeleteBucket)              // Admin only
+				buckets.PUT("/:name/policy", middleware.AdminMiddleware(), bucketHandler.SetBucketPolicy)       // Admin only
+				buckets.GET("/:name/policy", bucketHandler.GetBucketPolicy)                                     // admin or s3:GetBucketPolicy
+				buckets.DELETE("/:name/policy", middleware.AdminMiddleware(), bucketHandler.DeleteBucketPolicy) // Admin only
 
 				// Object routes within a bucket - use :name to match the bucket parameter above
 				buckets.GET("/:name/objects", bucketHandler.ListObjects)

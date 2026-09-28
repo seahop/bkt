@@ -101,9 +101,26 @@ Get details of a specific bucket.
 
 **Authentication:** Required
 
-**Authorization:**
-- Users can only access their own buckets
-- Admins can access any bucket
+**Authorization:** admin, or **any one** of `s3:ListBucket`,
+`s3:GetBucketLocation`, `s3:GetBucketPolicy` on the bucket (so the console's
+read-only template — `s3:GetObject` + `s3:ListBucket` — can open *Bucket
+settings*). Non-admins get a reduced view: the owner as `{id, username}` only
+(no email or other user fields), no `s3_config_id`, and `webhook_url` /
+`webhook_events` / `replicate_to` only when they may change them
+(`s3:PutBucketNotification` / `s3:PutReplicationConfiguration`); the webhook
+secret is never returned. Admins get the full record.
+
+`permissions` reports what the caller may change (advisory — every write
+endpoint authorizes on its own); the console renders the other settings
+read-only:
+
+```json
+"permissions": {
+  "get_policy": false, "put_policy": false, "put_public_access": false,
+  "put_versioning": false, "put_lifecycle": false, "put_quota": false,
+  "put_retention": false, "put_notification": false, "put_replication": false
+}
+```
 
 For a public-read bucket the response also carries `public_url_base`
 (`<S3 endpoint>/<bucket>`, from `S3_PUBLIC_ENDPOINT` or derived like presigned
@@ -123,14 +140,14 @@ percent-encoded, to get the object's unsigned download URL.
   "updated_at": "timestamp",
   "owner": {
     "id": "uuid",
-    "username": "user",
-    "email": "user@example.com"
-  }
+    "username": "user"
+  },
+  "permissions": { "get_policy": true, "put_versioning": false, "...": "..." }
 }
 ```
 
 **Error Responses:**
-- `403 Forbidden` - Access denied
+- `403 Forbidden` - None of the read actions above
 - `404 Not Found` - Bucket not found
 
 ---
@@ -509,6 +526,12 @@ What is public, precisely:
 
 `is_public` is set at creation (admin only, like bucket creation) and can be
 changed later by an admin through [bucket settings](#public-read-access-is_public).
+It is **not** a bucket-policy setting: bucket policies never grant unsigned
+access (an Allow for `"*"` means every signed-in bkt user), and S3
+`PUT /<bucket>?acl` is not supported (`501`). S3 clients can read the flag
+through `GET /<bucket>?policyStatus` (`IsPublic`) and `GET /<bucket>?acl`
+(an `AllUsers` `READ` grant while it is on — for bkt that means object reads
+only, not listing).
 The console's Share dialog shows the direct public link for objects in
 public-read buckets (keys with `.` or `..` path segments cannot be expressed
 as a URL path — use a presigned link for those).
@@ -641,6 +664,15 @@ field the caller may not change is rejected as a whole (403).
 ```
 
 **Success Response (200 OK):** `{"message": "Settings updated"}`
+
+### Bucket policy
+
+Shown in the console under *Bucket settings → Bucket policy* to everyone who
+may read it (admin or `s3:GetBucketPolicy`), pretty-printed and read-only;
+admins can edit it (JSON editor, validated on save with the server's error
+shown inline, templates for common cases) or delete it. REST:
+`GET`/`PUT`/`DELETE /api/buckets/:name/policy`; S3: `GET`/`PUT`/`DELETE
+/<bucket>?policy`. See [Bucket policies](policies.md#bucket-policies).
 
 ### Public read access (`is_public`)
 

@@ -458,6 +458,33 @@ func TestIntegrationPublicReadHandlersFailClosedWithoutCaller(t *testing.T) {
 		{http.MethodGet, b + "/hello.txt?versionId=null", nil},
 		{http.MethodHead, b + "/hello.txt?versionId=null", nil},
 		{http.MethodGet, b + "/hello.txt?acl", nil},
+		// Bucket sub-resources (explicitly dispatched; see s3_bucket_subresources.go).
+		{http.MethodGet, b + "?policy", nil},
+		{http.MethodGet, b + "?policyStatus", nil},
+		{http.MethodGet, b + "?acl", nil},
+		{http.MethodGet, b + "/?cors", nil},
+		{http.MethodGet, b + "?foo", nil},
+		{http.MethodPut, b + "?policy", nil},
+		{http.MethodPut, b + "?acl", nil},
+		{http.MethodPut, b + "?foo", nil},
+		{http.MethodDelete, b, nil},
+		{http.MethodDelete, b + "?policy", nil},
+		{http.MethodDelete, b + "?lifecycle", nil},
+		{http.MethodDelete, b + "/?foo", nil},
+		{http.MethodPost, b, nil},
+		{http.MethodPost, b + "?foo", nil},
+		// Object sub-resources (see s3_object_subresources.go).
+		{http.MethodGet, b + "/hello.txt?attributes", nil},
+		{http.MethodGet, b + "/hello.txt?partNumber=1", nil},
+		{http.MethodGet, b + "/hello.txt?foo", nil},
+		{http.MethodHead, b + "/hello.txt?acl", nil},
+		{http.MethodHead, b + "/hello.txt?partNumber=1", nil},
+		{http.MethodPut, b + "/hello.txt?acl", nil},
+		{http.MethodPut, b + "/hello.txt?retention", nil},
+		{http.MethodPut, b + "/hello.txt?uploadId=x", nil},
+		{http.MethodDelete, b + "/hello.txt?foo", nil},
+		{http.MethodPost, b + "/hello.txt?restore", nil},
+		{http.MethodPost, b + "/hello.txt", nil},
 	}
 	for _, c := range cases {
 		req := httptest.NewRequest(c.method, c.target, strings.NewReader("x"))

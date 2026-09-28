@@ -225,69 +225,11 @@ func (h *S3APIHandler) bucketRegion() string {
 	return "us-east-1"
 }
 
-// ListObjects handles GET /{bucket} — supports ListObjectsV1 and ListObjectsV2 (list-type=2)
-func (h *S3APIHandler) ListObjects(c *gin.Context) {
-	bucketName := c.Param("bucket")
-	userUUID, authed := h.s3Caller(c)
-	if !authed {
-		return
-	}
-
-	var bucket models.Bucket
-	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
-		h.s3Error(c, "NoSuchBucket", "The specified bucket does not exist", bucketName, http.StatusNotFound)
-		return
-	}
-
-	allowed, _ := h.policyService.CheckBucketAccess(userUUID, bucketName, services.ActionListBucket)
-	if !allowed {
-		h.s3Error(c, "AccessDenied", "Access Denied", bucketName, http.StatusForbidden)
-		return
-	}
-
-	// Bucket sub-resource requests share the GET /{bucket} route.
-	if _, ok := c.GetQuery("location"); ok {
-		region := h.bucketRegion()
-		// AWS represents us-east-1 as an empty LocationConstraint.
-		loc := region
-		if loc == "us-east-1" {
-			loc = ""
-		}
-		c.Header("x-amz-request-id", uuid.New().String())
-		c.XML(http.StatusOK, LocationConstraintResult{
-			Xmlns: "http://s3.amazonaws.com/doc/2006-03-01/",
-			Value: loc,
-		})
-		return
-	}
-	if _, ok := c.GetQuery("versioning"); ok {
-		status := ""
-		switch bucket.Versioning {
-		case models.VersioningEnabled:
-			status = "Enabled"
-		case models.VersioningSuspended:
-			status = "Suspended"
-		}
-		c.Header("x-amz-request-id", uuid.New().String())
-		c.XML(http.StatusOK, VersioningConfigurationResult{
-			Xmlns:  "http://s3.amazonaws.com/doc/2006-03-01/",
-			Status: status,
-		})
-		return
-	}
-	if _, ok := c.GetQuery("versions"); ok {
-		h.ListObjectVersions(c)
-		return
-	}
-	if _, ok := c.GetQuery("lifecycle"); ok {
-		h.GetBucketLifecycle(c)
-		return
-	}
-	if _, ok := c.GetQuery("uploads"); ok {
-		h.ListMultipartUploadsHandler(c)
-		return
-	}
-
+// listObjects answers ListObjects (V1) / ListObjectsV2 (list-type=2) for a
+// bucket the caller was already authorized to list (see ListObjects in
+// s3_bucket_subresources.go, which routes GET /{bucket}).
+func (h *S3APIHandler) listObjects(c *gin.Context, bucket *models.Bucket) {
+	bucketName := bucket.Name
 	isV2 := c.Query("list-type") == "2"
 	prefix := c.DefaultQuery("prefix", "")
 	delimiter := c.Query("delimiter")
@@ -407,21 +349,19 @@ func (h *S3APIHandler) GetObject(c *gin.Context) {
 	// Trim leading slash (Gin's * wildcard includes it)
 	objectKey = strings.TrimPrefix(objectKey, "/")
 
-	// If key is empty, this is a ListObjects request
+	// If key is empty, this is a bucket-level request (listing or sub-resource)
 	if objectKey == "" {
 		h.ListObjects(c)
 		return
 	}
 
-	// List parts for in-progress multipart upload
-	if c.Query("uploadId") != "" {
-		h.ListPartsHandler(c)
+	// Sub-resources: ListParts (?uploadId), ?tagging, ?acl; anything else
+	// but versionId / partNumber / response-* is 501 (never content).
+	if h.dispatchObjectGet(c) {
 		return
 	}
-
-	// Tagging subresource
-	if _, ok := c.GetQuery("tagging"); ok {
-		h.GetObjectTagging(c)
+	part, ok := h.parsePartNumber(c)
+	if !ok {
 		return
 	}
 
@@ -505,7 +445,13 @@ func (h *S3APIHandler) GetObject(c *gin.Context) {
 	// (notably the AWS CLI/SDK, which split downloads >8MB into byte-range GETs)
 	// expect 206 Partial Content. Without this they receive the full object for
 	// every range and concatenate the copies into a corrupt, oversized file.
-	if start, length, ok, satisfiable := parseRange(c.GetHeader("Range"), object.Size); ok {
+	rangeHeader := c.GetHeader("Range")
+	if part == 1 && object.Size > 0 {
+		// partNumber=1 of a single-part object: the whole object, answered
+		// like a ranged read (206 + Content-Range), as S3 does.
+		rangeHeader = "bytes=0-"
+	}
+	if start, length, ok, satisfiable := parseRange(rangeHeader, object.Size); ok {
 		if !satisfiable {
 			c.Header("Content-Range", fmt.Sprintf("bytes */%d", object.Size))
 			h.s3Error(c, "InvalidRange", "The requested range is not satisfiable", objectKey, http.StatusRequestedRangeNotSatisfiable)
@@ -658,6 +604,11 @@ func parseRange(header string, size int64) (start, length int64, ok, satisfiable
 
 // PutObject handles PUT /{bucket}/{key+} (upload, copy, or multipart part)
 func (h *S3APIHandler) PutObject(c *gin.Context) {
+	// Unsupported sub-resources (?acl, ?retention, ?legal-hold, ...) and
+	// half-specified UploadPart requests are refused before anything is written.
+	if h.dispatchObjectPutPreflight(c) {
+		return
+	}
 	if copySource := c.GetHeader("x-amz-copy-source"); copySource != "" {
 		// With uploadId+partNumber this is UploadPartCopy, not CopyObject.
 		if c.Query("uploadId") != "" && c.Query("partNumber") != "" {
@@ -853,23 +804,15 @@ func (h *S3APIHandler) PutObject(c *gin.Context) {
 
 // DeleteObject handles DELETE /{bucket}/{key+} (delete object or abort multipart)
 func (h *S3APIHandler) DeleteObject(c *gin.Context) {
-	// Bucket-level DELETE sub-resources arrive with an empty key.
+	// Bucket-level DELETEs (empty key) are routed by HandleBucketDelete.
 	if strings.TrimPrefix(c.Param("key"), "/") == "" {
-		if _, ok := c.GetQuery("lifecycle"); ok {
-			h.DeleteBucketLifecycle(c)
-			return
-		}
-	}
-
-	// Abort multipart upload
-	if c.Query("uploadId") != "" {
-		h.AbortMultipartUpload(c)
+		h.HandleBucketDelete(c)
 		return
 	}
 
-	// Tagging subresource
-	if _, ok := c.GetQuery("tagging"); ok {
-		h.DeleteObjectTagging(c)
+	// AbortMultipartUpload (?uploadId), ?tagging; anything else but
+	// ?versionId is 501 — never a delete.
+	if h.dispatchObjectDelete(c) {
 		return
 	}
 
@@ -980,6 +923,12 @@ func (h *S3APIHandler) DeleteObject(c *gin.Context) {
 
 // HeadObject handles HEAD /{bucket}/{key+} (get object metadata)
 func (h *S3APIHandler) HeadObject(c *gin.Context) {
+	if h.dispatchObjectHead(c) {
+		return
+	}
+	if _, ok := h.parsePartNumber(c); !ok {
+		return
+	}
 	bucketName := c.Param("bucket")
 	objectKey := strings.TrimPrefix(c.Param("key"), "/")
 	anonymous := c.GetBool(middleware.CtxS3Anonymous)
@@ -1336,13 +1285,17 @@ func (h *S3APIHandler) CopyObject(c *gin.Context, copySource string) {
 	c.XML(http.StatusOK, CopyObjectResult{ETag: fmt.Sprintf(`"%s"`, destObj.ETag), LastModified: destObj.UpdatedAt})
 }
 
-// HandleBucketPost dispatches POST /{bucket} based on query params
+// HandleBucketPost dispatches POST /{bucket} based on query params. Only
+// ?delete (DeleteObjects) is implemented; anything else is 501.
 func (h *S3APIHandler) HandleBucketPost(c *gin.Context) {
 	if _, exists := c.GetQuery("delete"); exists {
 		h.DeleteObjects(c)
 		return
 	}
-	h.s3Error(c, "NotImplemented", "This operation is not implemented", "", http.StatusNotImplemented)
+	if _, authed := h.s3Caller(c); !authed {
+		return
+	}
+	h.notImplemented(c, bucketSubresourceName(c.Request.URL.Query()))
 }
 
 // DeleteObjects handles POST /{bucket}?delete (bulk delete)
@@ -1539,12 +1492,7 @@ func (h *S3APIHandler) DeleteBucketNotSupported(c *gin.Context) {
 }
 
 func (h *S3APIHandler) CreateBucket(c *gin.Context) {
-	if _, ok := c.GetQuery("versioning"); ok {
-		h.PutBucketVersioning(c)
-		return
-	}
-	if _, ok := c.GetQuery("lifecycle"); ok {
-		h.PutBucketLifecycle(c)
+	if h.dispatchBucketPut(c) {
 		return
 	}
 

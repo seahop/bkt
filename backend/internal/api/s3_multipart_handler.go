@@ -101,7 +101,16 @@ func (h *S3APIHandler) HandleObjectPost(c *gin.Context) {
 		h.CompleteMultipartUpload(c)
 		return
 	}
-	h.s3Error(c, "NotImplemented", "This POST operation is not implemented", "", http.StatusNotImplemented)
+	// ?restore, ?select, ... (and a bare POST) are not implemented.
+	if _, authed := h.s3Caller(c); !authed {
+		return
+	}
+	what := bucketSubresourceName(c.Request.URL.Query())
+	if what == "" {
+		h.s3Error(c, "NotImplemented", "This POST operation is not implemented", strings.TrimPrefix(c.Param("key"), "/"), http.StatusNotImplemented)
+		return
+	}
+	h.objectNotImplemented(c, what)
 }
 
 // CreateMultipartUpload handles POST /{bucket}/{key}?uploads

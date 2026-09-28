@@ -82,50 +82,69 @@ func loadUserWithEffectivePolicies(userID uuid.UUID) (*models.User, error) {
 	return &user, nil
 }
 
-func (ps *PolicyService) CheckBucketAccess(userID uuid.UUID, bucketName, action string) (result bool, err error) {
+func (ps *PolicyService) CheckBucketAccess(userID uuid.UUID, bucketName, action string) (bool, error) {
+	allowed, err := ps.CheckBucketActions(userID, bucketName, []string{action})
+	return allowed[action], err
+}
+
+// CheckBucketActions is CheckBucketAccess for several bucket-level actions at
+// once: the user, their policies, the bucket and its policy are loaded once.
+// The result maps each action to whether it is allowed; on error every action
+// is denied.
+func (ps *PolicyService) CheckBucketActions(userID uuid.UUID, bucketName string, actions []string) (result map[string]bool, err error) {
+	result = make(map[string]bool, len(actions))
 	// Recover from panics to prevent service crash (fail-safe: deny access on panic)
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("bucket access check panic: %v", r)
-			result = false
+			result = map[string]bool{}
 		}
 	}()
 
 	// Get user with policies
 	userPtr, err := loadUserWithEffectivePolicies(userID)
 	if err != nil {
-		return false, fmt.Errorf("failed to fetch user: %w", err)
+		return result, fmt.Errorf("failed to fetch user: %w", err)
 	}
 	user := *userPtr
 
 	// Admin bypass - admins can do anything
 	if user.IsAdmin {
-		return true, nil
+		for _, a := range actions {
+			result[a] = true
+		}
+		return result, nil
 	}
 
 	// Get bucket (to check ownership and bucket policies)
 	var bucket models.Bucket
 	if err := database.DB.Where("name = ?", bucketName).First(&bucket).Error; err != nil {
 		// Bucket doesn't exist - deny access
-		return false, nil
+		return result, nil
 	}
 
 	// Build resource ARN
 	resourceARN := fmt.Sprintf("arn:aws:s3:::%s", bucketName)
 
-	// Evaluate user (identity) and bucket (resource) policies, then combine so an
-	// explicit Deny from either source wins.
-	userResult := ps.evaluateUserPolicies(&user, action, resourceARN)
-
-	bucketResult := security.PolicyNoMatch
-	var bucketPolicy models.BucketPolicy
-	if database.DB.Where("bucket_id = ?", bucket.ID).First(&bucketPolicy).Error == nil {
-		if br, perr := ps.evaluateBucketPolicy(&bucketPolicy, action, resourceARN, user.Username); perr == nil {
-			bucketResult = br
-		}
+	var bucketPolicy *models.BucketPolicy
+	var bp models.BucketPolicy
+	if database.DB.Where("bucket_id = ?", bucket.ID).First(&bp).Error == nil {
+		bucketPolicy = &bp
 	}
 
-	return decide(userResult, bucketResult), nil
+	// Evaluate user (identity) and bucket (resource) policies, then combine so an
+	// explicit Deny from either source wins.
+	for _, action := range actions {
+		userResult := ps.evaluateUserPolicies(&user, action, resourceARN)
+		bucketResult := security.PolicyNoMatch
+		if bucketPolicy != nil {
+			if br, perr := ps.evaluateBucketPolicy(bucketPolicy, action, resourceARN, user.Username); perr == nil {
+				bucketResult = br
+			}
+		}
+		result[action] = decide(userResult, bucketResult)
+	}
+	return result, nil
 }
 
 // CheckObjectAccess checks if a user has permission to perform an action on an

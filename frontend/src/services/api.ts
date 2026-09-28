@@ -547,6 +547,32 @@ export const bucketApi = {
     const { data } = await api.put<{ message: string }>(`/buckets/${bucketName}/settings`, settings)
     return data
   },
+
+  /**
+   * The bucket policy document (raw JSON string), or null when the bucket has
+   * none. Requires admin or s3:GetBucketPolicy (403 otherwise).
+   */
+  getBucketPolicy: async (bucketName: string): Promise<string | null> => {
+    try {
+      const { data } = await api.get<{ policy: string }>(`/buckets/${bucketName}/policy`)
+      return data.policy
+    } catch (err) {
+      if ((err as { response?: { status?: number } })?.response?.status === 404) return null
+      throw err
+    }
+  },
+
+  /** Set (replace) the bucket policy. Admin only; validated server-side. */
+  setBucketPolicy: async (bucketName: string, policy: string): Promise<{ message: string }> => {
+    const { data } = await api.put<{ message: string }>(`/buckets/${bucketName}/policy`, { policy })
+    return data
+  },
+
+  /** Remove the bucket policy (idempotent). Admin only. */
+  deleteBucketPolicy: async (bucketName: string): Promise<{ message: string }> => {
+    const { data } = await api.delete<{ message: string }>(`/buckets/${bucketName}/policy`)
+    return data
+  },
 }
 
 // Access Key API

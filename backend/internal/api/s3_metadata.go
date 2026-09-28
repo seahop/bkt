@@ -173,6 +173,19 @@ func (h *S3APIHandler) loadObjectForTagging(c *gin.Context, action string) (*mod
 		h.s3Error(c, "NoSuchKey", "The specified key does not exist", objectKey, http.StatusNotFound)
 		return nil, false
 	}
+	// Tags are kept for the current version only: a ?versionId naming another
+	// version must not read or change the current version's tags.
+	if vid := c.Query("versionId"); vid != "" {
+		cur := obj.VersionID
+		if cur == "" {
+			cur = "null"
+		}
+		if vid != cur {
+			h.s3Error(c, "NotImplemented", "Tagging of non-current object versions is not supported by bkt", objectKey, http.StatusNotImplemented)
+			return nil, false
+		}
+		c.Header("x-amz-version-id", vid)
+	}
 	return &obj, true
 }
 

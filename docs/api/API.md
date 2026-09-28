@@ -31,8 +31,8 @@ Complete API reference for bkt.
 | GET | `/api/access-keys/stats` | Get key stats |
 | POST | `/api/sts/credentials` | Issue temporary S3 credentials (bkt-STS) |
 | GET | `/api/buckets` | List buckets |
-| GET | `/api/buckets/:name` | Get bucket |
-| GET | `/api/buckets/:name/policy` | Get bucket policy |
+| GET | `/api/buckets/:name` | Get bucket (admin or any of `s3:ListBucket` / `s3:GetBucketLocation` / `s3:GetBucketPolicy`; includes `permissions`) |
+| GET | `/api/buckets/:name/policy` | Get bucket policy (admin or `s3:GetBucketPolicy`; 404 when none) |
 | GET | `/api/buckets/:name/objects` | List objects |
 | POST | `/api/buckets/:name/objects` | Upload object |
 | POST | `/api/buckets/:name/objects/async` | Upload async |
@@ -66,7 +66,8 @@ Complete API reference for bkt.
 | DELETE | `/api/users/:id/access-keys/:key_id` | Delete user's key |
 | POST | `/api/buckets` | Create bucket |
 | DELETE | `/api/buckets/:name` | Delete bucket |
-| PUT | `/api/buckets/:name/policy` | Set bucket policy |
+| PUT | `/api/buckets/:name/policy` | Set bucket policy (audit: `bucket.policy.set`) |
+| DELETE | `/api/buckets/:name/policy` | Delete bucket policy (idempotent; audit: `bucket.policy.delete`) |
 | POST | `/api/policies` | Create policy |
 | GET | `/api/policies/:id` | Get policy |
 | PUT | `/api/policies/:id` | Update policy |
@@ -94,15 +95,17 @@ Complete API reference for bkt.
 |--------|----------|-------------|
 | GET | `/` | List buckets |
 | HEAD | `/:bucket` | Head bucket |
-| GET | `/:bucket` | List objects (V1/V2), `?versions`, `?uploads`, `?versioning`, `?lifecycle`, `?location` |
+| GET | `/:bucket` | List objects (V1/V2), `?versions`, `?uploads`, `?policy`, `?policyStatus`, `?acl`, `?versioning`, `?lifecycle`, `?location`, `?encryption` and read-only stubs (see [bucket sub-resources](#bucket-sub-resources)) |
 | POST | `/:bucket` | Bulk delete (`?delete`) |
-| PUT | `/:bucket` | `?versioning` / `?lifecycle` config (bucket creation disabled) |
-| DELETE | `/:bucket` | `?lifecycle` (delete lifecycle config) |
-| HEAD | `/:bucket/*key` | Head object (`?versionId` supported) |
-| GET | `/:bucket/*key` | Get object (Range, `?versionId`, `?tagging`, ListParts via `?uploadId`) |
+| PUT | `/:bucket` | `?policy` / `?versioning` / `?lifecycle` config (bucket creation disabled) |
+| DELETE | `/:bucket` | `?policy` / `?lifecycle` (delete config) |
+| HEAD | `/:bucket/*key` | Head object (`?versionId`, `?partNumber=1`) |
+| GET | `/:bucket/*key` | Get object (Range, `?versionId`, `?partNumber=1`, `response-*`, `?tagging`, `?acl` read-only, ListParts via `?uploadId`) |
 | PUT | `/:bucket/*key` | Put object / CopyObject / UploadPart / UploadPartCopy / `?tagging` |
 | POST | `/:bucket/*key` | CreateMultipartUpload (`?uploads`) / CompleteMultipartUpload (`?uploadId`) |
 | DELETE | `/:bucket/*key` | Delete object (`?versionId`, `?tagging`, AbortMultipartUpload via `?uploadId`) |
+
+Any other object sub-resource is `501 NotImplemented` — see [Object sub-resources](#object-sub-resources).
 
 ---
 
@@ -781,6 +784,8 @@ Mints a short-lived S3 access key pair for the caller. Temporary keys are **excl
 |-----------|------|-------------|
 | name | string | Bucket name |
 
+**Authorization:** admin, or any of `s3:ListBucket`, `s3:GetBucketLocation`, `s3:GetBucketPolicy` on the bucket. Non-admins get a reduced view (owner id/username only, no `s3_config_id`; webhook and replication fields only with the permission to change them). `permissions` lists which settings the caller may change (`get_policy`, `put_policy`, `put_public_access`, `put_versioning`, `put_lifecycle`, `put_quota`, `put_retention`, `put_notification`, `put_replication`) — advisory, for the console.
+
 **Response (200 OK):** Bucket object. For a public-read bucket it also includes `public_url_base` (`<S3 endpoint>/<bucket>`); append the key, each `/`-separated segment percent-encoded, to get the object's unsigned URL.
 
 **Error Codes:**
@@ -833,12 +838,17 @@ Mints a short-lived S3 access key pair for the caller. Temporary keys are **excl
 }
 ```
 
+The document is validated strictly (see [Policies](policies.md#policy-document-format)
+and [bucket policies](policies.md#bucket-policies)); an invalid one answers
+`400` with the validator's message. Audit-logged as `bucket.policy.set` (with
+the new and previous document). Same operation as S3 `PUT /:bucket?policy`.
+
 </details>
 
 <details>
 <summary><code>GET /api/buckets/:name/policy</code> - Get bucket policy</summary>
 
-**Authentication:** Required
+**Authentication:** Required — admin, or `s3:GetBucketPolicy` on the bucket (`403` otherwise)
 
 **Path Parameters:**
 | Parameter | Type | Description |
@@ -851,6 +861,31 @@ Mints a short-lived S3 access key pair for the caller. Temporary keys are **excl
   "policy": "{\"Version\":\"2012-10-17\",...}"
 }
 ```
+
+**Error Codes:**
+- `404` - The bucket has no policy
+
+</details>
+
+<details>
+<summary><code>DELETE /api/buckets/:name/policy</code> - Delete bucket policy <strong>[Admin]</strong></summary>
+
+**Authentication:** Required (Admin)
+
+Removes the bucket policy. Idempotent: deleting when there is none also
+answers `200`. An actual removal is audit-logged as `bucket.policy.delete`
+(with the previous document). Same operation as S3 `DELETE /:bucket?policy`.
+
+**Response (200 OK):**
+```json
+{
+  "message": "Bucket policy deleted"
+}
+```
+
+**Error Codes:**
+- `403` - Not an admin
+- `404` - Bucket not found
 
 </details>
 
@@ -1862,8 +1897,77 @@ curl https://s3.example.com/my-public-bucket/images/logo.png
 | Tagging | `x-amz-tagging` header + `?tagging` subresource (GET/PUT/DELETE) |
 | Versioning | `?versioning` (GET/PUT), `?versions` (ListObjectVersions), `?versionId` on GET/HEAD/DELETE |
 | Lifecycle | `?lifecycle` (GET/PUT/DELETE, single rule) |
+| Bucket policy | `?policy` (GET/PUT/DELETE), `?policyStatus` (GET) — see [bucket policies](policies.md#bucket-policies-over-the-s3-api) |
+| Bucket info (read-only) | `?acl`, `?encryption`, and AWS-shaped "not configured" answers for other sub-resources (below) |
 
 **Not implemented:** the AWS STS API (`AssumeRole` etc. — see bkt-STS above for temporary credentials), object-lock headers/API (bkt retention is a bucket setting), bucket notifications via MQTT/Kafka, multi-rule lifecycle, and bucket creation via the S3 API (buckets are created in the console). `PUT /:bucket` on an **existing** bucket answers like AWS — `409 BucketAlreadyOwnedByYou` when the caller is an admin or has `s3:ListBucket`/`s3:PutObject` on it (rclone and the SDKs treat this as success), `409 BucketAlreadyExists` otherwise; for a new name it returns `403 AccessDenied`.
+
+### Bucket sub-resources
+
+Every bucket-level request (`/:bucket` and `/:bucket/`) is dispatched on its
+query sub-resource. Nothing unrecognized ever falls through to a listing or to
+the bucket-creation probe: an unsupported sub-resource answers
+`501 NotImplemented` (S3 XML error). All of these need a signature (unsigned →
+the usual `401`); the GETs below (except `?policy`) additionally need
+`s3:ListBucket` on the bucket (or admin), like listing it.
+
+| Sub-resource | GET | PUT | DELETE |
+|---|---|---|---|
+| `?policy` | 200 policy JSON / 404 `NoSuchBucketPolicy` (admin or `s3:GetBucketPolicy`) | 204 (admin) | 204, idempotent (admin) |
+| `?policyStatus` | 200 `<PolicyStatus><IsPublic>` = public read access flag | 501 | 501 |
+| `?acl` | 200 read-only `AccessControlPolicy`: owner `FULL_CONTROL`, plus `READ` for `AllUsers` while public read access is on | 501 (public read is a console setting) | 501 |
+| `?location` | 200 `LocationConstraint` | 501 | 501 |
+| `?versioning` | 200 | 200 | 501 |
+| `?lifecycle` | 200 / 404 `NoSuchLifecycleConfiguration` | 200 | 204 |
+| `?encryption` | 200 SSE-S3 (`AES256`) for S3-backed buckets when `S3_SSE=true`, else 404 `ServerSideEncryptionConfigurationNotFoundError` | 501 | 501 |
+| `?tagging` | 404 `NoSuchTagSet` (no bucket tags) | 501 | 501 |
+| `?cors` | 404 `NoSuchCORSConfiguration` | 501 | 501 |
+| `?website` | 404 `NoSuchWebsiteConfiguration` | 501 | 501 |
+| `?replication` | 404 `ReplicationConfigurationNotFoundError` (bkt replication is a console setting) | 501 | 501 |
+| `?ownershipControls` | 404 `OwnershipControlsNotFoundError` | 501 | 501 |
+| `?publicAccessBlock` | 404 `NoSuchPublicAccessBlockConfiguration` | 501 | 501 |
+| `?object-lock` | 404 `ObjectLockConfigurationNotFoundError` (bkt retention is a console setting) | 501 | 501 |
+| `?logging` | 200 empty `BucketLoggingStatus` | 501 | 501 |
+| `?notification` | 200 empty `NotificationConfiguration` (webhooks are a console setting) | 501 | 501 |
+| `?accelerate` | 200 empty `AccelerateConfiguration` | 501 | 501 |
+| `?requestPayment` | 200 `Payer` = `BucketOwner` | 501 | 501 |
+| anything else | 501 `NotImplemented` | 501 | 501 |
+
+`POST /:bucket` supports only `?delete` (DeleteObjects); anything else is 501.
+A plain `DELETE /:bucket` (DeleteBucket) stays `403` — buckets are deleted in
+the console.
+
+### Object sub-resources
+
+Object requests (`/:bucket/<key>`) are dispatched the same way: an
+unsupported sub-resource is `501 NotImplemented` (HEAD: empty body) and never
+returns object content, writes, or deletes anything.
+
+| Request | Behavior |
+|---|---|
+| GET / HEAD (plain) | Accepts only `versionId`, `partNumber`, the `response-*` overrides (GET), and signing parameters (`X-Amz-*`, `x-id`) |
+| GET / HEAD `?partNumber=N` | bkt objects are single-part (multipart uploads are assembled on completion): `N=1` is the whole object (GET: `206` + `Content-Range`), `N>1` → `416 InvalidPartNumber`; with a `Range` header → `400` |
+| GET `?acl` | `200` read-only `AccessControlPolicy`: bucket owner `FULL_CONTROL`, plus `AllUsers READ` for the current version on a public-read bucket. Same authorization as reading the object (`s3:GetObject`, public-read included; `?versionId` needs a grant). `404 NoSuchKey` / `NoSuchVersion` |
+| GET/PUT/DELETE `?tagging` | Get / replace / delete the current version's tags. `?versionId` naming another version → `501` |
+| GET `?uploadId` | ListParts |
+| PUT `?partNumber&uploadId` | UploadPart / UploadPartCopy (with `x-amz-copy-source`); only one of them, or an empty value → `400 InvalidArgument` |
+| PUT with `x-amz-copy-source` | CopyObject |
+| PUT `?acl` | `501` (bkt has no object ACLs; public read is the bucket's *Public read access* setting) |
+| POST `?uploads` / `?uploadId` | CreateMultipartUpload / CompleteMultipartUpload |
+| DELETE `?uploadId` / `?versionId` | AbortMultipartUpload / delete that version |
+| `?attributes`, `?retention`, `?legal-hold`, `?torrent`, `?restore`, `?select`, any other key | `501 NotImplemented` |
+
+Unsigned requests are unaffected: only plain object GET/HEAD with `response-*`
+parameters are ever anonymous on a public-read bucket; every sub-resource,
+including `?acl` and `?partNumber`, still answers `401`.
+
+A bucket `GET` is a listing only when every query parameter is one that
+ListObjects / ListObjectsV2 / ListObjectVersions / ListMultipartUploads use:
+`list-type`, `prefix`, `delimiter`, `marker`, `max-keys`,
+`continuation-token`, `start-after`, `fetch-owner`, `encoding-type`,
+`versions`, `key-marker`, `version-id-marker`, `uploads`, `upload-id-marker`,
+`max-uploads`, MinIO's `metadata`, plus signing parameters (`X-Amz-*`) and the
+SDKs' `x-id`. Any other parameter answers 501 instead of a listing.
 
 <details>
 <summary><code>GET /</code> - List buckets (S3)</summary>
@@ -1918,6 +2022,8 @@ Supports both ListObjects V1 and V2 (`list-type=2`).
 - `GET /:bucket?versioning` - Current versioning status
 - `GET /:bucket?lifecycle` - Lifecycle configuration
 - `GET /:bucket?location` - GetBucketLocation
+- `GET /:bucket?policy`, `?policyStatus`, `?acl`, `?encryption`, ... - see [Bucket sub-resources](#bucket-sub-resources)
+- Any other query parameter - `501 NotImplemented` (never a listing)
 
 </details>
 

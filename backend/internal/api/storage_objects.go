@@ -321,6 +321,8 @@ type bucketView struct {
 	Owner          *bucketOwnerView `json:"owner,omitempty"`
 	// PublicURLBase is set by GetBucket for public-read buckets.
 	PublicURLBase string `json:"public_url_base,omitempty"`
+	// Permissions is set by GetBucket (not by the bucket list).
+	Permissions *bucketPermissionsView `json:"permissions,omitempty"`
 }
 
 func newBucketView(b *models.Bucket, showNotification, showReplication bool) bucketView {

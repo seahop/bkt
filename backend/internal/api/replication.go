@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 
@@ -310,6 +312,38 @@ func lockKeysAcrossBuckets(bucketA, keyA, bucketB, keyB string) func() {
 	}
 }
 
+func acrossBucketLockIDs(bucketA, keyA, bucketB, keyB string) []string {
+	a, b := bucketA+"\x00"+keyA, bucketB+"\x00"+keyB
+	if a == b {
+		return []string{a}
+	}
+	ids := []string{a, b}
+	sort.Strings(ids)
+	return ids
+}
+
+func lockKeysAcrossBucketsChecked(ctx context.Context, bucketA *models.Bucket, keyA string, bucketB *models.Bucket, keyB string) (func(), error) {
+	unlock, err := lockObjectIDsChecked(ctx, acrossBucketLockIDs(bucketA.Name, keyA, bucketB.Name, keyB))
+	if err != nil {
+		return nil, err
+	}
+	if err := validateLockedBuckets(ctx, bucketA, bucketB); err != nil {
+		unlock()
+		return nil, err
+	}
+	return unlock, nil
+}
+
+func tryLockKeysAcrossBucketsChecked(bucketA *models.Bucket, keyA string, bucketB *models.Bucket, keyB string, timeout time.Duration) (func(), bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	unlock, err := lockKeysAcrossBucketsChecked(ctx, bucketA, keyA, bucketB, keyB)
+	if err != nil {
+		return func() {}, false
+	}
+	return unlock, true
+}
+
 // tryLockKeysAcrossBuckets is lockKeysAcrossBuckets with a deadline covering
 // both acquisitions (same global order). On timeout it holds nothing and
 // returns ok=false; on success the unlock func releases both.
@@ -347,7 +381,7 @@ func tryLockKeysAcrossBuckets(bucketA, keyA, bucketB, keyB string, timeout time.
 // Reports whether a copy was committed, and whether the keys were busy (lock
 // not acquired within sweepLockTimeout; retried next sweep).
 func replicateObject(srcBackend, dstBackend storage.StorageBackend, src, dst *models.Bucket, key string) (copied, busy bool) {
-	unlock, ok := tryLockKeysAcrossBuckets(src.Name, key, dst.Name, key, sweepLockTimeout)
+	unlock, ok := tryLockKeysAcrossBucketsChecked(src, key, dst, key, sweepLockTimeout)
 	if !ok {
 		return false, true
 	}
@@ -397,6 +431,7 @@ func replicateObjectLocked(srcBackend, dstBackend storage.StorageBackend, src, d
 	}
 	obj := models.Object{
 		BucketID: dst.ID, Key: key, Size: s.Size, ContentType: s.ContentType,
+		ContentDisposition: s.ContentDisposition, CacheControl: s.CacheControl,
 		ETag: s.ETag, SHA256: s.SHA256, StoragePath: key, Metadata: s.Metadata, Tags: s.Tags,
 		VersionID: newCurrentVersionID(dst),
 	}
@@ -414,7 +449,7 @@ func replicateObjectLocked(srcBackend, dstBackend storage.StorageBackend, src, d
 // history — including retained data — is kept. Reports whether it removed,
 // and whether the key was busy (retried next sweep).
 func mirrorDelete(dstBackend storage.StorageBackend, src, dst *models.Bucket, key string) (removed, busy bool) {
-	unlock, ok := tryLockObjectKeys(dst.Name, sweepLockTimeout, key)
+	unlock, ok := tryLockObjectKeysChecked(dst, sweepLockTimeout, key)
 	if !ok {
 		return false, true
 	}

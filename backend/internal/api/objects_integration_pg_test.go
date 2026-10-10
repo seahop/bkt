@@ -5,8 +5,10 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -89,6 +91,257 @@ func TestIntegrationUpsertCurrentObject(t *testing.T) {
 	database.DB.Model(&models.Object{}).Where("bucket_id = ? AND key = ?", b.ID, "race").Count(&n)
 	if n != 1 {
 		t.Errorf("%d rows for one key", n)
+	}
+}
+
+func TestIntegrationS3PutContentHeadersAndConditions(t *testing.T) {
+	cfg := itConfig(t)
+	owner := mkUser(t, itName("s3owner"), "password-123", true, false)
+	bucket := itBucket(t, owner.ID, nil)
+	router := itS3Router(cfg, owner)
+	path := "/" + bucket.Name + "/sop.md"
+	request := func(method, target, body string, headers map[string]string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		for name, value := range headers {
+			req.Header.Set(name, value)
+		}
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		return w
+	}
+	initial := map[string]string{
+		"Content-Type":        "text/markdown",
+		"Content-Disposition": `attachment; filename="original.md"`,
+		"Cache-Control":       "private, max-age=60",
+		"If-None-Match":       "*",
+	}
+	first := request(http.MethodPut, path, "original", initial)
+	if first.Code != http.StatusOK {
+		t.Fatalf("conditional create: %d %s", first.Code, first.Body.String())
+	}
+	etag := first.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("missing create ETag")
+	}
+	for _, method := range []string{http.MethodHead, http.MethodGet} {
+		w := request(method, path, "", nil)
+		if w.Code != http.StatusOK || w.Header().Get("Content-Disposition") != initial["Content-Disposition"] ||
+			w.Header().Get("Cache-Control") != initial["Cache-Control"] {
+			t.Errorf("%s persisted content headers: status=%d disposition=%q cache=%q", method,
+				w.Code, w.Header().Get("Content-Disposition"), w.Header().Get("Cache-Control"))
+		}
+	}
+	if w := request(http.MethodPut, path, "duplicate", map[string]string{"If-None-Match": "*"}); w.Code != http.StatusPreconditionFailed {
+		t.Errorf("duplicate create: %d %s, want 412", w.Code, w.Body.String())
+	}
+	if w := request(http.MethodPut, "/"+bucket.Name+"/missing.md", "bad", map[string]string{"If-Match": etag}); w.Code != http.StatusPreconditionFailed {
+		t.Errorf("If-Match on missing key: %d %s, want 412", w.Code, w.Body.String())
+	}
+	if w := request(http.MethodGet, path, "", nil); w.Body.String() != "original" {
+		t.Errorf("duplicate changed original bytes: %q", w.Body.String())
+	}
+	second := request(http.MethodPut, path, "edited", map[string]string{"If-Match": etag})
+	if second.Code != http.StatusOK {
+		t.Fatalf("current If-Match: %d %s", second.Code, second.Body.String())
+	}
+	if w := request(http.MethodPut, path, "stale", map[string]string{"If-Match": etag}); w.Code != http.StatusPreconditionFailed {
+		t.Errorf("stale If-Match: %d %s, want 412", w.Code, w.Body.String())
+	}
+	if w := request(http.MethodGet, path, "", nil); w.Body.String() != "edited" {
+		t.Errorf("stale overwrite changed bytes: %q", w.Body.String())
+	}
+	if w := request(http.MethodHead, path, "", nil); w.Header().Get("Content-Disposition") != "" ||
+		w.Header().Get("Cache-Control") != "" {
+		t.Errorf("overwrite retained old content headers: disposition=%q cache=%q",
+			w.Header().Get("Content-Disposition"), w.Header().Get("Cache-Control"))
+	}
+}
+
+func TestIntegrationS3ContentHeadersAcrossCopyAndVersion(t *testing.T) {
+	cfg := itConfig(t)
+	owner := mkUser(t, itName("versionowner"), "password-123", true, false)
+	bucket := itBucket(t, owner.ID, func(b *models.Bucket) { b.Versioning = models.VersioningEnabled })
+	router := itS3Router(cfg, owner)
+	path := "/" + bucket.Name + "/source.txt"
+	do := func(method, target, body string, headers map[string]string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		for name, value := range headers {
+			req.Header.Set(name, value)
+		}
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		return w
+	}
+	old := map[string]string{"Content-Disposition": `attachment; filename="old.txt"`, "Cache-Control": "private, max-age=60"}
+	first := do(http.MethodPut, path, "old", old)
+	if first.Code != http.StatusOK || first.Header().Get("x-amz-version-id") == "" {
+		t.Fatalf("versioned source PUT: %d %s", first.Code, first.Body.String())
+	}
+	if w := do(http.MethodPut, path, "new", map[string]string{"Content-Disposition": `attachment; filename="new.txt"`, "Cache-Control": "no-cache"}); w.Code != http.StatusOK {
+		t.Fatalf("versioned overwrite: %d %s", w.Code, w.Body.String())
+	}
+	archivedPath := path + "?versionId=" + first.Header().Get("x-amz-version-id")
+	for _, method := range []string{http.MethodHead, http.MethodGet} {
+		w := do(method, archivedPath, "", nil)
+		if w.Code != http.StatusOK || w.Header().Get("Content-Disposition") != old["Content-Disposition"] ||
+			w.Header().Get("Cache-Control") != old["Cache-Control"] {
+			t.Errorf("archived %s headers: status=%d disposition=%q cache=%q", method,
+				w.Code, w.Header().Get("Content-Disposition"), w.Header().Get("Cache-Control"))
+		}
+	}
+	copyPath := "/" + bucket.Name + "/copy.txt"
+	if w := do(http.MethodPut, copyPath, "", map[string]string{"x-amz-copy-source": path}); w.Code != http.StatusOK {
+		t.Fatalf("CopyObject COPY: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(http.MethodHead, copyPath, "", nil); w.Header().Get("Content-Disposition") != `attachment; filename="new.txt"` ||
+		w.Header().Get("Cache-Control") != "no-cache" {
+		t.Errorf("copy lost content headers: disposition=%q cache=%q", w.Header().Get("Content-Disposition"), w.Header().Get("Cache-Control"))
+	}
+	replaced := map[string]string{"x-amz-copy-source": path, "x-amz-metadata-directive": "REPLACE",
+		"Content-Disposition": `attachment; filename="replaced.txt"`, "Cache-Control": "max-age=0"}
+	if w := do(http.MethodPut, copyPath, "", replaced); w.Code != http.StatusOK {
+		t.Fatalf("CopyObject REPLACE: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(http.MethodHead, copyPath, "", nil); w.Header().Get("Content-Disposition") != replaced["Content-Disposition"] ||
+		w.Header().Get("Cache-Control") != replaced["Cache-Control"] {
+		t.Errorf("copy replacement headers: disposition=%q cache=%q", w.Header().Get("Content-Disposition"), w.Header().Get("Cache-Control"))
+	}
+}
+
+func TestIntegrationS3ConcurrentCreateIfAbsent(t *testing.T) {
+	cfg := itConfig(t)
+	owner := mkUser(t, itName("raceowner"), "password-123", true, false)
+	bucket := itBucket(t, owner.ID, nil)
+	router := itS3Router(cfg, owner)
+	path := "/" + bucket.Name + "/same-id.md"
+	var wg sync.WaitGroup
+	statuses := make(chan int, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodPut, path, strings.NewReader(fmt.Sprint(i)))
+			req.Header.Set("If-None-Match", "*")
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+			statuses <- w.Code
+		}(i)
+	}
+	wg.Wait()
+	close(statuses)
+	created, rejected := 0, 0
+	for code := range statuses {
+		switch code {
+		case http.StatusOK:
+			created++
+		case http.StatusPreconditionFailed:
+			rejected++
+		default:
+			t.Errorf("concurrent create status %d", code)
+		}
+	}
+	if created != 1 || rejected != 7 {
+		t.Errorf("concurrent create: %d accepted, %d rejected; want 1 and 7", created, rejected)
+	}
+}
+
+func TestIntegrationS3MultipartContentHeaders(t *testing.T) {
+	cfg := itConfig(t)
+	owner := mkUser(t, itName("multiowner"), "password-123", true, false)
+	bucket := itBucket(t, owner.ID, nil)
+	router := itS3Router(cfg, owner)
+	path := "/" + bucket.Name + "/multi.txt"
+	do := func(method, target, body string, headers map[string]string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		for name, value := range headers {
+			req.Header.Set(name, value)
+		}
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		return w
+	}
+	headers := map[string]string{"Content-Disposition": `attachment; filename="multi.txt"`, "Cache-Control": "max-age=30"}
+	started := do(http.MethodPost, path+"?uploads", "", headers)
+	if started.Code != http.StatusOK {
+		t.Fatalf("init multipart: %d %s", started.Code, started.Body.String())
+	}
+	var init InitiateMultipartUploadResult
+	if err := xml.Unmarshal(started.Body.Bytes(), &init); err != nil || init.UploadId == "" {
+		t.Fatalf("init multipart result: %+v %v", init, err)
+	}
+	uploadPath := path + "?partNumber=1&uploadId=" + init.UploadId
+	part := do(http.MethodPut, uploadPath, "multipart bytes", nil)
+	if part.Code != http.StatusOK || part.Header().Get("ETag") == "" {
+		t.Fatalf("upload part: %d %s", part.Code, part.Body.String())
+	}
+	completeBody := `<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>` + part.Header().Get("ETag") +
+		`</ETag></Part></CompleteMultipartUpload>`
+	completed := do(http.MethodPost, path+"?uploadId="+init.UploadId, completeBody, nil)
+	if completed.Code != http.StatusOK {
+		t.Fatalf("complete multipart: %d %s", completed.Code, completed.Body.String())
+	}
+	for _, method := range []string{http.MethodHead, http.MethodGet} {
+		w := do(method, path, "", nil)
+		if w.Code != http.StatusOK || w.Header().Get("Content-Disposition") != headers["Content-Disposition"] ||
+			w.Header().Get("Cache-Control") != headers["Cache-Control"] {
+			t.Errorf("multipart %s headers: status=%d disposition=%q cache=%q", method,
+				w.Code, w.Header().Get("Content-Disposition"), w.Header().Get("Cache-Control"))
+		}
+	}
+}
+
+func TestIntegrationS3CopySourceConditions(t *testing.T) {
+	cfg := itConfig(t)
+	owner := mkUser(t, itName("copycond"), "password-123", true, false)
+	bucket := itBucket(t, owner.ID, nil)
+	router := itS3Router(cfg, owner)
+	source := "/" + bucket.Name + "/source"
+	dest := "/" + bucket.Name + "/dest"
+	s3PutString(t, router, bucket.Name, "source", "source-bytes")
+	s3PutString(t, router, bucket.Name, "dest", "untouched")
+	sourceHead := itDo(router, http.MethodHead, source, nil)
+	if sourceHead.Code != http.StatusOK || sourceHead.Header().Get("ETag") == "" {
+		t.Fatalf("source HEAD: %d", sourceHead.Code)
+	}
+	etag := sourceHead.Header().Get("ETag")
+	copyWith := func(extra map[string]string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPut, dest, nil)
+		req.Header.Set("x-amz-copy-source", source)
+		for name, value := range extra {
+			req.Header.Set(name, value)
+		}
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		return w
+	}
+	past := time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat)
+	future := time.Now().Add(time.Hour).UTC().Format(http.TimeFormat)
+	for name, headers := range map[string]map[string]string{
+		"wrong ETag":        {"x-amz-copy-source-if-match": `"different"`},
+		"matching none":     {"x-amz-copy-source-if-none-match": etag},
+		"older than cutoff": {"x-amz-copy-source-if-unmodified-since": past},
+		"newer than cutoff": {"x-amz-copy-source-if-modified-since": future},
+	} {
+		w := copyWith(headers)
+		if w.Code != http.StatusPreconditionFailed {
+			t.Errorf("%s: status %d, want 412", name, w.Code)
+		}
+		if code, body := s3GetString(t, router, bucket.Name, "dest"); code != http.StatusOK || body != "untouched" {
+			t.Errorf("%s changed destination: status=%d body=%q", name, code, body)
+		}
+	}
+	for name, headers := range map[string]map[string]string{
+		"matching ETag":        {"x-amz-copy-source-if-match": etag},
+		"different none":       {"x-amz-copy-source-if-none-match": `"different"`},
+		"unmodified at future": {"x-amz-copy-source-if-unmodified-since": future},
+		"modified after past":  {"x-amz-copy-source-if-modified-since": past},
+		"match wins over old unmodified": {"x-amz-copy-source-if-match": etag,
+			"x-amz-copy-source-if-unmodified-since": past},
+	} {
+		w := copyWith(headers)
+		if w.Code != http.StatusOK {
+			t.Errorf("%s: status %d, want 200", name, w.Code)
+		}
 	}
 }
 

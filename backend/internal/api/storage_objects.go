@@ -1,8 +1,15 @@
 package api
 
 import (
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"database/sql/driver"
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,14 +28,10 @@ import (
 // Every mutation of an object's current state (write, overwrite, delete, move)
 // is a multi-step sequence — archive the current version, write the bytes,
 // update the metadata row — that must not interleave with another mutation of
-// the same key: two racing overwrites of a versioned key would otherwise both
-// archive the same "current" version id (destroying one version's bytes), and
-// racing unversioned writes could leave a metadata row describing different
-// bytes than the ones on disk. lockObjectKeys serializes those sequences per
-// (bucket, key) within this process. Handlers in other files that mutate
-// objects (restore, version delete, lifecycle, replication) should take the
-// same lock. Storage-level archive also refuses to overwrite an existing
-// archived version, which covers multi-process deployments.
+// the same key. Production mutators use lockObjectKeysChecked (or its bounded
+// try variant), which combines this process's key semaphore with a PostgreSQL
+// session advisory lock shared by all replicas. The local-only helpers below
+// exist for unit tests of key ordering and must not guard production writes.
 
 // Each key's lock is a 1-slot channel semaphore (rather than a sync.Mutex) so
 // acquisition can be abandoned: tryLockObjectKeys gives up after a timeout,
@@ -92,9 +95,9 @@ func unlockKeyEntries(ids []string, entries []*keyLockEntry) {
 	}
 }
 
-// lockObjectKeys locks the given keys of one bucket and returns the unlock
-// function. Keys are de-duplicated and locked in sorted order so concurrent
-// multi-key lockers (moves) cannot deadlock. The returned func is idempotent.
+// lockObjectKeys is the local-only key-ordering primitive for unit tests.
+// Production writers must use lockObjectKeysChecked so they serialize across
+// replicas. Keys are de-duplicated and ordered; unlock is idempotent.
 func lockObjectKeys(bucketName string, keys ...string) func() {
 	ids := objectLockIDs(bucketName, keys)
 	entries := make([]*keyLockEntry, len(ids))
@@ -105,6 +108,217 @@ func lockObjectKeys(bucketName string, keys ...string) func() {
 	}
 	var once sync.Once
 	return func() { once.Do(func() { unlockKeyEntries(ids, entries) }) }
+}
+
+// advisoryKey is namespaced separately from the migration advisory lock.
+// Hashing the complete bucket/key pair keeps arbitrary S3 keys out of SQL and
+// gives every replica the same lock order and identity.
+func advisoryKey(id string) int64 {
+	sum := sha256.Sum256([]byte("bkt/object-write/v1\x00" + id))
+	return int64(binary.BigEndian.Uint64(sum[:8]))
+}
+
+func advisoryBucketKey(name string) int64 {
+	sum := sha256.Sum256([]byte("bkt/bucket-write/v1\x00" + name))
+	return int64(binary.BigEndian.Uint64(sum[:8]))
+}
+
+type advisoryHold struct {
+	key    int64
+	shared bool
+}
+
+func objectLockBuckets(ids []string) []string {
+	seen := make(map[string]bool, len(ids))
+	buckets := make([]string, 0, len(ids))
+	for _, id := range ids {
+		name, _, _ := strings.Cut(id, "\x00")
+		if !seen[name] {
+			seen[name] = true
+			buckets = append(buckets, name)
+		}
+	}
+	sort.Strings(buckets)
+	return buckets
+}
+
+func acquireAdvisory(ctx context.Context, conn *sql.Conn, key int64, shared bool) error {
+	query := "SELECT pg_advisory_lock($1)"
+	if shared {
+		query = "SELECT pg_advisory_lock_shared($1)"
+	}
+	_, err := conn.ExecContext(ctx, query, key)
+	return err
+}
+
+func discardAdvisoryConn(conn *sql.Conn) {
+	// A canceled lock query may have acquired its lock on the server just as
+	// the client canceled. Discarding the session releases any unknown hold.
+	_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	_ = conn.Close()
+}
+
+// lockObjectIDsChecked combines the local lock with PostgreSQL session locks.
+// A session lock remains held across the filesystem write and DB commit; a
+// transaction-scoped lock would end before the streamed body was committed.
+// Failure to acquire the shared lock is returned to callers, never treated
+// as permission to mutate an unlocked object.
+func lockObjectIDsChecked(ctx context.Context, ids []string) (func(), error) {
+	entries := make([]*keyLockEntry, 0, len(ids))
+	for _, id := range ids {
+		e := acquireKeyLockEntry(id)
+		if err := ctx.Err(); err != nil {
+			releaseKeyLockEntry(id, e)
+			unlockKeyEntries(ids[:len(entries)], entries)
+			return nil, fmt.Errorf("object write lock: %w", err)
+		}
+		select {
+		case e.sem <- struct{}{}:
+			entries = append(entries, e)
+		case <-ctx.Done():
+			releaseKeyLockEntry(id, e)
+			unlockKeyEntries(ids[:len(entries)], entries)
+			return nil, fmt.Errorf("object write lock: %w", ctx.Err())
+		}
+	}
+	localUnlock := func() { unlockKeyEntries(ids, entries) }
+	if database.AdvisoryDB == nil {
+		localUnlock()
+		return nil, fmt.Errorf("object write lock: advisory database not initialized")
+	}
+	conn, err := database.AdvisoryDB.Conn(ctx)
+	if err != nil {
+		localUnlock()
+		return nil, fmt.Errorf("object write lock: database connection: %w", err)
+	}
+	held := make([]advisoryHold, 0, len(ids)+2)
+	var acquireErr error
+	for _, bucket := range objectLockBuckets(ids) {
+		key := advisoryBucketKey(bucket)
+		if acquireErr = acquireAdvisory(ctx, conn, key, true); acquireErr != nil {
+			break
+		}
+		held = append(held, advisoryHold{key: key, shared: true})
+	}
+	for _, id := range ids {
+		if acquireErr != nil {
+			break
+		}
+		key := advisoryKey(id)
+		if acquireErr = acquireAdvisory(ctx, conn, key, false); acquireErr != nil {
+			break
+		}
+		held = append(held, advisoryHold{key: key})
+	}
+	if acquireErr != nil {
+		// The failed statement may have acquired a lock before cancellation.
+		// Close this session instead of returning it to the pool.
+		discardAdvisoryConn(conn)
+		localUnlock()
+		return nil, fmt.Errorf("object write lock: acquire: %w", acquireErr)
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			unlockAdvisory(conn, held)
+			_ = conn.Close()
+			localUnlock()
+		})
+	}, nil
+}
+
+func unlockAdvisory(conn *sql.Conn, holds []advisoryHold) {
+	// Request cancellation must not skip cleanup, but a disconnected or
+	// stalled database must not pin the local semaphore and advisory pool
+	// connection indefinitely either. One deadline covers every held lock.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	for i := len(holds) - 1; i >= 0; i-- {
+		query := "SELECT pg_advisory_unlock($1)"
+		if holds[i].shared {
+			query = "SELECT pg_advisory_unlock_shared($1)"
+		}
+		var released bool
+		if err := conn.QueryRowContext(ctx, query, holds[i].key).Scan(&released); err != nil || !released {
+			logger.Warn("Failed to release object write advisory lock", map[string]interface{}{"error": fmt.Sprintf("err=%v released=%v", err, released)})
+			// A session with an unknown hold must never return to the pool.
+			discardAdvisoryConn(conn)
+			return
+		}
+	}
+}
+
+func validateLockedBuckets(ctx context.Context, buckets ...*models.Bucket) error {
+	for _, bucket := range buckets {
+		var fresh models.Bucket
+		if err := database.DB.WithContext(ctx).Where("id = ? AND name = ?", bucket.ID, bucket.Name).First(&fresh).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("bucket %q was deleted or replaced while waiting for its lock", bucket.Name)
+			}
+			return err
+		}
+		// The caller loaded its bucket before waiting for the shared lock.
+		// Exclusive settings/versioning changes can commit during that wait;
+		// every retention, quota, and versioning decision must use this fresh row.
+		*bucket = fresh
+	}
+	return nil
+}
+
+// refreshLockedBucket discards configuration read before an advisory wait.
+// Callers must already hold the exclusive bucket lock before making decisions
+// about retention, versioning, storage routing, or deletion.
+func refreshLockedBucket(ctx context.Context, bucket *models.Bucket) error {
+	return database.DB.WithContext(ctx).Where("id = ? AND name = ?", bucket.ID, bucket.Name).First(bucket).Error
+}
+
+func lockObjectKeysChecked(ctx context.Context, bucket *models.Bucket, keys ...string) (func(), error) {
+	unlock, err := lockObjectIDsChecked(ctx, objectLockIDs(bucket.Name, keys))
+	if err != nil {
+		return nil, err
+	}
+	if err := validateLockedBuckets(ctx, bucket); err != nil {
+		unlock()
+		return nil, err
+	}
+	return unlock, nil
+}
+
+func tryLockObjectKeysChecked(bucket *models.Bucket, timeout time.Duration, keys ...string) (func(), bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	unlock, err := lockObjectKeysChecked(ctx, bucket, keys...)
+	if err != nil {
+		return func() {}, false
+	}
+	return unlock, true
+}
+
+func lockBucketExclusive(ctx context.Context, bucket *models.Bucket) (func(), error) {
+	if database.AdvisoryDB == nil {
+		return nil, fmt.Errorf("bucket deletion lock: advisory database not initialized")
+	}
+	conn, err := database.AdvisoryDB.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("bucket deletion lock: connection: %w", err)
+	}
+	key := advisoryBucketKey(bucket.Name)
+	if err := acquireAdvisory(ctx, conn, key, false); err != nil {
+		discardAdvisoryConn(conn)
+		return nil, fmt.Errorf("bucket deletion lock: acquire: %w", err)
+	}
+	var once sync.Once
+	unlock := func() {
+		once.Do(func() {
+			unlockAdvisory(conn, []advisoryHold{{key: key}})
+			_ = conn.Close()
+		})
+	}
+	if err := validateLockedBuckets(ctx, bucket); err != nil {
+		unlock()
+		return nil, err
+	}
+	return unlock, nil
 }
 
 // tryLockObjectKeys is lockObjectKeys with a deadline: it acquires all keys in
@@ -163,7 +377,7 @@ func upsertCurrentObject(obj *models.Object) error {
 		if err := tx.Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "bucket_id"}, {Name: "key"}},
 			DoUpdates: clause.AssignmentColumns([]string{
-				"size", "content_type", "e_tag", "sha256", "storage_path",
+				"size", "content_type", "content_disposition", "cache_control", "e_tag", "sha256", "storage_path",
 				"metadata", "tags", "version_id", "updated_at",
 			}),
 		}).Create(obj).Error; err != nil {
@@ -239,18 +453,20 @@ func moveObjectWithinBucket(backend storage.StorageBackend, bucket *models.Bucke
 
 	if bucket.Versioning == models.VersioningEnabled {
 		dst := models.Object{
-			BucketID:    bucket.ID,
-			Key:         dstKey,
-			Size:        src.Size,
-			ContentType: src.ContentType,
-			ETag:        src.ETag,
-			SHA256:      src.SHA256,
-			StoragePath: dstKey,
-			Metadata:    src.Metadata,
-			Tags:        src.Tags,
-			VersionID:   uuid.New().String(),
-			CreatedAt:   now,
-			UpdatedAt:   now,
+			BucketID:           bucket.ID,
+			Key:                dstKey,
+			Size:               src.Size,
+			ContentType:        src.ContentType,
+			ContentDisposition: src.ContentDisposition,
+			CacheControl:       src.CacheControl,
+			ETag:               src.ETag,
+			SHA256:             src.SHA256,
+			StoragePath:        dstKey,
+			Metadata:           src.Metadata,
+			Tags:               src.Tags,
+			VersionID:          uuid.New().String(),
+			CreatedAt:          now,
+			UpdatedAt:          now,
 		}
 		if err := database.DB.Create(&dst).Error; err != nil {
 			_ = backend.DeleteObject(bucket.Name, dstKey)

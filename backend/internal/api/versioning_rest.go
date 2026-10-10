@@ -152,7 +152,11 @@ func (h *BucketHandler) RestoreObjectVersion(c *gin.Context) {
 
 	// Serialize with every other mutation of this key (archive + write +
 	// commit must not interleave). The versioning helpers do not lock.
-	unlock := lockObjectKeys(bucket.Name, req.Key)
+	unlock, lockErr := lockObjectKeysChecked(c.Request.Context(), &bucket, req.Key)
+	if lockErr != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to lock object"})
+		return
+	}
 	defer unlock()
 
 	var ver models.ObjectVersion
@@ -204,7 +208,8 @@ func (h *BucketHandler) RestoreObjectVersion(c *gin.Context) {
 
 	obj := models.Object{
 		BucketID: bucket.ID, Key: req.Key, Size: ver.Size,
-		ContentType: ver.ContentType, ETag: ver.ETag, StoragePath: req.Key,
+		ContentType: ver.ContentType, ContentDisposition: ver.ContentDisposition,
+		CacheControl: ver.CacheControl, ETag: ver.ETag, StoragePath: req.Key,
 		Metadata: ver.Metadata, Tags: ver.Tags, VersionID: newCurrentVersionID(&bucket),
 	}
 	if err := upsertCurrentObject(&obj); err != nil {
@@ -242,7 +247,11 @@ func (h *BucketHandler) DeleteObjectVersionREST(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to initialize storage"})
 		return
 	}
-	unlock := lockObjectKeys(bucket.Name, key)
+	unlock, lockErr := lockObjectKeysChecked(c.Request.Context(), bucket, key)
+	if lockErr != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to lock object"})
+		return
+	}
 	defer unlock()
 	if err := deleteSpecificVersion(backend, bucket, key, versionID); err != nil {
 		switch {
@@ -292,6 +301,16 @@ func (h *BucketHandler) SetBucketVersioning(c *gin.Context) {
 	}
 	if !authorizeBucketConfig(h.policyService, userUUID, bucket.Name, services.ActionPutBucketVersioning) {
 		c.JSON(http.StatusForbidden, models.ErrorResponse{Error: "Permission denied", Message: "Changing versioning requires admin or " + services.ActionPutBucketVersioning + " on the bucket"})
+		return
+	}
+	unlockBucket, lockErr := lockBucketExclusive(c.Request.Context(), &bucket)
+	if lockErr != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to lock bucket", Message: lockErr.Error()})
+		return
+	}
+	defer unlockBucket()
+	if err := refreshLockedBucket(c.Request.Context(), &bucket); err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to reload bucket", Message: err.Error()})
 		return
 	}
 	if req.Versioning == models.VersioningSuspended && bucket.RetentionDays > 0 {
